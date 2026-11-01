@@ -7,9 +7,10 @@ demande au service le modèle et la réflexion, puis lance `codex` avec
 `-m <modèle> -c model_reasoning_effort="<effort>"`. Chez Codex, changer de
 modèle en cours de fil réécrit le cache : seul le lancement est gratuit, donc
 rien n'est demandé à la reprise (`resume`, `fork`), sans message, ou quand
-l'utilisateur fixe lui-même le réglage (`-m`, `-c model=…`, `-p`). Toute
-erreur, lenteur (6 s) ou clé refusée lance `codex` tel quel, sans rien
-afficher ; une décision aboutie s'affiche : « tokfit : <modèle> · <effort> ».
+l'utilisateur fixe lui-même le réglage (`-m`, `-c model=…`, `-p`). Une balise
+de réflexion dans le message (`[low]`…`[xhigh]`, comme pour Claude Code) passe
+avant le service et s'applique même s'il est en panne. Toute erreur, lenteur
+(6 s) ou clé refusée lance `codex` sans autre réglage, sans rien afficher ; une décision aboutie s'affiche : « tokfit : <modèle> · <effort> ».
 
 Seuls le message de l'utilisateur et des faits partent vers /v1/route, jamais
 une réponse d'un modèle d'OpenAI. À la fin, un processus détaché relève les
@@ -51,6 +52,10 @@ USAGE_TIMEOUT_S = 10.0
 BATCH_MAX = 50
 # Paliers que le service connaît (EFFORTS de service/fields.py) ; Codex en a d'autres (ultra).
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# Balises de réflexion dans le message ([low]…[xhigh]), comme celles du plugin
+# Claude Code : paliers que Codex et le service connaissent tous deux.
+TAG_EFFORTS = ("low", "medium", "high", "xhigh")
+TAG = re.compile(r"\[(\w+)\]")
 HEAD, TAIL = 3000, 1000
 KEY = re.compile(r"ek_[A-Za-z0-9_-]{20,200}")
 ADDRESS = re.compile(r"(https://[^\s/?#@]+|http://(127\.0\.0\.1|localhost)(:\d{1,5})?)(/[^\s?#]*)?")
@@ -85,6 +90,8 @@ class Launch(NamedTuple):
     # Où insérer -m / -c : en tête, ou juste après `exec`.
     insert_at: int
     cwd: Optional[str]
+    # Réflexion choisie par une balise du message, appliquée même service en panne.
+    tag_effort: Optional[str] = None
 
 
 def parse(args: List[str]) -> Launch:
@@ -128,7 +135,15 @@ def parse(args: List[str]) -> Launch:
         elif name in ("--oss", "--local-provider"):
             local = True
     routable = mode in ("interactive", "exec") and not local and prompt not in (None, "", "-")
-    return Launch(mode, prompt if routable else None, keep_model, keep_effort, images, insert_at, cwd)
+    tag_effort = None if keep_effort or not routable else tagged_effort(prompt or "")
+    return Launch(mode, prompt if routable else None, keep_model, keep_effort or tag_effort is not None, images,
+                  insert_at, cwd, tag_effort)
+
+
+def tagged_effort(prompt: str) -> Optional[str]:
+    """Dernière balise de réflexion du message ([high]…), ou None."""
+    words = [match.group(1).lower() for match in TAG.finditer(prompt)]
+    return next((word for word in reversed(words) if word in TAG_EFFORTS), None)
 
 
 def codex_setting(text: str, profile_name: str = "") -> Tuple[str, str]:
@@ -258,19 +273,20 @@ def routed(args: List[str], launch: Launch, model: Optional[str], effort: Option
 def decide(args: List[str], env: Dict[str, str]) -> List[str]:
     """Arguments de `codex` : avec le réglage du service, ou inchangés sur toute panne."""
     launch = parse(args)
+    unchanged = routed(args, launch, None, launch.tag_effort) if launch.tag_effort else args
     to = link(env)
     if launch.prompt is None or to is None or (launch.keep_model and launch.keep_effort):
-        return args
+        return unchanged
     try:
         model, effort = codex_setting((codex_home(env) / "config.toml").read_text(encoding="utf-8"))
     except OSError:
         model, effort = "", ""
-    reply = post(to, "/v1/route", facts(launch, model, effort), TIMEOUT_S)
+    reply = post(to, "/v1/route", facts(launch, model, launch.tag_effort or effort), TIMEOUT_S)
     choice = decision(reply[1]) if reply is not None and reply[0] == 200 else None
     if choice is None:
-        return args
+        return unchanged
     chosen_model = None if launch.keep_model else choice[0]
-    chosen_effort = None if launch.keep_effort else choice[1]
+    chosen_effort = launch.tag_effort or (None if launch.keep_effort else choice[1])
     shown = " · ".join(part for part in (chosen_model or model, chosen_effort or effort) if part)
     if shown:
         print(f"{NAME} : {shown}", file=sys.stderr)

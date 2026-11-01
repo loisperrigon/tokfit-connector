@@ -38,8 +38,9 @@ La clé est écrite dans `~/.config/tokfit/config.json` (mode 600) ; la variable
 ## Balises
 
 Une balise dans ton message reste prioritaire sur le service : `[opus]`,
-`[low]`, `ultrathink`… Les options de `codex` (`-m`, `-c`, `-p`) comptent de
-même.
+`[low]`, `ultrathink`… Pour Codex : `[low]`, `[medium]`, `[high]`, `[xhigh]`
+dans le message, et les options de `codex` (`-m`, `-c`, `-p`), qui passent
+avant la balise.
 
 ## Développement
 
