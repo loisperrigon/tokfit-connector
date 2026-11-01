@@ -127,9 +127,22 @@ describe('décision appliquée', () => {
     const w = world(on, { messages: [user('x')], route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } }) })
     await step($, 0)
     expect(w.shown).toHaveLength(1)
-    expect(w.shown[0]).toContain('sonnet · low')
-    expect(w.shown[0]).not.toMatch(/raison|probabilit|%/i)
+    // Desktop met déjà la pastille « tokfit » devant la ligne : le texte ne la répète pas.
+    expect(w.shown[0]).toBe('ui.status Sonnet · réflexion basse')
+    expect(w.shown[0]).not.toMatch(/tokfit|raison|probabilit|%/i)
   })
+
+  const lines: [string, string, string][] = [
+    ['haiku', 'medium', 'Haiku · réflexion moyenne'], ['opus', 'high', 'Opus · réflexion haute'],
+    ['opus', 'xhigh', 'Opus · réflexion très haute'], ['sonnet', 'max', 'Sonnet · réflexion maximale'],
+  ]
+  for (const [model, effort, text] of lines) {
+    test(`ligne d’état en clair : ${model} ${effort}`, async ($, on) => {
+      const w = world(on, { messages: [user('x')], route: () => ({ status: 200, body: { model, effort } }) })
+      await step($, 0)
+      expect(w.shown).toEqual([`ui.status ${text}`])
+    })
+  }
 })
 
 describe('repli sur le réglage en cours', () => {

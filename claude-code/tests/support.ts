@@ -135,7 +135,7 @@ export function world(on: On, options: Options = {}): World {
 
 // Ce qui s'est affiché d'autre que la ligne d'état d'une décision aboutie.
 export function messages(w: World): string[] {
-  return w.shown.filter(line => !line.startsWith('ui.status tokfit : '))
+  return w.shown.filter(line => !line.startsWith('ui.status '))
 }
 
 export function user(text: string): SessionMessage {

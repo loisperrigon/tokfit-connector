@@ -16,7 +16,7 @@
 // Open Codex, compteurs remontés par lots (usage.ts), sous-agents tous routés. Le texte des messages ne part que vers /v1/route : ni
 // stocké, ni journalisé, ni affiché (tests/witness.test.ts).
 import type { AgentSpawnInput, EngineInterface, PluginOptions, Register, SessionMessage, TurnStepInput, TurnStepResult } from 'claude-code'
-import { EFFORTS, NAME, TIMEOUT_MS, link, post } from './service'
+import { EFFORTS, TIMEOUT_MS, link, post } from './service'
 import type { Link } from './service'
 import { add, flush, queue, stepOf } from './usage'
 import type { Queue } from './usage'
@@ -55,6 +55,18 @@ function forced(text: string): Tags {
 
 function family(model: string): string {
   return MODELS.find(name => model.toLowerCase().includes(name)) ?? model
+}
+
+// Ligne d'état en clair : « Haiku · réflexion haute ». Pas de « tokfit » dans le
+// texte : l'interface affiche déjà le nom du plugin devant.
+const EFFORT_WORDS: Record<string, string> = {
+  low: 'basse', medium: 'moyenne', high: 'haute', xhigh: 'très haute', max: 'maximale',
+}
+
+function statusLine(model: string, effort: string | undefined): string {
+  const name = family(model)
+  const shown = MODELS.includes(name) ? name.charAt(0).toUpperCase() + name.slice(1) : name
+  return effort ? `${shown} · réflexion ${EFFORT_WORDS[effort] ?? effort}` : shown
 }
 
 // Modèle que le service peut rendre : un alias ou un identifiant complet
@@ -362,7 +374,7 @@ async function decide($: EngineInterface, s: State, e: TurnStepInput): Promise<C
   }
   const choice: Choice = { ...answer, ...own }
   const shownEffort = choice.effort ?? effort
-  $.ui.status(`${NAME} : ${family(choice.model ?? model)}${shownEffort ? ` · ${shownEffort}` : ''}`)
+  $.ui.status(statusLine(choice.model ?? model, shownEffort))
   return choice
 }
 
