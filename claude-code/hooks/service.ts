@@ -23,9 +23,9 @@ export const USAGE_TIMEOUT_MS = 10_000
 // Paliers de réflexion que le service connaît (EFFORTS de service/fields.py).
 export const EFFORTS: readonly string[] = ['low', 'medium', 'high', 'xhigh', 'max']
 
-// Adresse officielle du service : à poser à la publication (domaine pas encore
-// choisi). D'ici là, l'adresse vient de `service_url` ou du fichier.
-export const DEFAULT_URL = ''
+// Adresse officielle du service. Sous-domaine provisoire : à remplacer par le
+// domaine définitif de tokfit à la fin du projet.
+export const DEFAULT_URL = 'https://tokfit.dodoia.re'
 
 export type Link = { url: string; key: string }
 

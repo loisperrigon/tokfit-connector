@@ -4,6 +4,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { KEY, SESSION, URL, assistant, config, step, user, world } from './support'
 import type { Reply } from './support'
+import { DEFAULT_URL } from '../hooks/service'
 
 const OTHER = 'ek_' + 'z'.repeat(43)
 
@@ -40,10 +41,16 @@ describe('configuration', () => {
     expect(w.routes()[0]?.headers).toMatchObject({ authorization: `Bearer ${OTHER}` })
   })
 
-  test('clé du plugin sans adresse nulle part : rien ne part', { options: { api_key: KEY } }, async ($, on) => {
+  test('clé du plugin sans adresse nulle part : adresse officielle', { options: { api_key: KEY } }, async ($, on) => {
     const w = world(on, { config: null, messages: [user('x')] })
     await step($, 0)
-    expect(w.sent).toEqual([])
+    expect(w.sent.map(request => request.url)).toEqual([`${DEFAULT_URL}/v1/route`])
+  })
+
+  test('fichier sans adresse : adresse officielle', async ($, on) => {
+    const w = world(on, { config: JSON.stringify({ key: KEY }), messages: [user('x')] })
+    await step($, 0)
+    expect(w.sent.map(request => request.url)).toEqual([`${DEFAULT_URL}/v1/route`])
   })
 
   test('TOKFIT_CONFIG désigne un autre fichier', async ($, on) => {
@@ -55,7 +62,6 @@ describe('configuration', () => {
   const refused: [string, string][] = [
     ['JSON illisible', '{'], ['pas un objet', '[]'], ['clé mal formée', config(URL, 'pas-une-cle')],
     ['adresse en clair hors machine', config('http://service.test', KEY)], ['autre protocole', config('ftp://x', KEY)],
-    ['adresse absente', JSON.stringify({ key: KEY })],
   ]
   for (const [name, text] of refused) {
     test(`${name} : rien ne part, rien d’affiché`, async ($, on) => {

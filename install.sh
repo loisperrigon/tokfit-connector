@@ -26,9 +26,9 @@
 set -eu
 
 NAME=tokfit
-# Adresse du service une fois en ligne : à poser à la publication (domaine
-# pas encore acheté). D'ici là, TOKFIT_URL est obligatoire.
-DEFAULT_URL=""
+# Adresse officielle du service. Sous-domaine provisoire : à remplacer par le
+# domaine définitif de tokfit à la fin du projet.
+DEFAULT_URL="https://tokfit.dodoia.re"
 
 fail() {
   printf '%s : %s\n' "$NAME" "$1" >&2
