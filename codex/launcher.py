@@ -254,7 +254,13 @@ def post(to: Link, path: str, body: object, timeout: float) -> Reply:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 result[0] = (response.status, response.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as error:
-            result[0] = (error.code, "")
+            # Le corps d'une erreur porte le message de fin d'essai (402) : lu, borné.
+            try:
+                body = error.read(4096).decode("utf-8", "replace")
+            except OSError:
+                # Corps illisible : le code seul suffit, le lanceur garde le réglage.
+                body = ""
+            result[0] = (error.code, body)
         except (OSError, ValueError):
             # Injoignable ou réponse cassée : l'appelant garde le réglage.
             result[0] = None
@@ -270,6 +276,21 @@ def routed(args: List[str], launch: Launch, model: Optional[str], effort: Option
     return args[:launch.insert_at] + added + args[launch.insert_at:]
 
 
+CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+MESSAGE_MAX = 400
+
+
+def trial_end(text: str) -> Optional[str]:
+    """Le message de fin d'essai du service (402), nettoyé et borné ; None si la réponse n'en est pas un."""
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict) or parsed.get("error") != "trial_ended" or not isinstance(parsed.get("message"), str):
+        return None
+    return CONTROL.sub("", parsed["message"]).strip()[:MESSAGE_MAX] or None
+
+
 def decide(args: List[str], env: Dict[str, str]) -> List[str]:
     """Arguments de `codex` : avec le réglage du service, ou inchangés sur toute panne."""
     launch = parse(args)
@@ -282,6 +303,11 @@ def decide(args: List[str], env: Dict[str, str]) -> List[str]:
     except OSError:
         model, effort = "", ""
     reply = post(to, "/v1/route", facts(launch, model, launch.tag_effort or effort), TIMEOUT_S)
+    if reply is not None and reply[0] == 402:
+        ended = trial_end(reply[1])
+        if ended:
+            print(ended, file=sys.stderr)
+        return unchanged
     choice = decision(reply[1]) if reply is not None and reply[0] == 200 else None
     if choice is None:
         return unchanged

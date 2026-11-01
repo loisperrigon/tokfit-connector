@@ -2,7 +2,7 @@
 // { model, effort } et garde le réglage en cours sur toute erreur, lenteur ou
 // clé refusée, sans rien montrer.
 import { describe, expect, test } from 'claude-code/testing'
-import { KEY, SESSION, URL, assistant, config, step, user, world } from './support'
+import { KEY, SESSION, URL, assistant, config, spawn, step, user, world } from './support'
 import type { Reply } from './support'
 import { DEFAULT_URL } from '../hooks/service'
 
@@ -187,6 +187,70 @@ describe('repli sur le réglage en cours', () => {
     await pending
     expect(w.steps[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high' })
     expect(w.shown).toEqual([])
+  })
+})
+
+describe('fin de l’essai', () => {
+  const MESSAGE = 'Ton essai tokfit de 7 jours est terminé. Il t’a fait économiser environ 12,40 $ (34 %, mesuré, en équivalent API) sur ton abonnement. Pour continuer : https://tokfit.dodoia.re'
+  const ended: Reply = { status: 402, body: { error: 'trial_ended', message: MESSAGE, url: 'https://tokfit.dodoia.re' } }
+
+  test('le message est montré une fois, le réglage de l’utilisateur reste', async ($, on) => {
+    const w = world(on, { messages: [user('x')], route: () => ended })
+    await step($, 0, { turnId: 't1' })
+    expect(w.shown).toEqual([`ui.toast ${MESSAGE}`, 'ui.status Essai terminé · https://tokfit.dodoia.re'])
+    expect(w.steps[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high' })
+  })
+
+  test('ensuite plus aucune demande au service, la ligne d’état reste, pas de second message', async ($, on) => {
+    const w = world(on, { messages: [user('x')], route: () => ended })
+    await step($, 0, { turnId: 't1' })
+    w.shown.length = 0
+    await step($, 0, { turnId: 't2' })
+    expect(w.routes()).toHaveLength(1)
+    expect(w.shown).toEqual(['ui.status Essai terminé · https://tokfit.dodoia.re'])
+    expect(w.steps[1]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high' })
+  })
+
+  test('les balises de l’utilisateur continuent de s’appliquer', async ($, on) => {
+    const w = world(on, { messages: [user('[haiku] [low] x')], route: () => ended })
+    await step($, 0, { turnId: 't1' })
+    await step($, 0, { turnId: 't2' })
+    expect(w.steps[1]).toMatchObject({ model: 'haiku', effort: 'low' })
+  })
+
+  test('texte du service nettoyé : caractères de contrôle ôtés, longueur bornée, adresse https seulement', async ($, on) => {
+    const dirty: Reply = { status: 402, body: { error: 'trial_ended', message: `A\u0007B\u001b\nC${'z'.repeat(900)}`, url: 'javascript:alert(1)' } }
+    const w = world(on, { messages: [user('x')], route: () => dirty })
+    await step($, 0)
+    const toast = w.shown[0] ?? ''
+    expect(toast.startsWith('ui.toast ABC')).toBe(true)
+    expect(toast).not.toMatch(/[\u0000-\u001f\u007f]/)
+    expect(toast.length).toBeLessThanOrEqual('ui.toast '.length + 400)
+    expect(w.shown[1]).toBe('ui.status Essai terminé')
+  })
+
+  const ignored: [string, Reply][] = [
+    ['402 sans le code attendu', { status: 402, body: { message: MESSAGE } }],
+    ['402 sans message', { status: 402, body: { error: 'trial_ended' } }],
+    ['402 illisible', { status: 402, text: '<html>' }],
+    ['429 (plafond du jour)', { status: 429, body: { error: 'Limite quotidienne atteinte.' } }],
+    ['503 (disjoncteur)', { status: 503, body: { error: 'Décision indisponible : réglage gardé.' } }],
+  ]
+  for (const [name, reply] of ignored) {
+    test(`${name} : rien d’affiché, le réglage reste`, async ($, on) => {
+      const w = world(on, { messages: [user('x')], route: () => reply })
+      await step($, 0)
+      expect(w.shown).toEqual([])
+      expect(w.steps[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high' })
+    })
+  }
+
+  test('un sous-agent lancé après la fin n’interroge plus le service', async ($, on) => {
+    const w = world(on, { messages: [user('x')], route: () => ended })
+    await step($, 0)
+    const before = w.routes().length
+    await spawn($, 'cherche le bug', { type: 'Explore' })
+    expect(w.routes()).toHaveLength(before)
   })
 })
 

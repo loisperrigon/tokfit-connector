@@ -75,6 +75,34 @@ function statusLine(model: string, effort: string | undefined): string {
 const MODEL_ID = /^(sonnet|opus|haiku|claude-[a-z0-9.-]{1,60}(\[1m\])?)$/
 
 // Réponse du service lue telle quelle ; null si elle n'est pas une décision valide.
+// Fin de l'essai gratuit, telle que le service la dit (402) : un texte à montrer
+// à l'utilisateur et l'adresse pour continuer. Texte nettoyé : c'est une chaîne
+// du réseau, jamais affichée brute.
+type Ended = { message: string; url: string | null }
+
+const CONTROL = /[\u0000-\u001f\u007f]/g
+const MESSAGE_MAX = 400
+const OFFER = /^https:\/\/[A-Za-z0-9.-]{1,100}(\/[A-Za-z0-9._~%/-]{0,100})?$/
+
+function trialEnd(text: string): Ended | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null
+  const { error, message, url } = parsed as Record<string, unknown>
+  if (error !== 'trial_ended' || typeof message !== 'string') return null
+  const clean = message.replace(CONTROL, '').trim().slice(0, MESSAGE_MAX)
+  if (clean === '') return null
+  return { message: clean, url: typeof url === 'string' && OFFER.test(url) ? url : null }
+}
+
+function endedLine(ended: Ended): string {
+  return ended.url ? `Essai terminé · ${ended.url}` : 'Essai terminé'
+}
+
 function decision(text: string): Choice | null {
   let parsed: unknown
   try {
@@ -129,6 +157,9 @@ type State = {
   lastCall: Map<string, { at: number; tokens: number }>
   // Vrai après une compaction du fil principal, jusqu'à sa prochaine réponse.
   compacted: boolean
+  // Essai terminé (réponse 402 du service) : montré une fois, puis plus aucune
+  // demande de la session ; l'outil de l'utilisateur reste sur son réglage.
+  ended: Ended | null
 }
 
 // D'où vient un sous-agent (mêmes mots que le mod oc-route d'Open Codex, pour
@@ -258,8 +289,17 @@ async function loopCache($: EngineInterface, loop: Loop): Promise<Record<string,
   return { [family(loop.model)]: { idle_s: idle(await $.clock.now(), loop.at), tokens: loop.tokens } }
 }
 
-async function ask($: EngineInterface, to: Link, facts: Facts): Promise<Choice | null> {
+async function ask($: EngineInterface, s: State, to: Link, facts: Facts): Promise<Choice | null> {
+  if (s.ended) return null
   const reply = await post($, to, '/v1/route', facts, TIMEOUT_MS)
+  if (reply?.status === 402) {
+    const ended = trialEnd(reply.text)
+    if (ended) {
+      s.ended = ended
+      $.ui.toast(ended.message)
+    }
+    return null
+  }
   return reply?.status === 200 ? decision(reply.text) : null
 }
 
@@ -317,7 +357,7 @@ async function routed($: EngineInterface, s: State, to: Link, facts: AgentFacts,
   const tags = s.tags
   const own: Plan = { ...(tags.model ? { model: tags.model } : {}), ...(tags.effort ? { effort: tags.effort } : {}) }
   const usage = await $.session.usage()
-  const answer = await ask($, to, {
+  const answer = await ask($, s, to, {
     kind: 'subagent',
     ...facts,
     session_id: await $.session.id(),
@@ -351,7 +391,7 @@ async function decide($: EngineInterface, s: State, e: TurnStepInput): Promise<C
   const own: Choice = { ...(tags.model ? { model: tags.model } : {}), ...(tags.effort ? { effort: tags.effort } : {}) }
   const effort = typeof e.effort === 'string' ? e.effort : undefined
   const usage = await $.session.usage()
-  const answer = await ask($, s.to, {
+  const answer = await ask($, s, s.to, {
     kind: 'main',
     session_id: await $.session.id(),
     message: bounded(text, HEAD, TAIL),
@@ -368,8 +408,9 @@ async function decide($: EngineInterface, s: State, e: TurnStepInput): Promise<C
     keep_effort: keepEffort,
   })
   if (answer === null) {
-    // Échec : rien à dire à l'utilisateur ; la ligne d'une décision précédente s'efface.
-    $.ui.status(undefined)
+    // Échec : rien à dire à l'utilisateur ; la ligne d'une décision précédente
+    // s'efface, sauf la fin de l'essai, qui reste affichée.
+    $.ui.status(s.ended ? endedLine(s.ended) : undefined)
     return own
   }
   const choice: Choice = { ...answer, ...own }
@@ -383,6 +424,7 @@ export const register: Register = (on, options) => {
     options, queue: queue(options), to: null, routedModel: undefined, turn: {}, tags: NO_TAGS, plans: new Map(),
     pending: new Map(), spawning: 0, loops: new Map(), requested: new Map(), sources: new Map(), lastCall: new Map(),
     compacted: false,
+    ended: null,
   }
 
   on('turn.step', async function* ($, e, next) {
