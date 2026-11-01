@@ -127,8 +127,10 @@ describe('décision appliquée', () => {
     const w = world(on, { messages: [user('x')], route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } }) })
     await step($, 0)
     expect(w.shown).toHaveLength(1)
-    // Desktop met déjà la pastille « tokfit » devant la ligne : le texte ne la répète pas.
-    expect(w.shown[0]).toBe('ui.status Sonnet · réflexion basse')
+    // Desktop met déjà la pastille « tokfit » devant la ligne : le texte ne la
+    // répète pas. « Ce message » la distingue du sélecteur de modèle de
+    // l'interface, qui garde le réglage de l'utilisateur.
+    expect(w.shown[0]).toBe('ui.status Ce message : Sonnet · réflexion basse')
     expect(w.shown[0]).not.toMatch(/tokfit|raison|probabilit|%/i)
   })
 
@@ -140,9 +142,50 @@ describe('décision appliquée', () => {
     test(`ligne d’état en clair : ${model} ${effort}`, async ($, on) => {
       const w = world(on, { messages: [user('x')], route: () => ({ status: 200, body: { model, effort } }) })
       await step($, 0)
-      expect(w.shown).toEqual([`ui.status ${text}`])
+      expect(w.shown).toEqual([`ui.status Ce message : ${text}`])
     })
   }
+})
+
+// Le moteur écrit une fois par session « You are powered by the model named
+// Opus 5.5 » dans la conversation. Le modèle de chaque message change ensuite :
+// la phrase deviendrait fausse, et le modèle se tromperait sur lui-même.
+describe('identité du modèle', () => {
+  const ORIGINAL = 'You are powered by the model named Opus 5.5. The exact model ID is claude-opus-5-5. Assistant knowledge cutoff is June 2026.'
+
+  test('connecteur configuré : la phrase ne nomme plus un modèle fixe', async ($, on) => {
+    world(on, { messages: [user('x')] })
+    const section = await $.prompt.section({ name: 'env_info_model', text: ORIGINAL })
+    expect(section.text).not.toContain('Opus 5.5')
+    expect(section.text).toContain('tokfit')
+    expect(section.text).toMatch(/Opus, Sonnet or Haiku/)
+    expect(section.text).toMatch(/status line/)
+  })
+
+  test('le texte est le même à chaque session : le cache de la conversation tient', async ($, on) => {
+    world(on, { messages: [user('x')] })
+    const first = await $.prompt.section({ name: 'env_info_model', text: ORIGINAL })
+    const second = await $.prompt.section({ name: 'env_info_model', text: ORIGINAL.replace('Opus', 'Sonnet') })
+    expect(second.text).toBe(first.text)
+  })
+
+  test('sans configuration : phrase d’origine, le modèle ne change pas', async ($, on) => {
+    world(on, { config: null })
+    const section = await $.prompt.section({ name: 'env_info_model', text: ORIGINAL })
+    expect(section.text).toBe(ORIGINAL)
+  })
+
+  test('les autres sections ne bougent pas', async ($, on) => {
+    world(on, { messages: [user('x')] })
+    const section = await $.prompt.section({ name: 'env_info_simple', text: '# Environment' })
+    expect(section.text).toBe('# Environment')
+  })
+
+  test('section absente (texte nul) : rien n’est ajouté', async ($, on) => {
+    world(on, { messages: [user('x')] })
+    const section = await $.prompt.section({ name: 'env_info_model', text: null })
+    expect(section.text).toBeNull()
+  })
 })
 
 describe('repli sur le réglage en cours', () => {

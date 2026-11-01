@@ -57,8 +57,11 @@ function family(model: string): string {
   return MODELS.find(name => model.toLowerCase().includes(name)) ?? model
 }
 
-// Ligne d'état en clair : « Haiku · réflexion haute ». Pas de « tokfit » dans le
-// texte : l'interface affiche déjà le nom du plugin devant.
+// Ligne d'état en clair : « Ce message : Haiku · réflexion haute ». Pas de
+// « tokfit » dans le texte : l'interface affiche déjà le nom du plugin devant.
+// « Ce message » la distingue du sélecteur de modèle de l'interface, qu'aucun
+// plugin ne peut changer pour la seule session ($.config.set écrit dans
+// ~/.claude/settings.json) et qui garde donc le réglage de l'utilisateur.
 const EFFORT_WORDS: Record<string, string> = {
   low: 'basse', medium: 'moyenne', high: 'haute', xhigh: 'très haute', max: 'maximale',
 }
@@ -66,8 +69,19 @@ const EFFORT_WORDS: Record<string, string> = {
 function statusLine(model: string, effort: string | undefined): string {
   const name = family(model)
   const shown = MODELS.includes(name) ? name.charAt(0).toUpperCase() + name.slice(1) : name
-  return effort ? `${shown} · réflexion ${EFFORT_WORDS[effort] ?? effort}` : shown
+  return `Ce message : ${effort ? `${shown} · réflexion ${EFFORT_WORDS[effort] ?? effort}` : shown}`
 }
+
+// Le moteur écrit une fois par session, dans la conversation, « You are powered
+// by the model named Opus 5.5 ». Le modèle changeant à chaque message, cette
+// phrase deviendrait fausse et le modèle se tromperait sur lui-même : elle est
+// remplacée par un texte fixe, identique à chaque session pour que le cache de
+// la conversation tienne. En anglais, comme le reste de la consigne du moteur.
+const IDENTITY_SECTION = 'env_info_model'
+const IDENTITY = 'You are a Claude model (Opus, Sonnet or Haiku). The tokfit plugin chooses the model and ' +
+  'reasoning effort for each message, so the model answering may differ from the one selected in the interface, ' +
+  'and nothing in this conversation tells you which one it is. If asked which model you are, say so, and point ' +
+  'to the tokfit status line, which names the model of the latest message.'
 
 // Modèle que le service peut rendre : un alias ou un identifiant complet
 // (`claude-sonnet-5-5`, `claude-opus-5-5[1m]`) ; un nouveau modèle ne demande
@@ -426,6 +440,12 @@ export const register: Register = (on, options) => {
     compacted: false,
     ended: null,
   }
+
+  // Sans clé valable, rien n'est routé : la phrase d'origine reste vraie.
+  on('prompt.section', async ($, e, next) => {
+    if (e.name !== IDENTITY_SECTION || e.text === null || !await link($, options)) return next(e)
+    return next({ ...e, text: IDENTITY })
+  }).catch(($, e, next) => next(e))
 
   on('turn.step', async function* ($, e, next) {
     let step: TurnStepInput = e

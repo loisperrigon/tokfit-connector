@@ -130,6 +130,7 @@ export function world(on: On, options: Options = {}): World {
   on('turn.complete', async ($, e) => ({ text: e.answer }))
   on('session.end', async ($, e) => ({ sessionId: e.sessionId }))
   on('session.compact', async ($, e) => ({ messages: e.messages }))
+  on('prompt.section', async ($, e) => ({ name: e.name, text: e.text }))
   return w
 }
 
