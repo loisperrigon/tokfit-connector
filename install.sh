@@ -29,6 +29,9 @@ NAME=tokfit
 # Adresse officielle du service. Sous-domaine provisoire : à remplacer par le
 # domaine définitif de tokfit à la fin du projet.
 DEFAULT_URL="https://tokfit.dodoia.re"
+# Dépôt public du connecteur (source du plugin et du lanceur sans dossier local).
+REPO="loisperrigon/tokfit-connector"
+RAW="${TOKFIT_RAW:-https://raw.githubusercontent.com/$REPO/main}"
 
 fail() {
   printf '%s : %s\n' "$NAME" "$1" >&2
@@ -36,9 +39,19 @@ fail() {
 }
 
 target="${1:-claude}"
-here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# Dossier du script, seulement s'il est lancé comme fichier install.sh : par `curl … | sh`,
+# $0 est « sh » et le dossier courant n'est jamais une source de confiance.
+here=""
+case "$0" in
+  install.sh | */install.sh)
+    [ -f "$0" ] && here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd) ;;
+esac
 url="${TOKFIT_URL:-$DEFAULT_URL}"
-market="${TOKFIT_SOURCE:-$here}"
+if [ -n "$here" ]; then
+  market="${TOKFIT_SOURCE:-$here}"
+else
+  market="${TOKFIT_SOURCE:-$REPO}"
+fi
 config="${TOKFIT_CONFIG:-$HOME/.config/$NAME/config.json}"
 bin="${TOKFIT_BIN:-$HOME/.local/bin}"
 
@@ -99,7 +112,17 @@ trap - EXIT INT TERM
 if [ "$target" = codex ]; then
   mkdir -p -- "$bin"
   umask 022
-  cp -- "$here/codex/launcher.py" "$bin/$NAME"
+  if [ -n "$here" ] && [ -f "$here/codex/launcher.py" ]; then
+    cp -- "$here/codex/launcher.py" "$bin/$NAME"
+  else
+    command -v curl >/dev/null 2>&1 || fail "curl introuvable : installe-le, ou lance le script depuis un clone du dépôt."
+    part=$(mktemp "$bin/.$NAME.XXXXXX")
+    trap 'rm -f -- "$part"' EXIT INT TERM
+    curl -fsSL --max-time 30 -o "$part" "$RAW/codex/launcher.py" || fail "téléchargement du lanceur impossible ($RAW)."
+    head -c 2 "$part" | grep -q '^#!' || fail "le lanceur téléchargé n'est pas un script : rien n'est installé."
+    mv -f -- "$part" "$bin/$NAME"
+    trap - EXIT INT TERM
+  fi
   chmod 755 "$bin/$NAME"
   printf '%s : lanceur installé (%s) ; lance « %s codex \"ta demande\" ».\n' "$NAME" "$bin/$NAME" "$NAME"
   case ":$PATH:" in

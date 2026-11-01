@@ -25,12 +25,14 @@ Claude Code :
 claude plugin install tokfit --marketplace <source> --config api_key=ek_…
 ```
 
-Une ligne, avec Claude Code et/ou le lanceur Codex :
+Une ligne, sans rien cloner (la clé est demandée, saisie masquée) :
 
 ```sh
-sh install.sh            # Claude Code
-sh install.sh codex      # lanceur Codex : `tokfit codex …`
+curl -fsSL https://raw.githubusercontent.com/loisperrigon/tokfit-connector/main/install.sh | sh -s claude
+curl -fsSL https://raw.githubusercontent.com/loisperrigon/tokfit-connector/main/install.sh | sh -s codex   # lanceur : `tokfit codex …`
 ```
+
+Depuis un clone : `sh install.sh` (Claude Code) ou `sh install.sh codex`.
 
 La clé est écrite dans `~/.config/tokfit/config.json` (mode 600) ; la variable
 `TOKFIT_CONFIG` désigne un autre fichier.
