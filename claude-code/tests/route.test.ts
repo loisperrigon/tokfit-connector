@@ -122,7 +122,7 @@ describe('décision appliquée', () => {
     await step($, 0)
     expect(w.shown).toHaveLength(1)
     expect(w.shown[0]).toContain('sonnet · low')
-    expect(w.shown[0]).not.toMatch(/jev|openrouter|%/i)
+    expect(w.shown[0]).not.toMatch(/raison|probabilit|%/i)
   })
 })
 
