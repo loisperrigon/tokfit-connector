@@ -32,6 +32,9 @@ curl -fsSL https://raw.githubusercontent.com/loisperrigon/tokfit-connector/main/
 curl -fsSL https://raw.githubusercontent.com/loisperrigon/tokfit-connector/main/install.sh | sh -s codex   # lanceur : `tokfit codex …`
 ```
 
+Pour les non-techniciens : [INSTALL-PROMPT.md](INSTALL-PROMPT.md) est un prompt à coller dans
+Claude Code ou Codex, qui fait toute l'installation (la landing propose un bouton « Copier »).
+
 Depuis un clone : `sh install.sh` (Claude Code) ou `sh install.sh codex`.
 
 La clé est écrite dans `~/.config/tokfit/config.json` (mode 600) ; la variable
