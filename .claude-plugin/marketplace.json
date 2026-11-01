@@ -1,0 +1,12 @@
+{
+  "name": "tokfit",
+  "owner": { "name": "Lois Perrigon" },
+  "description": "Connecteur Claude Code du service qui économise les tokens.",
+  "plugins": [
+    {
+      "name": "tokfit",
+      "source": "./claude-code",
+      "description": "Modèle et réflexion choisis à chaque message par le service ; compteurs de tokens remontés pour le tableau de bord."
+    }
+  ]
+}

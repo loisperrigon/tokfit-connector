@@ -1,0 +1,21 @@
+{
+  "name": "tokfit",
+  "version": "0.1.0",
+  "description": "Consommer moins avec le même abonnement : modèle et réflexion de Claude Code choisis à chaque message par le service.",
+  "author": { "name": "Lois Perrigon" },
+  "userConfig": {
+    "api_key": {
+      "type": "string",
+      "title": "Clé du service",
+      "description": "Clé reçue à l'inscription (ek_…). Gardée dans le trousseau, jamais dans settings.json.",
+      "sensitive": true,
+      "required": false
+    },
+    "service_url": {
+      "type": "string",
+      "title": "Adresse du service",
+      "description": "Laisser vide : adresse officielle. Pour un essai local : http://127.0.0.1:8790.",
+      "default": ""
+    }
+  }
+}
