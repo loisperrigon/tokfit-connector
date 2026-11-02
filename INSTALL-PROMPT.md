@@ -11,7 +11,7 @@ tokfit choisit à chaque message le modèle et le niveau de réflexion de mon ou
      TOKFIT_KEY={{CLE}} sh /tmp/tokfit-install.sh codex
 3. Vérifie que le service répond : curl -fsS https://tokfit.dodoia.re/health doit afficher "status":"ok".
 4. Dis-moi en deux phrases ce qui est fait et ce que je dois faire ensuite :
-   - Claude Code : fermer cette session et en ouvrir une nouvelle ; tokfit agit dès le prochain message. Précise-moi que le sélecteur de modèle de l'application continue d'afficher mon modèle habituel : la ligne « tokfit » (par exemple « Haiku · réflexion haute ») montre le modèle réellement utilisé pour chaque message.
+   - Claude Code : fermer cette session et en ouvrir une nouvelle ; tokfit agit dès le prochain message. Précise-moi que le sélecteur de modèle de l'application continue d'afficher mon modèle habituel : la ligne « tokfit » (par exemple « Ce message : Haiku · réflexion haute ») montre le modèle réellement utilisé pour chaque message.
    - Codex : lancer « tokfit codex "ma demande" » à la place de « codex "ma demande" ».
 
 Si une étape échoue, dis-moi laquelle et pourquoi, et n'installe rien d'autre.
