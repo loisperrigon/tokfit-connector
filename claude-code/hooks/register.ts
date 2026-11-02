@@ -57,19 +57,20 @@ function family(model: string): string {
   return MODELS.find(name => model.toLowerCase().includes(name)) ?? model
 }
 
-// Ligne d'état en clair : « Ce message : Haiku · réflexion haute ». Pas de
+// Ligne d'état : « → Haiku · Élevé », au format du sélecteur de modèle de
+// l'interface (« Opus 5.5  Moyen »), dont elle reprend les mots. Pas de
 // « tokfit » dans le texte : l'interface affiche déjà le nom du plugin devant.
-// « Ce message » la distingue du sélecteur de modèle de l'interface, qu'aucun
-// plugin ne peut changer pour la seule session ($.config.set écrit dans
-// ~/.claude/settings.json) et qui garde donc le réglage de l'utilisateur.
+// La flèche dit que c'est ce qui répond à ce message ; le sélecteur garde le
+// réglage de départ de l'utilisateur, qu'aucun plugin ne peut changer pour la
+// seule session ($.config.set écrit dans ~/.claude/settings.json).
 const EFFORT_WORDS: Record<string, string> = {
-  low: 'basse', medium: 'moyenne', high: 'haute', xhigh: 'très haute', max: 'maximale',
+  low: 'Bas', medium: 'Moyen', high: 'Élevé', xhigh: 'Très élevé', max: 'Max',
 }
 
 function statusLine(model: string, effort: string | undefined): string {
   const name = family(model)
   const shown = MODELS.includes(name) ? name.charAt(0).toUpperCase() + name.slice(1) : name
-  return `Ce message : ${effort ? `${shown} · réflexion ${EFFORT_WORDS[effort] ?? effort}` : shown}`
+  return `→ ${effort ? `${shown} · ${EFFORT_WORDS[effort] ?? effort}` : shown}`
 }
 
 // Le moteur écrit une fois par session, dans la conversation, « You are powered

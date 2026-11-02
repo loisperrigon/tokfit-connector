@@ -128,21 +128,20 @@ describe('décision appliquée', () => {
     await step($, 0)
     expect(w.shown).toHaveLength(1)
     // Desktop met déjà la pastille « tokfit » devant la ligne : le texte ne la
-    // répète pas. « Ce message » la distingue du sélecteur de modèle de
-    // l'interface, qui garde le réglage de l'utilisateur.
-    expect(w.shown[0]).toBe('ui.status Ce message : Sonnet · réflexion basse')
+    // répète pas. La flèche la distingue du sélecteur de modèle de l'interface.
+    expect(w.shown[0]).toBe('ui.status → Sonnet · Bas')
     expect(w.shown[0]).not.toMatch(/tokfit|raison|probabilit|%/i)
   })
 
   const lines: [string, string, string][] = [
-    ['haiku', 'medium', 'Haiku · réflexion moyenne'], ['opus', 'high', 'Opus · réflexion haute'],
-    ['opus', 'xhigh', 'Opus · réflexion très haute'], ['sonnet', 'max', 'Sonnet · réflexion maximale'],
+    ['haiku', 'medium', 'Haiku · Moyen'], ['opus', 'high', 'Opus · Élevé'],
+    ['opus', 'xhigh', 'Opus · Très élevé'], ['sonnet', 'max', 'Sonnet · Max'],
   ]
   for (const [model, effort, text] of lines) {
     test(`ligne d’état en clair : ${model} ${effort}`, async ($, on) => {
       const w = world(on, { messages: [user('x')], route: () => ({ status: 200, body: { model, effort } }) })
       await step($, 0)
-      expect(w.shown).toEqual([`ui.status Ce message : ${text}`])
+      expect(w.shown).toEqual([`ui.status → ${text}`])
     })
   }
 })
