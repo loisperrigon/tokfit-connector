@@ -9,7 +9,7 @@ describe('autre copie du connecteur', () => {
   test('même connecteur dans un autre dossier, sous son nom de dépôt ou son nom publié : une autre copie', () => {
     expect(twin(OWN, { name: 'tokfit', root: '/Users/ana/.claude/plugins/cache/tokfit/tokfit/0.4.0' })).toBe(true)
     expect(twin(OWN, { name: 'tokfit', root: '/Users/ana/.claude/plugins/cache/tokfit' })).toBe(true)
-    expect(COPIES).toEqual(['tokfit', 'tokfit'])
+    expect(COPIES).toEqual(['economiseur', 'tokfit']) // publish: keep
   })
 
   test('la copie elle-même, ou un autre plugin : rien à refuser', () => {

@@ -4,9 +4,10 @@
 // - OPEN_CODEX_PANE : identifiant de la conversation dans l'application ;
 // - OPEN_CODEX_BRIDGE : fichier de son pont local ({ url, token }, relu à chaque
 //   envoi : son port change quand l'application redémarre).
-// Elle peut aussi couper des leviers pour la conversation (TOKFIT_OFF,
-// experiments.ts) et relayer le service avec son propre jeton
-// (TOKFIT_RELAY_URL, TOKFIT_RELAY_TOKEN : service.ts).
+// Elle peut aussi couper des leviers pour la conversation (experiments.ts) et
+// relayer le service avec son propre jeton (service.ts). Ces variables gardent
+// dans la copie publique le nom de la copie embarquée : les deux lisent le même
+// environnement.
 //
 // Dans cette application, l'issue de chaque décision du fil principal part sur
 // son pont (évènement `RouteStatus`), qui l'affiche au-dessus du terminal, et la

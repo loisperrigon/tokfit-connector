@@ -2,12 +2,13 @@
 // tire une part au hasard pour mesurer le gain de chacun. Demandé une fois par
 // session ; une panne ou une réponse illisible laisse tous les leviers actifs.
 // S'y ajoutent ceux qu'une application hôte coupe pour la conversation
-// (TOKFIT_OFF=warm,compaction…, réglages d'Open Codex : host.ts) ;
-// `routing` y coupe aussi le routage (`chosen`), que le service tire lui-même.
+// (variable de l'hôte : warm,compaction…, réglages d'Open Codex : host.ts) ou
+// que l'utilisateur coupe lui-même ; `routing` y coupe aussi le routage
+// (`chosen`), que le service tire lui-même.
 // Le choix d'un modèle par l'utilisateur change en cours de conversation : une
 // variable d'environnement ne se modifie pas dans un processus lancé, donc
-// TOKFIT_OFF_FILE désigne un fichier (même liste, séparée par des virgules)
-// relu à chaque message ; quand il se lit, il prime sur TOKFIT_OFF.
+// la variable de fichier de l'hôte désigne un fichier (même liste, séparée par des virgules)
+// relu à chaque message ; quand il se lit, il prime sur les variables.
 import type { EngineInterface } from 'claude-code'
 import { field, post } from './service'
 import type { Link } from './service'
@@ -35,12 +36,17 @@ function leverList(raw: string | undefined): ReadonlySet<string> {
   return new Set((raw ?? '').split(',').map(word => word.trim()).filter(word => LEVER.test(word)))
 }
 
-// Leviers coupés par l'application hôte : le fichier relu à chaque message
-// quand elle en donne un, sinon sa variable lue une fois.
+// Leviers coupés par l'application hôte ou l'utilisateur : le fichier relu à
+// chaque message quand l'hôte en donne un, sinon les variables lues une fois.
 export async function chosen($: EngineInterface, h: Holdout): Promise<ReadonlySet<string>> {
   h.local ??= (async () => {
-    const [raw, path] = await Promise.all([$.env.get('TOKFIT_OFF'), $.env.get('TOKFIT_OFF_FILE')])
-    return { env: leverList(raw), path: path ? path : undefined }
+    // Variables de l'hôte sous le nom de sa copie embarquée, gardé dans la copie
+    // publique (`publish: keep`, connector/publish.py) ; celle de l'utilisateur y
+    // prend le nom de production (ici, c'est la même).
+    const host = await $.env.get('ECONOMISEUR_OFF') // publish: keep
+    const path = await $.env.get('ECONOMISEUR_OFF_FILE') // publish: keep
+    const user = await $.env.get('TOKFIT_OFF')
+    return { env: new Set([...leverList(host), ...leverList(user)]), path: path ? path : undefined }
   })().catch(() => ({ env: NONE, path: undefined }))
   const { env, path } = await h.local
   if (path === undefined) return env

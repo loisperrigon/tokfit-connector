@@ -9,8 +9,8 @@
 // plugin passe avant le fichier.
 //
 // Exception : une application qui lance Claude Code et relaie le service avec
-// son propre jeton (Open Codex, host.ts) pose TOKFIT_RELAY_URL et
-// TOKFIT_RELAY_TOKEN dans le terminal de la conversation ; ce relais passe
+// son propre jeton (Open Codex, host.ts) pose ses deux variables de relais
+// (`relayed`) dans le terminal de la conversation ; ce relais passe
 // alors avant tout le reste. Son adresse peut être en clair sur un réseau privé
 // (le trajet appartient à l'application), son jeton n'est pas une clé `ek_`.
 import type { EngineInterface, HttpResponse, PluginOptions } from 'claude-code'
@@ -58,10 +58,12 @@ export async function link($: EngineInterface, options: PluginOptions): Promise<
 const RELAY_URL = /^https?:\/\/[A-Za-z0-9.-]{1,253}(:\d{1,5})?(\/[^\s?#]*)?$/
 const RELAY_TOKEN = /^[A-Za-z0-9_.~+/=-]{8,512}$/
 
+// Variables posées par l'application hôte sous le nom de sa copie embarquée :
+// la copie publique les garde (`publish: keep`, connector/publish.py).
 async function relayed($: EngineInterface): Promise<Link | null> {
   try {
-    const url = text(await $.env.get('TOKFIT_RELAY_URL'))
-    const token = text(await $.env.get('TOKFIT_RELAY_TOKEN'))
+    const url = text(await $.env.get('ECONOMISEUR_RELAY_URL')) // publish: keep
+    const token = text(await $.env.get('ECONOMISEUR_RELAY_TOKEN')) // publish: keep
     return RELAY_URL.test(url) && RELAY_TOKEN.test(token) ? { url: url.replace(/\/+$/, ''), key: token } : null
   } catch {
     // Environnement illisible : pas de relais, la configuration du client peut suffire.

@@ -9,7 +9,7 @@
 
 // Noms sous lesquels le connecteur se charge : celui du dépôt (copie embarquée par une
 // application hôte) et celui de sa version publiée.
-export const COPIES: readonly string[] = ['tokfit', 'tokfit']
+export const COPIES: readonly string[] = ['economiseur', 'tokfit'] // publish: keep
 export const REFUSED = 'une copie du connecteur agit déjà dans cette session'
 
 export type Loaded = { name: string; root: string }

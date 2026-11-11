@@ -1,6 +1,6 @@
 {
   "name": "tokfit",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Consommer moins avec le même abonnement : modèle et réflexion de Claude Code choisis à chaque message par le service.",
   "author": { "name": "Lois Perrigon" },
   "icon": "./icon.png",

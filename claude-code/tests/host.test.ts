@@ -31,7 +31,7 @@ function reports(w: World): unknown[] {
 
 describe('relais d’une application hôte', () => {
   test('adresse et jeton du relais passent avant la configuration du client', async ($, on) => {
-    const w = world(on, { env: { TOKFIT_RELAY_URL: `${RELAY}/`, TOKFIT_RELAY_TOKEN: TOKEN }, messages: [user('x')] })
+    const w = world(on, { env: { ECONOMISEUR_RELAY_URL: `${RELAY}/`, ECONOMISEUR_RELAY_TOKEN: TOKEN }, messages: [user('x')] }) // publish: keep
     await step($, 0)
     expect(w.routes()).toHaveLength(1)
     expect(w.routes()[0]?.url).toBe(`${RELAY}/v1/route`)
@@ -39,16 +39,16 @@ describe('relais d’une application hôte', () => {
   })
 
   test('relais seul, sans fichier ni clé du client', async ($, on) => {
-    const w = world(on, { config: null, env: { TOKFIT_RELAY_URL: RELAY, TOKFIT_RELAY_TOKEN: TOKEN }, messages: [user('x')] })
+    const w = world(on, { config: null, env: { ECONOMISEUR_RELAY_URL: RELAY, ECONOMISEUR_RELAY_TOKEN: TOKEN }, messages: [user('x')] }) // publish: keep
     await step($, 0)
     expect(w.routes()[0]?.url).toBe(`${RELAY}/v1/route`)
   })
 
   const refused: [string, Record<string, string>][] = [
-    ['adresse avec identifiants', { TOKFIT_RELAY_URL: 'http://moi@hote:1/x', TOKFIT_RELAY_TOKEN: TOKEN }],
-    ['autre protocole', { TOKFIT_RELAY_URL: 'ftp://hote/x', TOKFIT_RELAY_TOKEN: TOKEN }],
-    ['jeton avec espace', { TOKFIT_RELAY_URL: RELAY, TOKFIT_RELAY_TOKEN: 'a b c d e f g h' }],
-    ['jeton absent', { TOKFIT_RELAY_URL: RELAY }],
+    ['adresse avec identifiants', { ECONOMISEUR_RELAY_URL: 'http://moi@hote:1/x', ECONOMISEUR_RELAY_TOKEN: TOKEN }], // publish: keep
+    ['autre protocole', { ECONOMISEUR_RELAY_URL: 'ftp://hote/x', ECONOMISEUR_RELAY_TOKEN: TOKEN }], // publish: keep
+    ['jeton avec espace', { ECONOMISEUR_RELAY_URL: RELAY, ECONOMISEUR_RELAY_TOKEN: 'a b c d e f g h' }], // publish: keep
+    ['jeton absent', { ECONOMISEUR_RELAY_URL: RELAY }], // publish: keep
   ]
   for (const [name, env] of refused) {
     test(`${name} : relais ignoré, configuration du client`, async ($, on) => {
@@ -143,7 +143,7 @@ describe('voyant de l’application hôte', () => {
 
 describe('leviers coupés par l’application hôte', () => {
   test('routage coupé : aucune demande, réglage du moteur, balises comprises', async ($, on) => {
-    const w = inside(on, { env: { TOKFIT_OFF: 'routing' }, messages: [user('[haiku] x')] })
+    const w = inside(on, { env: { ECONOMISEUR_OFF: 'routing' }, messages: [user('[haiku] x')] }) // publish: keep
     await step($, 0)
     await agent($, 'lis le dossier', { model: 'opus' })
     expect(w.routes()).toEqual([])
@@ -152,10 +152,10 @@ describe('leviers coupés par l’application hôte', () => {
     expect(reports(w)).toEqual([])
   })
 
-  test('routage rendu ou coupé en cours de conversation par TOKFIT_OFF_FILE, sans relance', async ($, on) => {
+  test('routage rendu ou coupé en cours de conversation par ECONOMISEUR_OFF_FILE, sans relance', async ($, on) => { // publish: keep
     const OFF_FILE = '/support/off'
     const w = inside(on, {
-      env: { TOKFIT_OFF_FILE: OFF_FILE, TOKFIT_OFF: 'routing' },
+      env: { ECONOMISEUR_OFF_FILE: OFF_FILE, ECONOMISEUR_OFF: 'routing' }, // publish: keep
       files: { [OFF_FILE]: '' },
       messages: [user('x')],
     })
@@ -175,13 +175,13 @@ describe('leviers coupés par l’application hôte', () => {
   })
 
   test('fichier de leviers illisible : la variable fait foi', async ($, on) => {
-    const gone = inside(on, { env: { TOKFIT_OFF_FILE: '/support/absent', TOKFIT_OFF: 'routing' }, messages: [user('x')] })
+    const gone = inside(on, { env: { ECONOMISEUR_OFF_FILE: '/support/absent', ECONOMISEUR_OFF: 'routing' }, messages: [user('x')] }) // publish: keep
     await step($, 0)
     expect(gone.routes()).toEqual([])
   })
 
   test('réflexion coupée par l’hôte, le reste actif', async ($, on) => {
-    const w = inside(on, { env: { TOKFIT_OFF: ' thinking , ../x' }, messages: [user('x')] })
+    const w = inside(on, { env: { ECONOMISEUR_OFF: ' thinking , ../x' }, messages: [user('x')] }) // publish: keep
     expect((await $.prompt.compose(COMPOSE)).sections).toEqual([...CORE_PROMPT, EXECUTION_SECTION])
     await step($, 0)
     expect(w.routes()).toHaveLength(1)
