@@ -30,8 +30,25 @@ describe('remontée par lots', () => {
     expect(steps[0]).toEqual({
       step_id: expect.stringMatching(/^[a-f0-9]{32}$/), session_id: SESSION, model: 'claude-sonnet-5-5', effort: 'low',
       input: 10, cache_read: 50_000, cache_write: 2_000, output: 800, quota_percent: 40,
+      reference_model: 'claude-opus-5-5',
     })
     expect(new Set(steps.map(s => s.step_id)).size).toBe(3)
+  })
+
+  test('référence : chaque étape porte le modèle que l’utilisateur a choisi pour la session', async ($, on) => {
+    const w = world(on, { messages: [user('x')], route: () => ({ status: 200, body: { model: 'opus', effort: 'low' } }) })
+    await step($, 0, { turnId: 't1', model: 'claude-fable-5-2' })
+    await step($, 0, { turnId: 't1', model: 'claude-fable-5-2', agentId: 'agent-1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    const first = stepsOf(w.usages()[0]?.body ?? {})
+    expect(first[0]).toMatchObject({ model: 'claude-opus-5-5', reference_model: 'claude-fable-5-2' })
+    expect(first[1]).toMatchObject({ reference_model: 'claude-fable-5-2' })
+    // L'utilisateur change le modèle de sa session : la référence suit, quel que soit le modèle.
+    await step($, 0, { turnId: 't2', model: 'claude-sonnet-5-5' })
+    await complete($, 't2')
+    await w.clock.settle()
+    expect(stepsOf(w.usages()[1]?.body ?? {})[0]).toMatchObject({ reference_model: 'claude-sonnet-5-5' })
   })
 
   test('sous-agent : ses étapes comptent, avec un identifiant distinct', async ($, on) => {
@@ -43,6 +60,22 @@ describe('remontée par lots', () => {
     const steps = stepsOf(w.usages()[0]?.body ?? {})
     expect(steps).toHaveLength(2)
     expect(steps[0]?.step_id).not.toBe(steps[1]?.step_id)
+  })
+
+  test('cache : écart avec l’appel précédent de la même boucle, et sous-agent signalé', async ($, on) => {
+    const w = world(on, { messages: [user('x')] })
+    await step($, 0, { turnId: 't1' })
+    await w.clock.advance(900_000)
+    await step($, 1, { turnId: 't1' })
+    await step($, 0, { turnId: 't1', agentId: 'agent-1' })
+    await w.clock.advance(30_000)
+    await step($, 1, { turnId: 't1', agentId: 'agent-1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    const steps = stepsOf(w.usages()[0]?.body ?? {})
+    expect(steps.map(s => [s.idle_s, s.subagent])).toEqual([
+      [undefined, undefined], [900, undefined], [undefined, true], [30, true],
+    ])
   })
 
   test('lot plein : envoyé sans attendre la fin du tour', async ($, on) => {
@@ -72,6 +105,45 @@ describe('remontée par lots', () => {
     await turn($, 't1', 2)
     await end($)
     expect(w.usages()).toEqual([])
+  })
+})
+
+// Demande de Lois (11/11/2026) : un modèle fixé par l'utilisateur n'entre jamais dans la mesure.
+// Le connecteur le dit sur chaque étape (`pinned`) ; le service la garde hors de ses chiffres.
+describe('modèle fixé par l’utilisateur', () => {
+  test('routage coupé par l’utilisateur ou son application : étapes remontées, marquées, sans décision', async ($, on) => {
+    const w = world(on, { env: { TOKFIT_OFF: 'routing' }, messages: [user('x')] })
+    await step($, 0, { turnId: 't1', model: 'claude-fable-5-2' })
+    await step($, 0, { turnId: 't1', model: 'claude-fable-5-2', agentId: 'agent-1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    expect(w.routes()).toEqual([])
+    const steps = stepsOf(w.usages()[0]?.body ?? {})
+    expect(steps).toHaveLength(2)
+    for (const sent of steps) expect(sent).toMatchObject({ pinned: true, reference_model: 'claude-fable-5-2' })
+  })
+
+  test('balise de modèle : le message et ses sous-agents sont marqués, le message suivant ne l’est plus', async ($, on) => {
+    const said = [user('[sonnet] x')]
+    const w = world(on, { messages: said })
+    await step($, 0, { turnId: 't1' })
+    await step($, 0, { turnId: 't1', agentId: 'agent-1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    for (const sent of stepsOf(w.usages()[0]?.body ?? {})) expect(sent).toMatchObject({ pinned: true })
+    said.push(user('et ensuite ?'))
+    await step($, 0, { turnId: 't2' })
+    await complete($, 't2')
+    await w.clock.settle()
+    expect(stepsOf(w.usages()[1]?.body ?? {})[0]).not.toHaveProperty('pinned')
+  })
+
+  test('balise de réflexion seule, ou session témoin : rien de fixé', async ($, on) => {
+    const w = world(on, { messages: [user('[low] x')] })
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    expect(stepsOf(w.usages()[0]?.body ?? {})[0]).not.toHaveProperty('pinned')
   })
 })
 

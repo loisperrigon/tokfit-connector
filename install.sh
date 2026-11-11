@@ -8,11 +8,15 @@
 #
 #   sh install.sh [claude|codex]               demande la clé (saisie masquée)
 #   TOKFIT_KEY=ek_… sh install.sh codex   sans question (automatisation, essais)
+#   curl -fsSL <dépôt public>/install.sh | sh -s codex   sans clone : plugin et
+#                       lanceur pris dans le dépôt public (REPO), jamais dans le dossier courant
 #
 # Variables facultatives :
 #   TOKFIT_URL     adresse du service (https, ou http://127.0.0.1 pour essayer)
 #   TOKFIT_SOURCE  marketplace du plugin : dossier, dépôt git ou owner/repo
-#                       (défaut : le dossier de ce script)
+#                       (défaut : le dossier de ce script, ou REPO sans dossier)
+#   TOKFIT_RAW_URL adresse des fichiers du lanceur sans dossier local
+#                       (défaut : REPO sur raw.githubusercontent.com)
 #   TOKFIT_CONFIG  autre fichier de configuration (plugin et lanceur lisent la même variable)
 #   TOKFIT_BIN     dossier du lanceur Codex (défaut : ~/.local/bin)
 #
@@ -26,12 +30,12 @@
 set -eu
 
 NAME=tokfit
-# Adresse officielle du service. Sous-domaine provisoire : à remplacer par le
-# domaine définitif de tokfit à la fin du projet.
+# Adresse officielle du service et dépôt public du connecteur : vides dans le
+# dépôt de travail, posés par connector/publish.py dans la copie publique.
+# Vides, TOKFIT_URL est obligatoire et le script se lance depuis un clone.
 DEFAULT_URL="https://tokfit.dodoia.re"
-# Dépôt public du connecteur (source du plugin et du lanceur sans dossier local).
 REPO="loisperrigon/tokfit-connector"
-RAW="${TOKFIT_RAW:-https://raw.githubusercontent.com/$REPO/main}"
+RUNTIME="__init__.py relay.py output.py process.py cursor.py completion.py"
 
 fail() {
   printf '%s : %s\n' "$NAME" "$1" >&2
@@ -47,21 +51,23 @@ case "$0" in
     [ -f "$0" ] && here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd) ;;
 esac
 url="${TOKFIT_URL:-$DEFAULT_URL}"
-if [ -n "$here" ]; then
-  market="${TOKFIT_SOURCE:-$here}"
-else
-  market="${TOKFIT_SOURCE:-$REPO}"
-fi
+market="${TOKFIT_SOURCE:-${here:-$REPO}}"
+raw="${TOKFIT_RAW_URL:-${REPO:+https://raw.githubusercontent.com/$REPO/main}}"
 config="${TOKFIT_CONFIG:-$HOME/.config/$NAME/config.json}"
 bin="${TOKFIT_BIN:-$HOME/.local/bin}"
 
 case "$target" in
   claude)
-    command -v claude >/dev/null 2>&1 || fail "Claude Code introuvable (commande claude) : installe-le d'abord." ;;
+    command -v claude >/dev/null 2>&1 || fail "Claude Code introuvable (commande claude) : installe-le d'abord."
+    [ -n "$market" ] || fail "source du plugin inconnue (TOKFIT_SOURCE) : lance le script depuis un clone du dépôt." ;;
   codex)
     command -v codex >/dev/null 2>&1 || fail "Codex CLI introuvable (commande codex) : installe-le d'abord."
     python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null \
-      || fail "Python 3.9 ou plus récent introuvable (commande python3)." ;;
+      || fail "Python 3.9 ou plus récent introuvable (commande python3)."
+    if [ -z "$here" ]; then
+      [ -n "$raw" ] || fail "source du lanceur inconnue (TOKFIT_RAW_URL) : lance le script depuis un clone du dépôt."
+      command -v curl >/dev/null 2>&1 || fail "curl introuvable : installe-le, ou lance le script depuis un clone du dépôt."
+    fi ;;
   *) fail "cible inconnue : $target (claude ou codex)." ;;
 esac
 
@@ -109,21 +115,35 @@ chmod 600 "$tmp"
 mv -f -- "$tmp" "$config"
 trap - EXIT INT TERM
 
+fetch() { # chemin dans le dépôt, destination : copie du clone, sinon téléchargement
+  if [ -n "$here" ]; then
+    cp -- "$here/$1" "$2"
+  else
+    curl -fsSL --max-time 30 -o "$2" "$raw/$1" || fail "téléchargement impossible : $1 ($raw)."
+  fi
+}
+
 if [ "$target" = codex ]; then
   mkdir -p -- "$bin"
   umask 022
-  if [ -n "$here" ] && [ -f "$here/codex/launcher.py" ]; then
-    cp -- "$here/codex/launcher.py" "$bin/$NAME"
-  else
-    command -v curl >/dev/null 2>&1 || fail "curl introuvable : installe-le, ou lance le script depuis un clone du dépôt."
-    part=$(mktemp "$bin/.$NAME.XXXXXX")
-    trap 'rm -f -- "$part"' EXIT INT TERM
-    curl -fsSL --max-time 30 -o "$part" "$RAW/codex/launcher.py" || fail "téléchargement du lanceur impossible ($RAW)."
-    head -c 2 "$part" | grep -q '^#!' || fail "le lanceur téléchargé n'est pas un script : rien n'est installé."
-    mv -f -- "$part" "$bin/$NAME"
-    trap - EXIT INT TERM
-  fi
-  chmod 755 "$bin/$NAME"
+  # Tout est d'abord réuni et contrôlé à part : un téléchargement raté n'installe rien.
+  stage=$(mktemp -d "$bin/.$NAME.XXXXXX")
+  trap 'rm -rf -- "$stage"' EXIT INT TERM
+  fetch codex/launcher.py "$stage/launcher"
+  head -c 2 "$stage/launcher" | grep -q '^#!' || fail "le lanceur reçu n'est pas un script : rien n'est installé."
+  mkdir -- "$stage/runtime"
+  for file in $RUNTIME; do
+    fetch "runtime/$file" "$stage/runtime/$file"
+    chmod 644 "$stage/runtime/$file"
+  done
+  chmod 755 "$stage/launcher"
+  mkdir -p -- "$bin/runtime"
+  for file in $RUNTIME; do
+    mv -f -- "$stage/runtime/$file" "$bin/runtime/$file"
+  done
+  mv -f -- "$stage/launcher" "$bin/$NAME"
+  rm -rf -- "$stage"
+  trap - EXIT INT TERM
   printf '%s : lanceur installé (%s) ; lance « %s codex \"ta demande\" ».\n' "$NAME" "$bin/$NAME" "$NAME"
   case ":$PATH:" in
     *":$bin:"*) ;;

@@ -234,7 +234,8 @@ describe('balises de l’utilisateur, propagées aux sous-agents de son message'
   })
 
   test('ultrathink : la réflexion du sous-agent est laissée au moteur, le modèle reste au service', async ($, on) => {
-    const w = world(on, { messages: [user('ultrathink sur ce bug')], route: () => ({ status: 200, body: { model: 'sonnet', effort: null } }) })
+    // Le service rend une réflexion malgré keep_effort : elle ne remplace jamais celle de l'utilisateur.
+    const w = world(on, { messages: [user('ultrathink sur ce bug')], route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } }) })
     await step($, 0, { turnId: 't1' })
     expect(await agent($, 'x')).toBe('sonnet')
     expect(w.routes()[1]?.body).toMatchObject({ keep_model: false, keep_effort: true })

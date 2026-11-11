@@ -7,13 +7,20 @@ demande au service le modèle et la réflexion, puis lance `codex` avec
 `-m <modèle> -c model_reasoning_effort="<effort>"`. Chez Codex, changer de
 modèle en cours de fil réécrit le cache : seul le lancement est gratuit, donc
 rien n'est demandé à la reprise (`resume`, `fork`), sans message, ou quand
-l'utilisateur fixe lui-même le réglage (`-m`, `-c model=…`, `-p`). Une balise
-de réflexion dans le message (`[low]`…`[xhigh]`, comme pour Claude Code) passe
-avant le service et s'applique même s'il est en panne. Toute erreur, lenteur
-(6 s) ou clé refusée lance `codex` sans autre réglage, sans rien afficher ; une décision aboutie s'affiche : « tokfit : <modèle> · <effort> ».
+l'utilisateur fixe lui-même le réglage (`-m`, `-c model=…`, `-p`). Toute
+erreur, lenteur (6 s) ou clé refusée lance `codex` tel quel, sans rien
+afficher ; une décision aboutie s'affiche : « tokfit : <modèle> · <effort> ».
 
-Seuls le message de l'utilisateur et des faits partent vers /v1/route, jamais
-une réponse d'un modèle d'OpenAI. À la fin, un processus détaché relève les
+Pour toute conversation menée par le lancement (neuve, reprise, fork), le
+service dit aussi à partir de quelle taille de contexte la compaction paie
+(/v1/compact-limit, même règle au coût que pour Claude Code) : le lanceur la
+pose par `-c model_auto_compact_token_limit=<tokens>`, sauf si l'utilisateur
+l'a fixée lui-même (ligne de commande ou config.toml).
+
+Seuls le message de l'utilisateur et des faits partent vers /v1/route.
+Avec TOKFIT_SUBAGENT_PROMPTS=1, la consigne d'un sous-agent sans historique
+peut aussi partir vers le décideur du service, sans enregistrement ; les autres réponses OpenAI
+restent privées. À la fin, un processus détaché relève les
 compteurs de tokens dans les fichiers de session de Codex
 (`$CODEX_HOME/sessions/…/rollout-*.jsonl`, événements `token_count`) et les
 envoie à /v1/usage par lots ; une étape ne porte que des nombres et des
@@ -34,6 +41,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -43,19 +51,22 @@ from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 import urllib.error
 import urllib.request
 
-# Nom du produit, comme NAME du plugin Claude Code.
+# Nom du connecteur, comme NAME du plugin Claude Code (nom de production dans la copie publique).
 NAME = "tokfit"
 # Attente maximale d'une décision (TIMEOUT_MS du plugin, ROUTE_MOD_TIMEOUT_S du service).
 TIMEOUT_S = 6.0
 USAGE_TIMEOUT_S = 10.0
+# Attente maximale du seuil de compaction : le lancement ne doit pas traîner.
+LIMIT_TIMEOUT_S = 2.0
+COMPACT_KEY = "model_auto_compact_token_limit"
+# Conversations menées par un lancement : compteurs remontés, seuil de compaction posé.
+CONVERSATIONS = ("interactive", "exec", "resume", "fork", "exec resume")
 # Lot maximal accepté par le service (USAGE_BATCH_MAX de service/usage.py).
 BATCH_MAX = 50
-# Paliers que le service connaît (EFFORTS de service/fields.py) ; Codex en a d'autres (ultra).
-EFFORTS = ("low", "medium", "high", "xhigh", "max")
-# Balises de réflexion dans le message ([low]…[xhigh]), comme celles du plugin
-# Claude Code : paliers que Codex et le service connaissent tous deux.
-TAG_EFFORTS = ("low", "medium", "high", "xhigh")
-TAG = re.compile(r"\[(\w+)\]")
+# Dernier argument de `_usage` quand l'utilisateur a fixé le modèle au lancement (-m, -p, -c model=…).
+PINNED = "pinned"
+# Paliers des compteurs ; ultra n'est jamais choisi automatiquement.
+EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 HEAD, TAIL = 3000, 1000
 KEY = re.compile(r"ek_[A-Za-z0-9_-]{20,200}")
 ADDRESS = re.compile(r"(https://[^\s/?#@]+|http://(127\.0\.0\.1|localhost)(:\d{1,5})?)(/[^\s?#]*)?")
@@ -90,13 +101,13 @@ class Launch(NamedTuple):
     # Où insérer -m / -c : en tête, ou juste après `exec`.
     insert_at: int
     cwd: Optional[str]
-    # Réflexion choisie par une balise du message, appliquée même service en panne.
-    tag_effort: Optional[str] = None
+    # L'utilisateur fixe lui-même le seuil de compaction (-c model_auto_compact_token_limit=…).
+    keep_compact: bool = False
 
 
 def parse(args: List[str]) -> Launch:
     mode, prompt, insert_at, cwd = "interactive", None, 0, None
-    keep_model = keep_effort = images = local = False
+    keep_model = keep_effort = keep_compact = images = local = False
     index, literal, positionals = 0, False, 0
     while index < len(args):
         arg = args[index]
@@ -128,6 +139,7 @@ def parse(args: List[str]) -> Launch:
             key = value.split("=", 1)[0].strip()
             keep_model = keep_model or key == "model"
             keep_effort = keep_effort or key == "model_reasoning_effort"
+            keep_compact = keep_compact or key == COMPACT_KEY
         elif name in ("-i", "--image"):
             images = True
         elif name in ("-C", "--cd"):
@@ -135,15 +147,7 @@ def parse(args: List[str]) -> Launch:
         elif name in ("--oss", "--local-provider"):
             local = True
     routable = mode in ("interactive", "exec") and not local and prompt not in (None, "", "-")
-    tag_effort = None if keep_effort or not routable else tagged_effort(prompt or "")
-    return Launch(mode, prompt if routable else None, keep_model, keep_effort or tag_effort is not None, images,
-                  insert_at, cwd, tag_effort)
-
-
-def tagged_effort(prompt: str) -> Optional[str]:
-    """Dernière balise de réflexion du message ([high]…), ou None."""
-    words = [match.group(1).lower() for match in TAG.finditer(prompt)]
-    return next((word for word in reversed(words) if word in TAG_EFFORTS), None)
+    return Launch(mode, prompt if routable else None, keep_model, keep_effort, images, insert_at, cwd, keep_compact)
 
 
 def codex_setting(text: str, profile_name: str = "") -> Tuple[str, str]:
@@ -167,9 +171,8 @@ def codex_setting(text: str, profile_name: str = "") -> Tuple[str, str]:
     return pick.get("model", ""), pick.get("model_reasoning_effort", "")
 
 
-def user_model(args: List[str], config: str) -> str:
-    """Modèle que l'utilisateur aurait eu sans le service : -m / -c model=…, sinon son profil
-    (-p) ou sa config. Sert de référence des économies ; vide = défaut de Codex (côté service)."""
+def user_setting(args: List[str], config: str, setting_key: str) -> str:
+    """Effective native model/effort: command-line override, selected profile, then config."""
     explicit, profile_name, index = "", "", 0
     while index < len(args):
         arg = args[index]
@@ -180,15 +183,20 @@ def user_model(args: List[str], config: str) -> str:
             value = args[index + 1] if index + 1 < len(args) else ""
             index += 1
         index += 1
-        if name in ("-m", "--model"):
+        if name in ("-m", "--model") and setting_key == "model":
             explicit = value
         elif name in ("-c", "--config"):
             key, _, setting = value.partition("=")
-            if key.strip() == "model":
+            if key.strip() == setting_key:
                 explicit = setting.strip().strip('"')
         elif name in ("-p", "--profile"):
             profile_name = value
-    return explicit or codex_setting(config, profile_name)[0]
+    return explicit or codex_setting(config, profile_name)[0 if setting_key == "model" else 1]
+
+
+def user_model(args: List[str], config: str) -> str:
+    """Baseline model before routing; also used for API-equivalent savings."""
+    return user_setting(args, config, "model")
 
 
 def codex_home(env: Dict[str, str]) -> Path:
@@ -227,6 +235,108 @@ def facts(launch: Launch, model: str, effort: str) -> Json:
     }
 
 
+def catalog_models(raw: object) -> Dict[str, List[str]]:
+    """Only native model IDs and efforts; descriptions and other text never leave the client."""
+    entries = raw.get("models") if isinstance(raw, dict) else None
+    if not isinstance(entries, list):
+        return {}
+    models: Dict[str, List[str]] = {}
+    ordered = sorted((entry for entry in entries[:100] if isinstance(entry, dict)),
+                     key=lambda entry: number(entry.get("priority")) or 10_000)
+    for entry in ordered:
+        name, levels = entry.get("slug"), entry.get("supported_reasoning_levels")
+        if not isinstance(name, str) or not MODEL_ID.fullmatch(name) or not isinstance(levels, list):
+            continue
+        efforts = [level["effort"] for level in levels if isinstance(level, dict) and level.get("effort") in EFFORTS]
+        if efforts:
+            models[name] = list(dict.fromkeys(efforts))
+    return models
+
+
+def native_catalog(env: Dict[str, str]) -> Dict[str, List[str]]:
+    binary = env.get("TOKFIT_CODEX") or shutil.which("codex", path=env.get("PATH"))
+    if binary is None:
+        return {}
+    try:
+        result = subprocess.run([binary, "debug", "models"], env=env, capture_output=True, text=True, timeout=2)
+        return catalog_models(json.loads(result.stdout)) if result.returncode == 0 else {}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        # An unavailable/older catalogue must not delay or break Codex.
+        return {}
+
+
+def subagent_hook(event: Json, env: Dict[str, str]) -> Json:
+    """Opt-in only: the generated task is the sole OpenAI text sent to /v1/route.
+
+    Full-context forks and custom agent profiles keep their native settings:
+    profile files can override explicit spawn settings after this hook runs.
+    Never change the fork mode or add permission/context instructions.
+    """
+    if env.get("TOKFIT_SUBAGENT_PROMPTS") != "1":
+        return {}
+    if event.get("hook_event_name") != "PreToolUse" or event.get("tool_name") not in (
+            "spawn_agent", "collaborationspawn_agent", "Agent"):
+        return {}
+    args = event.get("tool_input")
+    if not isinstance(args, dict) or args.get("fork_context") is True or args.get("fork_turns") == "all":
+        return {}
+    if args.get("fork_turns") != "none" and args.get("fork_context") is not False:
+        # Codex 0.166 defaults fork_turns to all. Overrides would be rejected.
+        return {}
+    if args.get("agent_type", "default") != "default":
+        return {}
+    task = args.get("message")
+    model = args.get("model") or event.get("model")
+    if not isinstance(task, str) or not task.strip() or not isinstance(model, str) or not MODEL_ID.fullmatch(model):
+        return {}
+    to = link(env)
+    if to is None:
+        return {}
+    payload: Json = {"surface": "codex", "kind": "subagent", "model": model,
+                     "message": bounded(task, HEAD, TAIL), "conversation_tokens": 0,
+                     "previous_exchanges": [], "last_assistant_message": "", "cache_cold": True}
+    effort = args.get("reasoning_effort")
+    if isinstance(effort, str) and effort in EFFORTS:
+        payload["effort"] = effort
+    session = event.get("session_id")
+    if isinstance(session, str) and SESSION_ID.fullmatch(session):
+        payload["session_id"] = session
+    catalog = native_catalog(env)
+    if not catalog:
+        return {}
+    payload["available_models"] = catalog
+    reply = post(to, "/v1/route", payload, TIMEOUT_S)
+    choice = decision(reply[1]) if reply is not None and reply[0] == 200 else None
+    if choice is None:
+        return {}
+    selected_model, selected_effort = choice
+    target = selected_model or model
+    if catalog and (target not in catalog or (selected_effort is not None and selected_effort not in catalog[target])):
+        return {}
+    updated = dict(args)
+    if selected_model is not None:
+        updated["model"] = selected_model
+    if selected_effort is not None:
+        updated["reasoning_effort"] = selected_effort
+    if updated == args:
+        return {}
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": updated}}
+
+
+def hook_args(args: List[str], env: Dict[str, str]) -> List[str]:
+    """An invocation config layer; Codex merges its hooks with the user's layers.
+
+    Hook trust is left to /hooks. Never add a trust-bypass flag.
+    """
+    launch = parse(args)
+    if env.get("TOKFIT_SUBAGENT_PROMPTS") != "1" or launch.mode not in CONVERSATIONS or link(env) is None:
+        return args
+    command = shlex.join([sys.executable, os.path.abspath(__file__), "_hook"])
+    value = ('hooks.PreToolUse=[{matcher="^(collaboration)?spawn_agent$|^Agent$",hooks=[{type="command",command='
+             + json.dumps(command) + ',timeout=9}]}]')
+    return args[:launch.insert_at] + ["-c", value] + args[launch.insert_at:]
+
+
 def decision(text: str) -> Optional[Tuple[Optional[str], Optional[str]]]:
     """(modèle, effort) rendus par le service ; None si la réponse n'est pas une décision valide."""
     try:
@@ -254,13 +364,7 @@ def post(to: Link, path: str, body: object, timeout: float) -> Reply:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 result[0] = (response.status, response.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as error:
-            # Le corps d'une erreur porte le message de fin d'essai (402) : lu, borné.
-            try:
-                body = error.read(4096).decode("utf-8", "replace")
-            except OSError:
-                # Corps illisible : le code seul suffit, le lanceur garde le réglage.
-                body = ""
-            result[0] = (error.code, body)
+            result[0] = (error.code, "")
         except (OSError, ValueError):
             # Injoignable ou réponse cassée : l'appelant garde le réglage.
             result[0] = None
@@ -276,47 +380,59 @@ def routed(args: List[str], launch: Launch, model: Optional[str], effort: Option
     return args[:launch.insert_at] + added + args[launch.insert_at:]
 
 
-CONTROL = re.compile(r"[\x00-\x1f\x7f]")
-MESSAGE_MAX = 400
-
-
-def trial_end(text: str) -> Optional[str]:
-    """Le message de fin d'essai du service (402), nettoyé et borné ; None si la réponse n'en est pas un."""
-    try:
-        parsed = json.loads(text)
-    except ValueError:
-        return None
-    if not isinstance(parsed, dict) or parsed.get("error") != "trial_ended" or not isinstance(parsed.get("message"), str):
-        return None
-    return CONTROL.sub("", parsed["message"]).strip()[:MESSAGE_MAX] or None
-
-
 def decide(args: List[str], env: Dict[str, str]) -> List[str]:
     """Arguments de `codex` : avec le réglage du service, ou inchangés sur toute panne."""
     launch = parse(args)
-    unchanged = routed(args, launch, None, launch.tag_effort) if launch.tag_effort else args
     to = link(env)
-    if launch.prompt is None or to is None or (launch.keep_model and launch.keep_effort):
-        return unchanged
+    if to is None:
+        return args
     try:
-        model, effort = codex_setting((codex_home(env) / "config.toml").read_text(encoding="utf-8"))
+        config = (codex_home(env) / "config.toml").read_text(encoding="utf-8")
     except OSError:
-        model, effort = "", ""
-    reply = post(to, "/v1/route", facts(launch, model, launch.tag_effort or effort), TIMEOUT_S)
-    if reply is not None and reply[0] == 402:
-        ended = trial_end(reply[1])
-        if ended:
-            print(ended, file=sys.stderr)
-        return unchanged
-    choice = decision(reply[1]) if reply is not None and reply[0] == 200 else None
-    if choice is None:
-        return unchanged
-    chosen_model = None if launch.keep_model else choice[0]
-    chosen_effort = launch.tag_effort or (None if launch.keep_effort else choice[1])
-    shown = " · ".join(part for part in (chosen_model or model, chosen_effort or effort) if part)
-    if shown:
-        print(f"{NAME} : {shown}", file=sys.stderr)
-    return routed(args, launch, chosen_model, chosen_effort)
+        config = ""
+    out, chosen_model = args, None
+    if launch.prompt is not None and not (launch.keep_model and launch.keep_effort):
+        effort = user_setting(args, config, "model_reasoning_effort")
+        catalog = native_catalog(env)
+        model = user_model(args, config) or next(iter(catalog), "")
+        payload = facts(launch, model, effort)
+        if catalog:
+            payload["available_models"] = catalog
+        reply = post(to, "/v1/route", payload, TIMEOUT_S) if catalog else None
+        choice = decision(reply[1]) if reply is not None and reply[0] == 200 else None
+        if choice is not None and catalog:
+            target = model if launch.keep_model else choice[0] or model
+            wanted_effort = effort if launch.keep_effort else choice[1] or effort
+            if target not in catalog or (wanted_effort is not None and wanted_effort not in catalog[target]):
+                choice = None
+        if choice is not None:
+            chosen_model = None if launch.keep_model else choice[0]
+            chosen_effort = None if launch.keep_effort else choice[1]
+            shown = " · ".join(part for part in (chosen_model or model, chosen_effort or effort) if part)
+            if shown:
+                print(f"{NAME} : {shown}", file=sys.stderr)
+            out = routed(args, launch, chosen_model, chosen_effort)
+    return limited(out, launch, to, config, chosen_model or user_model(args, config))
+
+
+def compact_limit(text: str) -> Optional[int]:
+    try:
+        value = json.loads(text).get("compact_at")
+    except (ValueError, AttributeError):
+        # Réponse illisible : Codex garde son propre seuil.
+        return None
+    return value if isinstance(value, int) and not isinstance(value, bool) and 10_000 <= value <= 10_000_000 else None
+
+
+def limited(args: List[str], launch: Launch, to: Link, config: str, model: str) -> List[str]:
+    """Seuil de compaction du service, sauf si l'utilisateur a fixé le sien ; inchangé sur toute panne."""
+    if launch.mode not in CONVERSATIONS or launch.keep_compact or re.search(rf"(?m)^\s*{COMPACT_KEY}\s*=", config):
+        return args
+    reply = post(to, "/v1/compact-limit", {"model": model}, LIMIT_TIMEOUT_S)
+    limit = compact_limit(reply[1]) if reply is not None and reply[0] == 200 else None
+    if limit is None:
+        return args
+    return args[:launch.insert_at] + ["-c", f"{COMPACT_KEY}={limit}"] + args[launch.insert_at:]
 
 
 def step_id(session: str, rank: object) -> str:
@@ -395,8 +511,9 @@ def session_files(home: Path, since: float, cwd: str) -> List[Path]:
     return found
 
 
-def send_usage(env: Dict[str, str], since: float, cwd: str, reference: str = "") -> None:
-    """Relève et envoie les compteurs des sessions de ce lancement ; ne lève jamais."""
+def send_usage(env: Dict[str, str], since: float, cwd: str, reference: str = "", pinned: bool = False) -> None:
+    """Relève et envoie les compteurs des sessions de ce lancement ; ne lève jamais. `pinned` :
+    l'utilisateur a fixé le modèle au lancement, ses étapes sont hors mesure pour le service."""
     to = link(env)
     if to is None:
         return
@@ -406,9 +523,11 @@ def send_usage(env: Dict[str, str], since: float, cwd: str, reference: str = "")
             steps += steps_of(path.read_text(encoding="utf-8").splitlines())
         except OSError:
             continue
-    if reference:
-        for step in steps:
+    for step in steps:
+        if reference:
             step["reference_model"] = reference
+        if pinned:
+            step["pinned"] = True
     for start in range(0, len(steps), BATCH_MAX):
         reply = post(to, "/v1/usage", {"steps": steps[start:start + BATCH_MAX]}, USAGE_TIMEOUT_S)
         # Injoignable, lent ou en erreur : le reste est perdu pour ce lancement (sous-compte,
@@ -422,6 +541,14 @@ def run_codex(args: List[str], env: Dict[str, str]) -> int:
     if not binary:
         print(f"{NAME} : codex introuvable (installe Codex CLI d'abord).", file=sys.stderr)
         return 127
+    # Same local mechanisms as a host/ACP launch; old services decline the
+    # versioned handshake and leave Codex's native transport unchanged.
+    to = link(env)
+    for runtime in (Path(__file__).parent / "runtime", Path(__file__).parent.parent / "runtime"):
+        if to and (runtime / "relay.py").is_file():
+            sys.path.insert(0, str(runtime.parent))
+            from runtime.relay import run
+            return run(binary, args, {**env, "TOKFIT_RELAY_URL": to[0], "TOKFIT_RELAY_TOKEN": to[1]})
     # Ctrl-C va à Codex (même groupe de processus) : le lanceur attend sa fin.
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
@@ -431,8 +558,18 @@ def run_codex(args: List[str], env: Dict[str, str]) -> int:
 
 
 def main(argv: List[str], env: Dict[str, str]) -> int:
-    if argv[:1] == ["_usage"] and len(argv) in (3, 4):
-        send_usage(env, float(argv[1]), argv[2], argv[3] if len(argv) == 4 else "")
+    if argv == ["_hook"]:
+        try:
+            event = json.loads(sys.stdin.read(65_537))
+        except ValueError:
+            return 0
+        if isinstance(event, dict):
+            output = subagent_hook(event, env)
+            if output:
+                print(json.dumps(output))
+        return 0
+    if argv[:1] == ["_usage"] and len(argv) in (3, 4, 5):
+        send_usage(env, float(argv[1]), argv[2], argv[3] if len(argv) >= 4 else "", argv[4:] == [PINNED])
         return 0
     if argv[:1] != ["codex"]:
         print(f"usage : {NAME} codex [options et message de codex]", file=sys.stderr)
@@ -444,13 +581,14 @@ def main(argv: List[str], env: Dict[str, str]) -> int:
         reference = user_model(args, (codex_home(env) / "config.toml").read_text(encoding="utf-8"))
     except OSError:
         reference = user_model(args, "")
-    code = run_codex(decide(args, env), env)
+    code = run_codex(hook_args(decide(args, env), env), env)
     # Compteurs : toute conversation menée par ce lancement (neuve, reprise ou fork).
-    counted = launch.mode in ("interactive", "exec", "resume", "fork", "exec resume")
+    counted = launch.mode in CONVERSATIONS
     if counted and link(env) is not None:
         cwd = os.path.join(os.getcwd(), os.path.expanduser(launch.cwd)) if launch.cwd else os.getcwd()
         # Envoi détaché : la main revient tout de suite, même si le service est lent.
-        subprocess.Popen([sys.executable, os.path.abspath(__file__), "_usage", repr(since), cwd, reference],
+        fixed = [PINNED] if launch.keep_model else []
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "_usage", repr(since), cwd, reference, *fixed],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True, env=env)
     return code

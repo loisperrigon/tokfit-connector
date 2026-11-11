@@ -1,7 +1,7 @@
 // Monde simulé sous le connecteur : fichier de configuration, service
 // (réponses programmées), conversation, horloge, et tout ce qui se voit à
 // l'écran ou s'écrit sur la machine. Aucun réseau, aucun disque.
-import type { On, SessionMessage, TurnStepInput, TurnStepResult, TurnUsage } from 'claude-code'
+import type { AgentSpawnInput, ModelForkResult, PromptComposeSection, SessionContextBreakdown, On, SessionMessage, TurnStepInput, TurnStepResult, TurnUsage } from 'claude-code'
 import type { Engine, MockClock } from 'claude-code/testing'
 import { mock } from 'claude-code/testing'
 
@@ -21,6 +21,26 @@ export type Options = {
   env?: Record<string, string>
   route?: (body: Record<string, unknown>) => Reply
   usage?: (body: Record<string, unknown>) => Reply
+  // Outil Bash : sortie de la commande (par défaut, aucun outil ne tourne) ; `error` : l'outil échoue.
+  bash?: (command: string) => { stdout: string; stderr?: string } | 'error'
+  // Outils Read et Edit : contenu de chaque fichier lu (par défaut, aucun outil ne tourne).
+  read?: (path: string) => string
+  // Répartition du contexte rendue à `$.session.usage({ breakdown })`.
+  breakdown?: SessionContextBreakdown
+  // Étape de sous-agent retenue jusqu'à ce que la promesse rendue se résolve ; par défaut, immédiate.
+  holdAgent?: (agentId: string) => Promise<void>
+  // Compaction au coût : par défaut, ne jamais compacter.
+  compact?: (body: Record<string, unknown>) => Reply
+  // Refus de `$.session.compact` par le moteur, avec ce message (session sans terminal, tour en cours).
+  compactRefused?: string
+  // Relance du cache : par défaut, ne jamais relancer.
+  warm?: (body: Record<string, unknown>) => Reply
+  // Leviers coupés pour la session : par défaut, aucun.
+  levers?: (body: Record<string, unknown>) => Reply
+  // Réponse de `$.model.fork` (relance du cache) ; par défaut, « ok » sur le cache du fil.
+  fork?: () => ModelForkResult
+  // Contexte rendu par `$.session.usage()` (tokens) ; par défaut 42 000.
+  contextTokens?: () => number
   messages?: SessionMessage[]
   files?: Record<string, string>
   rateLimits?: { kind: string; percentUsed: number }[]
@@ -28,17 +48,35 @@ export type Options = {
   agentMessages?: Record<string, SessionMessage[]>
   // Sous-agents que la session connaît déjà (repris d'une session précédente).
   listed?: string[]
+  // Sous-agents rendus par `$.agent.list()` avec leur état ; remplace `listed` pour la liste.
+  roster?: { id: string; status: 'pending' | 'running' | 'waiting' | 'idle' | 'completed'; parentId?: string }[]
   // Ce que le moteur fait pendant un lancement, avant d'en rendre l'identifiant.
   whileSpawning?: () => Promise<void>
   // Faux : l'API n'a rien répondu (étape sans compteurs).
   counted?: boolean
+  // Version du moteur (`$.session.version()`) ; par défaut une version sans compaction à l'inactivité.
+  version?: string
+  // Réglages fusionnés (`$.settings.read()`) ; par défaut aucun.
+  settings?: Record<string, unknown>
 }
 
 export type World = {
+  // Fichiers du monde simulé, modifiables en cours de test (l'application hôte les réécrit).
+  files: Record<string, string>
   clock: MockClock
   sent: Sent[]
   routes: () => Sent[]
   usages: () => Sent[]
+  warms: () => Sent[]
+  compacts: () => Sent[]
+  leverCalls: () => Sent[]
+  // Compactions reçues par le moteur (déclencheur et consignes).
+  compactions: { trigger?: string; instructions?: string }[]
+  // Lancements de sous-agents tels que le moteur les a reçus.
+  spawned: AgentSpawnInput[]
+  // Relances `$.model.fork` reçues par le moteur (leur consigne), et leur réflexion demandée.
+  forks: string[]
+  forkEfforts: (string | undefined)[]
   // Étapes telles que le moteur les a reçues (après le connecteur).
   steps: TurnStepInput[]
   // Tout texte non vide montré à l'écran (ligne d'état, journal, bulles, notifications).
@@ -46,6 +84,9 @@ export type World = {
   // Tout ce que le connecteur écrit sur la machine ou envoie ailleurs qu'au service.
   written: string[]
 }
+
+// Prompt système du moteur dans le monde simulé.
+export const CORE_PROMPT: PromptComposeSection[] = [{ id: 'intro', text: 'Tu es Claude Code.', scope: 'shared' }]
 
 export function config(url: string = URL, key: string = KEY): string {
   return JSON.stringify({ url, key })
@@ -62,9 +103,12 @@ export function world(on: On, options: Options = {}): World {
   const text = options.config === undefined ? config() : options.config
   if (text !== null) files[options.configPath ?? CONFIG_PATH] = text
   const w: World = {
-    clock, sent: [], steps: [], shown: [], written: [],
+    files, clock, sent: [], steps: [], shown: [], written: [], spawned: [], forks: [], forkEfforts: [], compactions: [],
     routes: () => w.sent.filter(s => s.url.endsWith('/v1/route')),
     usages: () => w.sent.filter(s => s.url.endsWith('/v1/usage')),
+    warms: () => w.sent.filter(s => s.url.endsWith('/v1/warm')),
+    compacts: () => w.sent.filter(s => s.url.endsWith('/v1/compact')),
+    leverCalls: () => w.sent.filter(s => s.url.endsWith('/v1/levers')),
   }
   on('fs.read', async ($, e) => {
     const found = files[e.path]
@@ -79,6 +123,9 @@ export function world(on: On, options: Options = {}): World {
     w.sent.push({ url: e.url, headers: e.init?.headers ?? {}, body })
     const answer: (body: Record<string, unknown>) => Reply = e.url.endsWith('/v1/route') ? options.route ?? (() => ({ status: 200, body: { model: null, effort: null } }))
       : e.url.endsWith('/v1/usage') ? options.usage ?? (() => ({ status: 200, body: { recorded: 1 } }))
+      : e.url.endsWith('/v1/compact') ? options.compact ?? (() => ({ status: 200, body: { compact: false } }))
+      : e.url.endsWith('/v1/warm') ? options.warm ?? (() => ({ status: 200, body: { after_s: null } }))
+      : e.url.endsWith('/v1/levers') ? options.levers ?? (() => ({ status: 200, body: { off: [] } }))
       : () => ({ status: 404 })
     const reply = answer(body)
     if (reply === 'down') throw new Error('connexion refusée')
@@ -87,14 +134,23 @@ export function world(on: On, options: Options = {}): World {
     return { value: { status: reply.status, ok: reply.status >= 200 && reply.status < 300, headers: {}, text: out } }
   })
   on('session.id', async () => ({ value: SESSION }))
+  on('session.version', async () => {
+    const version = options.version ?? '2.1.280'
+    return { value: { version, base: version, builtAt: '2026-10-01T00:00:00Z' } }
+  })
+  on('settings.read', async () => ({ value: options.settings ?? {} }))
   on('session.root', async () => ({ value: '/projet' }))
   on('session.messages', async ($, e) => ({ value: e.agentId ? options.agentMessages?.[e.agentId] ?? [] : options.messages ?? [] }))
   const listed = [...options.listed ?? []]
   on('agent.list', async () => ({
-    value: listed.map(id => ({ id, description: 'sous-tâche', type: 'general-purpose', status: 'running' as const })),
+    value: options.roster?.map(agent => ({ description: 'sous-tâche', type: 'general-purpose', ...agent }))
+      ?? listed.map(id => ({ id, description: 'sous-tâche', type: 'general-purpose', status: 'running' as const })),
   }))
-  on('session.usage', async () => ({
-    value: { startedAt: 0, context: { tokens: 42_000, window: 200_000 }, rateLimits: options.rateLimits ?? [] },
+  on('session.usage', async ($, e) => ({
+    value: {
+      startedAt: 0, rateLimits: options.rateLimits ?? [],
+      context: { tokens: options.contextTokens?.() ?? 42_000, window: 200_000, ...(e?.breakdown && options.breakdown ? { breakdown: options.breakdown } : {}) },
+    },
   }))
   const show = (event: string, text: string | undefined): { value: undefined } => {
     if (text) w.shown.push(`${event} ${text}`)
@@ -114,23 +170,52 @@ export function world(on: On, options: Options = {}): World {
   on('process.run', async ($, e) => refuse('process.run', e))
   on('turn.step', async function* ($, e) {
     w.steps.push(e)
+    if (e.agentId !== undefined && options.holdAgent) await options.holdAgent(e.agentId)
     const model = e.model.includes('claude-') ? e.model : `claude-${e.model}-5-5`
     const usage = options.counted === false ? null : usageOf(model)
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: usage ? 'end_turn' : null, usage }
   })
-  on('tool.call', async () => ({ deny: 'monde simulé : aucun outil ne tourne' }))
+  on('tool.call', async ($, e) => {
+    const read = options.read
+    if (read && e.tool === 'Read') {
+      const text = read(e.file_path)
+      return { ref: 1, result: { type: 'text' as const, file: { filePath: e.file_path, content: text, numLines: 1, startLine: 1, totalLines: 1 } }, text }
+    }
+    if (read && e.tool === 'Edit') return { ref: 1, result: { filePath: e.file_path }, text: 'modifié' }
+    const run = options.bash
+    if (e.tool !== 'Bash' || !run) return { deny: 'monde simulé : aucun outil ne tourne' }
+    const out = run(e.command)
+    if (out === 'error') return { isError: true as const, result: 'exit 1', text: 'exit 1' }
+    const result = { stdout: out.stdout, stderr: out.stderr ?? '', interrupted: false }
+    return { ref: 1, result, text: [result.stdout, result.stderr].filter(Boolean).join('\n') }
+  })
   // Un sous-agent neuf reçoit agent-1, agent-2… ; une reprise garde son identifiant.
   on('agent.spawn', async ($, e) => {
+    w.spawned.push(e)
     const agentId = e.resume?.agentId ?? `agent-${listed.length + 1}`
     if (!listed.includes(agentId)) listed.push(agentId)
     await options.whileSpawning?.()
-    return { model: e.fork ? e.parentModel : e.model ?? e.parentModel, agentId }
+    // Lancement par un plugin : le monde simulé ne remplit pas le modèle du parent.
+    return { model: (e.fork ? e.parentModel : e.model ?? e.parentModel) ?? 'claude-opus-5-5', agentId }
   })
   on('agent.offer', async () => ({ isOffered: true }))
+  on('model.fork', async ($, e) => {
+    w.forks.push(e.prompt)
+    w.forkEfforts.push(e.effort)
+    const usage = { input_tokens: 4, output_tokens: 2, cache_read_input_tokens: 52_000, cache_creation_input_tokens: 300 }
+    return { value: options.fork?.() ?? { isAnswered: true as const, text: 'ok', usage } }
+  })
+  on('prompt.compose', async () => ({ sections: CORE_PROMPT }))
   on('turn.complete', async ($, e) => ({ text: e.answer }))
+  on('prompt.submit', async ($, e) => ({ text: e.text }))
   on('session.end', async ($, e) => ({ sessionId: e.sessionId }))
-  on('session.compact', async ($, e) => ({ messages: e.messages }))
-  on('prompt.section', async ($, e) => ({ name: e.name, text: e.text }))
+  on('session.compact', async ($, e) => {
+    // Appel d'un plugin : le banc ne passe que ses arguments (ni déclencheur ni messages). C'est lui
+    // que le moteur refuse ; la commande /compact, elle, arrive ici avec son déclencheur.
+    if (options.compactRefused !== undefined && e.trigger === undefined) throw new Error(options.compactRefused)
+    w.compactions.push({ ...(e.trigger ? { trigger: e.trigger } : {}), ...(e.instructions ? { instructions: e.instructions } : {}) })
+    return { messages: e.messages ?? [{ role: 'user' as const, text: 'résumé', toolUses: [] }] }
+  })
   return w
 }
 
@@ -167,6 +252,16 @@ export async function turn($: Engine, turnId: string, steps: number, model = 'cl
 
 export async function complete($: Engine, turnId: string, agentId?: string): Promise<void> {
   await $.turn.complete({ turnId, answer: '', durationMs: 1, isAborted: false, reason: 'answer', ...(agentId ? { agentId } : {}) })
+}
+
+// Tour du fil principal interrompu (Échap, ou message tapé pendant le tour).
+export async function aborted($: Engine, turnId: string): Promise<void> {
+  await $.turn.complete({ turnId, answer: '', durationMs: 1, isAborted: true, reason: 'aborted' })
+}
+
+// Message de l'utilisateur ; `during` : identifiant du tour en cours quand il est tapé.
+export async function submit($: Engine, text: string, during?: string): Promise<void> {
+  await $.prompt.submit({ text, wait: false, origin: { kind: 'user' }, ...(during ? { turnId: during } : {}) })
 }
 
 export type AgentCall = {

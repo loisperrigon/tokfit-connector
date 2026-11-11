@@ -21,7 +21,40 @@ export type Step = {
   cache_write: number
   output: number
   quota_percent?: number
+  // Étape d'un sous-agent : son cache dure 5 min (fil principal : 1 h).
+  subagent?: true
+  // Secondes depuis la fin de l'appel précédent de la même boucle, sur la même
+  // famille de modèle : le service y repère un cache perdu avant sa durée.
+  idle_s?: number
+  // Fork de relance du cache (warm.ts) : une dépense de l'outil, hors référence.
+  ping?: true
+} & LeverFacts
+
+// Faits des leviers sur l'étape qu'ils touchent (service/levers.py) : des nombres seulement.
+export type LeverFacts = {
+  // Relances faites pendant la pause qui précède, et sa durée (secondes).
+  after_pings?: number
+  pause_s?: number
+  // Contexte (tokens) avant une compaction du connecteur, sur la première étape après.
+  compacted_from?: number
+  // Issue de la compaction que le service voulait pendant la pause qui précède (compact.ts).
+  compact_try?: 'done' | 'skip' | 'error' | 'back'
+  // Caractères retirés des sorties d'outils que cette requête relit pour la première fois.
+  trimmed_chars?: number
+  // Caractères de fichiers relus après une compaction du connecteur (rereads.ts).
+  reread_chars?: number
+  // Première étape d'un sous-agent qui a attendu le premier de son type.
+  fanout?: true
+  // Réflexion demandée en anglais dans une conversation qui ne l'est pas.
+  lean_thinking?: true
+  // Modèle que l'utilisateur a choisi pour la session : la référence de ses économies.
+  reference_model?: string
+  // Modèle fixé par l'utilisateur (routage coupé par lui ou son application, balise) : étape hors mesure.
+  pinned?: true
 }
+
+// Ce que le connecteur sait du cache au moment de l'étape.
+export type CacheFacts = { subagent: boolean; idleS: number | undefined; ping?: boolean }
 
 export async function stepId(session: string, agentId: string | undefined, turnId: string, index: number): Promise<string> {
   const data = new TextEncoder().encode([session, agentId ?? 'main', turnId, String(index)].join('\n'))
@@ -30,7 +63,8 @@ export async function stepId(session: string, agentId: string | undefined, turnI
 }
 
 export async function stepOf(session: string, agentId: string | undefined, turnId: string, index: number,
-                             effort: unknown, usage: TurnUsage, limits: readonly SessionRateLimit[]): Promise<Step> {
+                             effort: unknown, usage: TurnUsage, limits: readonly SessionRateLimit[],
+                             cache: CacheFacts, levers: LeverFacts = {}): Promise<Step> {
   // Quota : la fenêtre la plus entamée, comme la relève le service.
   const used = limits.map(limit => limit.percentUsed).filter(value => Number.isFinite(value))
   return {
@@ -43,6 +77,10 @@ export async function stepOf(session: string, agentId: string | undefined, turnI
     cache_write: usage.cache_creation_input_tokens,
     output: usage.output_tokens,
     ...(used.length ? { quota_percent: Math.min(100, Math.max(0, ...used)) } : {}),
+    ...(cache.subagent ? { subagent: true as const } : {}),
+    ...(cache.idleS !== undefined ? { idle_s: cache.idleS } : {}),
+    ...(cache.ping ? { ping: true as const } : {}),
+    ...levers,
   }
 }
 

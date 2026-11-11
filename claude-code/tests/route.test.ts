@@ -2,7 +2,7 @@
 // { model, effort } et garde le réglage en cours sur toute erreur, lenteur ou
 // clé refusée, sans rien montrer.
 import { describe, expect, test } from 'claude-code/testing'
-import { KEY, SESSION, URL, assistant, config, spawn, step, user, world } from './support'
+import { KEY, SESSION, URL, aborted, assistant, complete, config, step, submit, user, world } from './support'
 import type { Reply } from './support'
 import { DEFAULT_URL } from '../hooks/service'
 
@@ -41,16 +41,22 @@ describe('configuration', () => {
     expect(w.routes()[0]?.headers).toMatchObject({ authorization: `Bearer ${OTHER}` })
   })
 
-  test('clé du plugin sans adresse nulle part : adresse officielle', { options: { api_key: KEY } }, async ($, on) => {
+  // Adresse officielle : vide dans le dépôt de travail, posée dans la copie
+  // publique (connector/publish.py). Les deux copies passent ces essais.
+  const official = (sent: { url: string }[]) =>
+    DEFAULT_URL ? expect(sent.map((call) => call.url)).toContain(`${DEFAULT_URL}/v1/route`) : expect(sent).toEqual([])
+
+  test('clé du plugin sans adresse nulle part : adresse officielle, sinon rien ne part', { options: { api_key: KEY } }, async ($, on) => {
     const w = world(on, { config: null, messages: [user('x')] })
     await step($, 0)
-    expect(w.sent.map(request => request.url)).toEqual([`${DEFAULT_URL}/v1/route`])
+    official(w.sent)
   })
 
-  test('fichier sans adresse : adresse officielle', async ($, on) => {
+  test('adresse absente du fichier : adresse officielle, sinon rien ne part', async ($, on) => {
     const w = world(on, { config: JSON.stringify({ key: KEY }), messages: [user('x')] })
     await step($, 0)
-    expect(w.sent.map(request => request.url)).toEqual([`${DEFAULT_URL}/v1/route`])
+    official(w.sent)
+    if (!DEFAULT_URL) expect(w.shown).toEqual([])
   })
 
   test('TOKFIT_CONFIG désigne un autre fichier', async ($, on) => {
@@ -111,6 +117,54 @@ describe('décision appliquée', () => {
     expect(JSON.stringify(w.routes()[1]?.body)).not.toContain('task-notification')
   })
 
+  test('message tapé pendant le travail : le tour qui le reprend garde modèle et réflexion', async ($, on) => {
+    const msgs = [user('refais tout le module et teste chaque fonction')]
+    let answer: Reply = { status: 200, body: { model: 'opus', effort: 'high' } }
+    const w = world(on, { messages: msgs, route: () => answer })
+    await step($, 0, { turnId: 't1' })
+    await step($, 1, { turnId: 't1' })
+    // Claude Code interrompt l'étape, puis relance le travail avec ce seul message.
+    answer = { status: 200, body: { model: 'haiku', effort: 'low' } }
+    await submit($, 'pense aussi aux tests', 't1')
+    await aborted($, 't1')
+    await submit($, 'pense aussi aux tests')
+    msgs.push(assistant(''), user('pense aussi aux tests'))
+    await step($, 0, { turnId: 't2' })
+    await step($, 1, { turnId: 't2' })
+    expect(w.routes()).toHaveLength(1)
+    expect(w.steps.slice(2).map(s => [s.model, s.effort])).toEqual([['claude-opus-5-5', 'high'], ['claude-opus-5-5', 'high']])
+    // Fin normale du travail : le message suivant est une nouvelle demande.
+    await complete($, 't2')
+    msgs.push(assistant('fini'), user('merci, résume'))
+    await submit($, 'merci, résume')
+    await step($, 0, { turnId: 't3' })
+    expect(w.routes()).toHaveLength(2)
+    expect(w.steps[4]).toMatchObject({ model: 'haiku', effort: 'low' })
+  })
+
+  test('message tapé pendant un tour fini sans interruption : routé au tour suivant', async ($, on) => {
+    const msgs = [user('lance les tests')]
+    const w = world(on, { messages: msgs, route: () => ({ status: 200, body: { model: 'sonnet', effort: 'medium' } }) })
+    await step($, 0, { turnId: 't1' })
+    // Lu dans le tour en cours (outil passé en arrière-plan) : le tour finit normalement.
+    await submit($, 'et ensuite le lint', 't1')
+    await complete($, 't1')
+    msgs.push(assistant('fait'), user('et ensuite le lint'))
+    await step($, 0, { turnId: 't2' })
+    expect(w.routes()).toHaveLength(2)
+  })
+
+  test('arrêt puis nouvelle demande tapée à l\'arrêt : routée', async ($, on) => {
+    const msgs = [user('refais tout')]
+    const w = world(on, { messages: msgs, route: () => ({ status: 200, body: { model: 'opus', effort: 'high' } }) })
+    await step($, 0, { turnId: 't1' })
+    await aborted($, 't1')
+    msgs.push(assistant(''), user('autre chose : renomme x'))
+    await submit($, 'autre chose : renomme x')
+    await step($, 0, { turnId: 't2' })
+    expect(w.routes()).toHaveLength(2)
+  })
+
   test('identifiant complet de modèle rendu par le service : appliqué tel quel', async ($, on) => {
     const w = world(on, { messages: [user('x')], route: () => ({ status: 200, body: { model: 'claude-sonnet-5-5', effort: 'low' } }) })
     await step($, 0)
@@ -127,63 +181,8 @@ describe('décision appliquée', () => {
     const w = world(on, { messages: [user('x')], route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } }) })
     await step($, 0)
     expect(w.shown).toHaveLength(1)
-    // Desktop met déjà la pastille « tokfit » devant la ligne : le texte ne la
-    // répète pas. La flèche la distingue du sélecteur de modèle de l'interface.
-    expect(w.shown[0]).toBe('ui.status → Sonnet · Bas')
-    expect(w.shown[0]).not.toMatch(/tokfit|raison|probabilit|%/i)
-  })
-
-  const lines: [string, string, string][] = [
-    ['haiku', 'medium', 'Haiku · Moyen'], ['opus', 'high', 'Opus · Élevé'],
-    ['opus', 'xhigh', 'Opus · Très élevé'], ['sonnet', 'max', 'Sonnet · Max'],
-  ]
-  for (const [model, effort, text] of lines) {
-    test(`ligne d’état en clair : ${model} ${effort}`, async ($, on) => {
-      const w = world(on, { messages: [user('x')], route: () => ({ status: 200, body: { model, effort } }) })
-      await step($, 0)
-      expect(w.shown).toEqual([`ui.status → ${text}`])
-    })
-  }
-})
-
-// Le moteur écrit une fois par session « You are powered by the model named
-// Opus 5.5 » dans la conversation. Le modèle de chaque message change ensuite :
-// la phrase deviendrait fausse, et le modèle se tromperait sur lui-même.
-describe('identité du modèle', () => {
-  const ORIGINAL = 'You are powered by the model named Opus 5.5. The exact model ID is claude-opus-5-5. Assistant knowledge cutoff is June 2026.'
-
-  test('connecteur configuré : la phrase ne nomme plus un modèle fixe', async ($, on) => {
-    world(on, { messages: [user('x')] })
-    const section = await $.prompt.section({ name: 'env_info_model', text: ORIGINAL })
-    expect(section.text).not.toContain('Opus 5.5')
-    expect(section.text).toContain('tokfit')
-    expect(section.text).toMatch(/Opus, Sonnet or Haiku/)
-    expect(section.text).toMatch(/status line/)
-  })
-
-  test('le texte est le même à chaque session : le cache de la conversation tient', async ($, on) => {
-    world(on, { messages: [user('x')] })
-    const first = await $.prompt.section({ name: 'env_info_model', text: ORIGINAL })
-    const second = await $.prompt.section({ name: 'env_info_model', text: ORIGINAL.replace('Opus', 'Sonnet') })
-    expect(second.text).toBe(first.text)
-  })
-
-  test('sans configuration : phrase d’origine, le modèle ne change pas', async ($, on) => {
-    world(on, { config: null })
-    const section = await $.prompt.section({ name: 'env_info_model', text: ORIGINAL })
-    expect(section.text).toBe(ORIGINAL)
-  })
-
-  test('les autres sections ne bougent pas', async ($, on) => {
-    world(on, { messages: [user('x')] })
-    const section = await $.prompt.section({ name: 'env_info_simple', text: '# Environment' })
-    expect(section.text).toBe('# Environment')
-  })
-
-  test('section absente (texte nul) : rien n’est ajouté', async ($, on) => {
-    world(on, { messages: [user('x')] })
-    const section = await $.prompt.section({ name: 'env_info_model', text: null })
-    expect(section.text).toBeNull()
+    expect(w.shown[0]).toBe('ui.status sonnet · low')
+    expect(w.shown[0]).not.toMatch(/jev|openrouter|%/i)
   })
 })
 
@@ -232,70 +231,6 @@ describe('repli sur le réglage en cours', () => {
   })
 })
 
-describe('fin de l’essai', () => {
-  const MESSAGE = 'Ton essai tokfit de 7 jours est terminé. Il t’a fait économiser environ 12,40 $ (34 %, mesuré, en équivalent API) sur ton abonnement. Pour continuer : https://tokfit.dodoia.re'
-  const ended: Reply = { status: 402, body: { error: 'trial_ended', message: MESSAGE, url: 'https://tokfit.dodoia.re' } }
-
-  test('le message est montré une fois, le réglage de l’utilisateur reste', async ($, on) => {
-    const w = world(on, { messages: [user('x')], route: () => ended })
-    await step($, 0, { turnId: 't1' })
-    expect(w.shown).toEqual([`ui.toast ${MESSAGE}`, 'ui.status Essai terminé · https://tokfit.dodoia.re'])
-    expect(w.steps[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high' })
-  })
-
-  test('ensuite plus aucune demande au service, la ligne d’état reste, pas de second message', async ($, on) => {
-    const w = world(on, { messages: [user('x')], route: () => ended })
-    await step($, 0, { turnId: 't1' })
-    w.shown.length = 0
-    await step($, 0, { turnId: 't2' })
-    expect(w.routes()).toHaveLength(1)
-    expect(w.shown).toEqual(['ui.status Essai terminé · https://tokfit.dodoia.re'])
-    expect(w.steps[1]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high' })
-  })
-
-  test('les balises de l’utilisateur continuent de s’appliquer', async ($, on) => {
-    const w = world(on, { messages: [user('[haiku] [low] x')], route: () => ended })
-    await step($, 0, { turnId: 't1' })
-    await step($, 0, { turnId: 't2' })
-    expect(w.steps[1]).toMatchObject({ model: 'haiku', effort: 'low' })
-  })
-
-  test('texte du service nettoyé : caractères de contrôle ôtés, longueur bornée, adresse https seulement', async ($, on) => {
-    const dirty: Reply = { status: 402, body: { error: 'trial_ended', message: `A\u0007B\u001b\nC${'z'.repeat(900)}`, url: 'javascript:alert(1)' } }
-    const w = world(on, { messages: [user('x')], route: () => dirty })
-    await step($, 0)
-    const toast = w.shown[0] ?? ''
-    expect(toast.startsWith('ui.toast ABC')).toBe(true)
-    expect(toast).not.toMatch(/[\u0000-\u001f\u007f]/)
-    expect(toast.length).toBeLessThanOrEqual('ui.toast '.length + 400)
-    expect(w.shown[1]).toBe('ui.status Essai terminé')
-  })
-
-  const ignored: [string, Reply][] = [
-    ['402 sans le code attendu', { status: 402, body: { message: MESSAGE } }],
-    ['402 sans message', { status: 402, body: { error: 'trial_ended' } }],
-    ['402 illisible', { status: 402, text: '<html>' }],
-    ['429 (plafond du jour)', { status: 429, body: { error: 'Limite quotidienne atteinte.' } }],
-    ['503 (disjoncteur)', { status: 503, body: { error: 'Décision indisponible : réglage gardé.' } }],
-  ]
-  for (const [name, reply] of ignored) {
-    test(`${name} : rien d’affiché, le réglage reste`, async ($, on) => {
-      const w = world(on, { messages: [user('x')], route: () => reply })
-      await step($, 0)
-      expect(w.shown).toEqual([])
-      expect(w.steps[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high' })
-    })
-  }
-
-  test('un sous-agent lancé après la fin n’interroge plus le service', async ($, on) => {
-    const w = world(on, { messages: [user('x')], route: () => ended })
-    await step($, 0)
-    const before = w.routes().length
-    await spawn($, 'cherche le bug', { type: 'Explore' })
-    expect(w.routes()).toHaveLength(before)
-  })
-})
-
 describe('faits envoyés', () => {
   test('message borné, échanges précédents, session, réglage en cours', async ($, on) => {
     const long = 'a'.repeat(10_000) + 'FIN'
@@ -318,6 +253,26 @@ describe('faits envoyés', () => {
     expect(JSON.stringify(facts).length).toBeLessThan(20_000)
   })
 
+  // Cas réel du 03/11 : « arrête-toi après ce travail, fais bien les journaux »,
+  // seul, ressemblait à une tâche légère ; le service doit savoir qu'un long
+  // travail est en cours et que des sous-agents vont encore rendre leurs résultats.
+  test('travail en cours : sous-agents actifs du fil et étapes depuis le dernier message', async ($, on) => {
+    const w = world(on, {
+      messages: [user('migre tout le module')],
+      roster: [
+        { id: 'a1', status: 'running' }, { id: 'a2', status: 'waiting' }, { id: 'a3', status: 'completed' },
+        { id: 'a4', status: 'idle' }, { id: 'a5', status: 'running', parentId: 'a1' },
+      ],
+    })
+    await step($, 0, { turnId: 't1' })
+    for (let index = 1; index < 5; index++) await step($, index, { turnId: 't1' })
+    await complete($, 't1')
+    await step($, 0, { turnId: 't2' })
+    expect(w.routes()[0]?.body).toMatchObject({ agents_running: 2, steps_since_last_message: 0 })
+    // Le premier pas du tour suivant ne compte pas : seules les 5 étapes du tour précédent.
+    expect(w.routes()[1]?.body).toMatchObject({ agents_running: 2, steps_since_last_message: 5 })
+  })
+
   test('balise de l’utilisateur : son choix passe avant le service, même en panne', async ($, on) => {
     const w = world(on, { messages: [user('[opus] [max] refonte complète')], route: () => 'down' })
     await step($, 0, { model: 'claude-sonnet-5-5', effort: 'low' })
@@ -332,6 +287,30 @@ describe('faits envoyés', () => {
     expect(w.steps[0]).toMatchObject({ model: 'haiku', effort: 'low' })
   })
 
+  // Claude Code passe le tour d'un message contenant `ultrathink` en xhigh (2.1.311).
+  test('ultrathink : la réflexion du message reste au moteur, le service ne choisit que le modèle', async ($, on) => {
+    const w = world(on, { messages: [user('ultrathink : pourquoi ce test échoue ?')], route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } }) })
+    await step($, 0, { effort: 'xhigh' })
+    expect(w.routes()[0]?.body).toMatchObject({ keep_model: false, keep_effort: true })
+    expect(w.steps[0]).toMatchObject({ model: 'sonnet', effort: 'xhigh' })
+  })
+
+  for (const value of ['1', 'true']) {
+    test(`CLAUDE_CODE_DISABLE_ULTRATHINK=${value} : le mot n’a plus d’effet, le service choisit aussi la réflexion`, async ($, on) => {
+      const w = world(on, { messages: [user('ultrathink : pourquoi ce test échoue ?')], env: { CLAUDE_CODE_DISABLE_ULTRATHINK: value },
+        route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } }) })
+      await step($, 0)
+      expect(w.routes()[0]?.body).toMatchObject({ keep_model: false, keep_effort: false })
+      expect(w.steps[0]).toMatchObject({ model: 'sonnet', effort: 'low' })
+    })
+  }
+
+  test('CLAUDE_CODE_DISABLE_ULTRATHINK=0 : ultrathink garde son effet', async ($, on) => {
+    const w = world(on, { messages: [user('ultrathink')], env: { CLAUDE_CODE_DISABLE_ULTRATHINK: '0' } })
+    await step($, 0)
+    expect(w.routes()[0]?.body).toMatchObject({ keep_effort: true })
+  })
+
   test('compaction : le cache de la conversation est froid jusqu’à la réponse suivante', async ($, on) => {
     const w = world(on, { messages: [user('x')] })
     await step($, 0, { turnId: 't1' })
@@ -340,5 +319,51 @@ describe('faits envoyés', () => {
     await step($, 0, { turnId: 't3' })
     expect(w.routes().map(r => r.body.cache_cold)).toEqual([false, true, false])
     expect(w.routes()[2]?.body.model_cache).toMatchObject({ opus: { idle_s: 0 } })
+  })
+})
+
+// Audit du 10/11/2026 : 9 % des messages disent seuls leur difficulté. Le service reçoit
+// de quoi situer le message : le modèle choisi pour la session, le début de la demande qui
+// a ouvert la conversation, et ce que le tour précédent a modifié.
+describe('mémoire de la conversation', () => {
+  test('premier message : le modèle de la session, rien avant lui', async ($, on) => {
+    const w = world(on, { messages: [user('où en est-on sur ce projet ?')] })
+    await step($, 0)
+    expect(w.routes()[0]?.body).toMatchObject({ session_model: 'claude-opus-5-5', first_message: '', last_turn_edits: 0 })
+  })
+
+  test('suite : début de la conversation et fichiers modifiés depuis le message précédent', async ($, on) => {
+    const opening = 'Refonds le module de paiement ' + 'x'.repeat(2_000)
+    const w = world(on, { messages: [user(opening), assistant('fait'), user('et la suite ?')], read: () => 'b' })
+    await step($, 0, { turnId: 't1' })
+    await $.tool.call({ tool: 'Edit', file_path: '/p/a.ts', old_string: 'b', new_string: 'B' })
+    await $.tool.call({ tool: 'Read', file_path: '/p/a.ts' })
+    await $.tool.call({ tool: 'Edit', file_path: '/p/c.ts', old_string: 'b', new_string: 'C' })
+    await complete($, 't1')
+    await step($, 0, { turnId: 't2' })
+    const [first, second] = w.routes().map(sent => sent.body)
+    expect(first).toMatchObject({ first_message: opening.slice(0, 600), last_turn_edits: 0 })
+    expect(second).toMatchObject({ first_message: opening.slice(0, 600), last_turn_edits: 2 })
+    // Le début de la conversation ne part qu'avec la demande de décision.
+    expect(w.sent.filter(sent => JSON.stringify(sent.body).includes('Refonds le module')).every(sent => sent.url.endsWith('/v1/route'))).toBe(true)
+  })
+
+  test('session sur Fable : le service la connaît, peut en descendre et y revenir', async ($, on) => {
+    const answers: Reply[] = [{ status: 200, body: { model: 'opus', effort: 'medium' } }, { status: 200, body: { model: 'claude-fable-5-2', effort: 'high' } }]
+    const w = world(on, { messages: [user('petite question')], route: () => answers.shift() ?? 'down' })
+    await step($, 0, { turnId: 't1', model: 'claude-fable-5-2' })
+    await complete($, 't1')
+    await step($, 0, { turnId: 't2', model: 'claude-fable-5-2' })
+    expect(w.routes().map(sent => [sent.body.model, sent.body.session_model])).toEqual([
+      ['claude-fable-5-2', 'claude-fable-5-2'], ['opus', 'claude-fable-5-2'],
+    ])
+    expect(w.steps.map(seen => [seen.model, seen.effort])).toEqual([['opus', 'medium'], ['claude-fable-5-2', 'high']])
+  })
+
+  test('balise [fable] : le choix de l’utilisateur passe avant le service', async ($, on) => {
+    const w = world(on, { messages: [user('[fable] refonte complète')], route: () => 'down' })
+    await step($, 0)
+    expect(w.routes()[0]?.body).toMatchObject({ keep_model: true, model: 'fable' })
+    expect(w.steps[0]).toMatchObject({ model: 'fable' })
   })
 })
