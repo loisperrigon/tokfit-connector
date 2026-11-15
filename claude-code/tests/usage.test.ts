@@ -16,7 +16,7 @@ describe('remontée par lots', () => {
       messages: [user('x')], route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } }),
       rateLimits: [{ kind: 'five_hour', percentUsed: 12.5 }, { kind: 'seven_day', percentUsed: 40 }],
       // Plugin installé tel quel : le noyau est connecté (sinon `kernel_unavailable`, kernel.test.ts).
-      tools: ['Read', 'mcp__plugin_tokfit_outils__python'],
+      tools: ['Read', 'mcp__plugin_tokfit_outils__agir'],
     })
     await step($, 0, { turnId: 't1' })
     await step($, 1, { turnId: 't1' })

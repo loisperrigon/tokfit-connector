@@ -52,7 +52,7 @@ export async function leverReport($: EngineInterface, src: Sources, to: Link | n
     else if (mixed.has(lever)) state = 'coupé (session témoin du service)'
     else if (part !== null && plan === null) state = `inactif (plan du service absent, ${codeText(src.content.missing ?? 0)})`
     else if (part !== null && plan?.[part] === undefined) state = 'inactif (absent du plan du service)'
-    else if (lever === 'kernel' && !(await kernelReady($, src.kernel))) state = 'inactif (outil python non connecté)'
+    else if (lever === 'kernel' && !(await kernelReady($, src.kernel))) state = 'inactif (outil agir non connecté)'
     lines.push(`- ${lever} : ${state}`)
   }
   return ['Leviers de cette session :', ...lines].join('\n')

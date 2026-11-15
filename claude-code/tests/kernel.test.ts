@@ -14,7 +14,7 @@ import { PLAN_RETRY_MS, PLAN_TIMEOUT_MS } from '../hooks/plan'
 type Sent = Record<string, unknown>
 
 // Outils du modèle quand le plugin tourne : intégrés, et l'outil du noyau (nom vu en vrai, 2.1.323).
-const PYTHON = 'mcp__plugin_tokfit_outils__python'
+const PYTHON = 'mcp__plugin_tokfit_outils__agir'
 // Outil des limites du compte, servi par le même serveur (kernel/compte.py).
 const COMPTE = 'mcp__plugin_tokfit_outils__compte'
 const TOOLS = ['Agent', 'Bash', 'Read', 'Edit', 'Grep', 'ToolSearch', 'WebSearch', PYTHON]

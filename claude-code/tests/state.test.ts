@@ -117,7 +117,7 @@ describe(`état des leviers (/${NAME})`, () => {
     expect(report).toContain('- warm : coupé (réglage de l\'application ou de l\'utilisateur)')
     expect(report).toContain('- output : coupé (session témoin du service)')
     expect(report).toContain('- prefix : inactif (absent du plan du service)')
-    expect(report).toContain('- kernel : inactif (outil python non connecté)')
+    expect(report).toContain('- kernel : inactif (outil agir non connecté)')
     expect(report).toContain('- thinking : actif')
   })
 

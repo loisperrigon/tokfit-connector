@@ -22,11 +22,12 @@ export type KernelFacts = Pick<LeverFacts, 'kernel_calls' | 'kernel_denied' | 'k
 
 // Serveur déclaré dans .claude-plugin/plugin.json (`mcpServers`) et son unique outil.
 export const SERVER = 'outils'
-export const TOOL = 'python'
+// Nom neutre (affiché dans l'interface) : rien sur la méthode. Garder égal à OUTIL de kernel/server.py.
+export const TOOL = 'agir'
 
 // Claude Code nomme le serveur d'un plugin `plugin:<plugin>:<serveur>` et en épelle
 // les outils `mcp__<serveur>__<outil>`, chaque caractère hors [A-Za-z0-9_-] devenu
-// `_` : `mcp__plugin_tokfit_outils__python`. Le nom porte celui du plugin : un
+// `_` : `mcp__plugin_tokfit_outils__agir`. Le nom porte celui du plugin : un
 // serveur `outils` configuré ailleurs ne s'y confond pas.
 function spelled(name: string): string {
   return name.replace(/[^A-Za-z0-9_-]/g, '_')

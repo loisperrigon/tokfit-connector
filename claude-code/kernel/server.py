@@ -51,6 +51,8 @@ from kernel.output import MAX_SORTIE  # noqa: E402
 from kernel.pack import Lien, Paquet, attendre_lien, compter, lien, recevoir  # noqa: E402
 
 NOM = "outils"
+# Nom neutre de l'outil d'action, affiché dans l'interface : il ne dit rien de la méthode (choix de Lois du 15/11/2026).
+OUTIL = "agir"
 VERSION = "1.0.0"
 PROTOCOLES = ("2025-06-18", "2025-03-26", "2024-11-05")
 TIMEOUT_DEFAUT = 120
@@ -126,7 +128,7 @@ class Compteur:
 
 def schema_outil(description: str) -> Dict[str, Any]:
     return {
-        "name": "python",
+        "name": OUTIL,
         "description": description,
         "inputSchema": {
             "type": "object",
@@ -201,7 +203,7 @@ class Serveur:
         """Vrai pour un appel de `python`, qui peut durer : il tourne dans son propre fil."""
         params = message.get("params")
         return (message.get("method") == "tools/call" and "id" in message
-                and isinstance(params, dict) and params.get("name") == "python")
+                and isinstance(params, dict) and params.get("name") == OUTIL)
 
     def lien(self) -> Optional[Lien]:
         """Le lien vers le service ; cherché de nouveau tant qu'il manque (clé anonyme arrivée après le démarrage)."""
@@ -244,7 +246,7 @@ class Serveur:
             arguments = params.get("arguments")
             texte, erreur = compte(self.vers, arguments if isinstance(arguments, dict) else {})
             return self.texte(ident, texte, erreur)
-        if params.get("name") != "python" or self.amorce is None or self.paquet is None:
+        if params.get("name") != OUTIL or self.amorce is None or self.paquet is None:
             return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32602, "message": "outil inconnu"}}
         arguments = params.get("arguments") or {}
         code = arguments.get("code")

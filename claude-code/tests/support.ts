@@ -248,7 +248,7 @@ export function world(on: On, options: Options = {}): World {
   }))
   on('tool.call', async ($, e) => {
     if (options.slow?.tool) await clock.sleep(options.slow.tool)
-    if (options.python && e.tool.startsWith('mcp__') && e.tool.endsWith('__python')) {
+    if (options.python && e.tool.startsWith('mcp__') && e.tool.endsWith('__agir')) {
       const out = options.python('code' in e ? String(e.code) : '', e)
       const failed = typeof out === 'object' && 'error' in out
       const blocks = typeof out === 'string' ? [out] : 'error' in out ? out.error : out
