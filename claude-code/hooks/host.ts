@@ -35,10 +35,12 @@ export function host($: EngineInterface, seen: Seen): Promise<Host | null> {
   return seen.host
 }
 
-// Ligne d'état du terminal, seulement hors de l'application hôte.
-export async function status($: EngineInterface, seen: Seen, text: string | undefined): Promise<void> {
+// Ligne d'état du terminal (dernière décision), seulement hors de l'application hôte.
+export type Line = { route?: string }
+
+export async function status($: EngineInterface, seen: Seen, line: Line): Promise<void> {
   if (await host($, seen)) return
-  $.ui.status(text)
+  $.ui.status(line.route)
 }
 
 // Issue d'une décision postée sur le pont de l'application ; jamais bloquant, jamais levé.

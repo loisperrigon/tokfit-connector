@@ -39,7 +39,10 @@ import type { Holdout } from './experiments'
 import { compacted, observed, rereads, stepped } from './rereads'
 import type { Rereads } from './rereads'
 import { host, report, status } from './host'
-import type { RouteReport, Seen } from './host'
+import type { Line, RouteReport, Seen } from './host'
+import { animate, badge, refresh } from './badge'
+import { band } from './band'
+import type { Badge } from './badge'
 import { awake, back, cancel, rest, waited, warm } from './warm'
 import { REFUSED, twin } from './single'
 import { plans, section, sessionPlan } from './plan'
@@ -199,6 +202,9 @@ type State = {
   off: ReadonlySet<string>
   // Application hôte (Open Codex) : lue une fois (host.ts).
   seen: Seen
+  // Ligne d'état (host.ts) ; bilan relu pour le bandeau du gain (badge.ts).
+  line: Line
+  badge: Badge
   // Étapes du fil principal depuis le dernier message de la personne (tours de
   // notification compris) : dit au service qu'un long travail est en cours.
   workSteps: number
@@ -596,7 +602,8 @@ async function decide($: EngineInterface, s: State, e: TurnStepInput): Promise<C
   if (answer.state !== 'ok') {
     // Échec : rien à dire à l'utilisateur ; la ligne d'une décision précédente s'efface.
     // Une application hôte, elle, montre la cause dans son voyant.
-    await status($, s.seen, undefined)
+    s.line.route = undefined
+    await status($, s.seen, s.line)
     told(answer)
     return own
   }
@@ -604,7 +611,8 @@ async function decide($: EngineInterface, s: State, e: TurnStepInput): Promise<C
   const choice = underUser(answer.choice, own, keepEffort, answer.enforced)
   const shownEffort = choice.effort ?? effort
   // Claude Code préfixe déjà la ligne du nom du plugin.
-  await status($, s.seen, `${family(choice.model ?? model)}${shownEffort ? ` · ${shownEffort}` : ''}`)
+  s.line.route = `${family(choice.model ?? model)}${shownEffort ? ` · ${shownEffort}` : ''}`
+  await status($, s.seen, s.line)
   told({ state: 'ok', model: family(choice.model ?? model), effort: shownEffort ?? '', reason: answer.reason })
   return choice
 }
@@ -641,6 +649,19 @@ async function prefixOn($: EngineInterface, s: State): Promise<PrefixPlan | null
 // Pause après un tour du fil principal : compaction si le service la veut, après l'absence
 // qu'il rend, puis relances du cache. Les consignes viennent du plan de session ; l'issue
 // de la compaction part avec l'étape suivante du fil (`compact_try`). Ne lève jamais.
+// Bandeau du gain (badge.ts) relu après un tour du fil principal ; jamais levé.
+async function shown($: EngineInterface, s: State): Promise<void> {
+  try {
+    const to = await link($, s.options)
+    if (!to) return
+    const gain = await refresh($, s.badge, to, await $.clock.now())
+    if (gain === null || (gain?.saved === s.badge.gain?.saved && gain?.seconds === s.badge.gain?.seconds)) return
+    animate($, s.badge, gain, await $.clock.now())
+  } catch {
+    // Service ou horloge illisible : la marque garde sa valeur.
+  }
+}
+
 async function paused($: EngineInterface, s: State): Promise<void> {
   const generation = s.warm.generation
   const idle = (): boolean => s.warm.generation === generation
@@ -685,7 +706,7 @@ export const register: Register = (on, options) => {
     pending: new Map(), spawning: 0, loops: new Map(), requested: new Map(), sources: new Map(), lastCall: new Map(),
     compacted: false, warm: warm(), audited: false, fanout: fanout(), trimmed: new Map(), compactedFrom: undefined,
     compactTry: undefined, lean: false, prefix: prefix(),
-    rereads: rereads(), holdout: holdout(), off: new Set(), seen: {}, workSteps: 0, workEdits: 0, sessionModel: undefined,
+    rereads: rereads(), holdout: holdout(), off: new Set(), seen: {}, line: {}, badge: badge(), workSteps: 0, workEdits: 0, sessionModel: undefined,
     cut: false, kernel: kernel(), content: plans(), timing: timing(), noticed: notice(),
   }
 
@@ -1082,13 +1103,21 @@ export const register: Register = (on, options) => {
       }
       void flush($, s.queue)
       void paused($, s)
+      void shown($, s)
     }
     return result
+  }).catch(($, e, next) => next(e))
+
+  // Bandeau du gain au-dessus de la saisie (band.ts).
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const tree = band($, e, s.badge, await $.clock.now())
+    return tree === null ? next(e) : tree
   }).catch(($, e, next) => next(e))
 
   // Fin de session : ce qui reste part avant que le processus ne s'arrête.
   on('session.end', async ($, e, next) => {
     cancel(s.warm)
+    s.badge.stop?.()
     await flush($, s.queue)
     return next(e)
   }).catch(($, e, next) => next(e))

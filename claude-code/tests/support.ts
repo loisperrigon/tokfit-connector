@@ -62,6 +62,8 @@ export type Options = {
   levers?: (body: Record<string, unknown>) => Reply
   // Plan de session (`/v1/content`) : par défaut, le plan de test (plan.ts).
   content?: (body: Record<string, unknown>) => Reply
+  // Bilan du client (`/v1/bilan`, GET) ; par défaut 404 : pas de marque.
+  bilan?: () => Reply
   // Réponse de `$.model.fork` (relance du cache) ; par défaut, « ok » sur le cache du fil.
   fork?: () => ModelForkResult
   // Contexte rendu par `$.session.usage()` (tokens) ; par défaut 42 000.
@@ -190,6 +192,7 @@ export function world(on: On, options: Options = {}): World {
       : e.url.endsWith('/v1/dashboard/link') ? options.dashboard ?? (() => ({ status: 404 }))
       : e.url.endsWith('/v1/keys/anonymous') ? options.anonymous ?? (() => ({ status: 201, body: { key: ANONYMOUS_KEY } }))
       : e.url.endsWith('/v1/content') ? options.content ?? (() => ({ status: 200, body: { version: 'v-test', claude: TEST_PLAN } }))
+      : e.url.endsWith('/v1/bilan') ? options.bilan ?? (() => ({ status: 404 }))
       : () => ({ status: 404 })
     const reply = answer(body)
     if (reply === 'down') throw new Error('connexion refusée')
