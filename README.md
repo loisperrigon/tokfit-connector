@@ -21,11 +21,30 @@ bord chiffre l'économie, chaque chiffre étant marqué `measured` ou `estimated
 - **Réflexion en anglais**, moins chère ; la réponse reste dans ta langue.
 - **Fin de tour vérifiée** : si le plan de la tâche a encore des étapes
   ouvertes, Claude reprend une fois.
+- **Un seul outil, `python`** (levier `kernel`) : Claude n'agit plus par ses
+  outils natifs (Read, Edit, Bash…), retirés de sa liste et refusés s'il les
+  rappelle, mais par du code Python dans un noyau persistant sur ta machine.
+  Lire, écrire, chercher et lancer des commandes s'y font en une cellule, avec
+  des outils déjà chargés ; la fin du tour (`fini`) rend la réponse et refuse
+  de conclure si les tests échouent. Chaque agent (le fil principal, chaque
+  sous-agent) a son propre noyau : dossier courant et variables ne se
+  partagent jamais. Il faut `python3` (3.9 ou plus) ; sans lui, rien ne change.
+- **Début du prompt identique d'un projet à l'autre** (levier `prefix`) : la
+  partie du prompt système propre au projet (chemin de la mémoire) passe dans
+  le premier message, et le reste est relu en cache au lieu d'être réécrit.
+
+`/tokfit` donne le lien de ton tableau de bord et l'état de chaque levier
+pour la session : actif, coupé (et par qui) ou inactif (et pourquoi). Si le
+service ne peut pas envoyer le plan des leviers, une ligne te le dit, une
+seule fois, et la session continue sans eux.
+Pour voir ton bilan ou bloquer des modèles et des niveaux de réflexion sur
+tout ton compte, demande-le à Claude : il passe par l'outil `compte`.
 
 Pour mesurer le gain réel de chaque levier, il est coupé sur une petite part
 des sessions, tirées au sort. Pour en couper un toi-même :
 `TOKFIT_OFF=warm,compaction` (leviers : `routing`, `warm`, `compaction`,
-`output`, `fanout`, `thinking`, `persistence`). Un modèle que tu fixes
+`output`, `fanout`, `thinking`, `persistence`, `kernel`, `prefix`).
+`TOKFIT_OFF=kernel` rend à Claude ses outils natifs. Un modèle que tu fixes
 (balise, `routing` coupé) n'entre pas dans le calcul de l'économie.
 
 ## Ce qui part, ce qui reste chez toi
@@ -37,6 +56,10 @@ des sessions, tirées au sort. Pour en couper un toi-même :
   (jamais un chemin de fichier). Ils alimentent le tableau de bord.
 - La fin de tour lit la conversation sur ta machine ; seuls les états du plan
   (ouvert, fait) partent.
+- Le code que Claude lance dans le noyau ne quitte pas ta machine : seuls les
+  nombres d'appels partent. Seule exception, voulue : une fonction générique
+  qu'il range pour la réutiliser (`sauve_outil`) est gardée par le service,
+  rattachée à ta clé, jamais le code de ton projet.
 - Le connecteur n'écrit rien sur ta machine, hors son fichier de configuration.
 - Si le service est lent (plus de 6 s) ou en panne, ton réglage en cours est
   gardé, sans message.
@@ -44,15 +67,17 @@ des sessions, tirées au sort. Pour en couper un toi-même :
 
 ## Installation
 
-Il te faut une clé tokfit (`ek_…`).
+Sans clé, l'essai démarre tout seul au premier lancement (clé anonyme, rien à
+remplir). Après l'abonnement, la clé tokfit (`ek_…`) remise une fois.
 
 Claude Code :
 
 ```sh
-claude plugin install tokfit --marketplace <source> --config api_key=ek_…
+claude plugin install tokfit --marketplace <source>                       # essai
+claude plugin install tokfit --marketplace <source> --config api_key=ek_… # abonné
 ```
 
-Une ligne, sans rien cloner (la clé est demandée, saisie masquée) :
+Une ligne, sans rien cloner (la clé est demandée, saisie masquée ; vide : essai) :
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/loisperrigon/tokfit-connector/main/install.sh | sh -s claude
