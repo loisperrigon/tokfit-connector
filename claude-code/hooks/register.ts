@@ -813,7 +813,15 @@ export const register: Register = (on, options) => {
   // pour le journal du service, jamais une raison de ne pas router.
   // Un noyau par agent (kernel.ts, `withAgent`) : l'agent qui appelle `python` part avec
   // l'appel, levier coupé ou non (l'outil reste le même, son noyau ne se partage jamais).
-  on('tool.call', { tool: KERNEL_TOOL }, ($, e, next) => next(withAgent(e)))
+  on('tool.call', { tool: KERNEL_TOOL }, async ($, e, next) => {
+    let cwd: string | undefined
+    try {
+      cwd = await $.session.cwd()
+    } catch {
+      // Dossier illisible : le noyau de l'agent démarre dans celui du serveur.
+    }
+    return next(withAgent(e, cwd))
+  })
 
   on('tool.call', { tool: 'Agent' }, ($, e, next) => {
     s.requested.set(e.tool_use_id, { ...(e.model ? { model: e.model } : {}), ...(e.effort ? { effort: e.effort } : {}) })

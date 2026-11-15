@@ -46,12 +46,16 @@ export function isKernelTool(name: string): boolean {
 // `agent` la boucle qui l'a lancé, `main` pour le fil principal. Sans lui, le fil
 // principal et les sous-agents partageraient répertoire courant et variables : un
 // `os.chdir` d'un sous-agent déplaçait les autres. La valeur que le modèle aurait mise
-// est remplacée : seul le moteur sait quelle boucle appelle.
+// est remplacée : seul le moteur sait quelle boucle appelle. `cwd` : le dossier de
+// cette boucle (`$.session.cwd()` lu dans le hook : celui du sous-agent, son worktree
+// s'il est isolé), où son noyau démarre ; absent si le moteur ne le rend pas.
 export const AGENT_ARGUMENT = 'agent'
+export const CWD_ARGUMENT = 'cwd'
 export const MAIN_LOOP = 'main'
 
-export function withAgent<E extends { agentId?: string }>(e: E): E & { [AGENT_ARGUMENT]: string } {
-  return { ...e, [AGENT_ARGUMENT]: e.agentId ?? MAIN_LOOP }
+export function withAgent<E extends { agentId?: string }>(e: E, cwd: string | undefined): E & { [AGENT_ARGUMENT]: string } {
+  const { [CWD_ARGUMENT]: _ignored, ...rest } = e as E & { [CWD_ARGUMENT]?: unknown }
+  return { ...(rest as E), [AGENT_ARGUMENT]: e.agentId ?? MAIN_LOOP, ...(cwd ? { [CWD_ARGUMENT]: cwd } : {}) }
 }
 
 export function isAccountTool(name: string): boolean {

@@ -60,6 +60,9 @@ TIMEOUT_MAX = 600
 ARRET_S = 2.0
 # Argument que le connecteur ajoute à chaque appel de `python` : l'identifiant de la boucle.
 AGENT = "agent"
+# Dossier de la boucle qui appelle (worktree d'un sous-agent isolé), posé par le connecteur :
+# le noyau de l'agent y démarre ; ensuite, son dossier courant est le sien.
+DOSSIER = "cwd"
 PRINCIPAL = "main"
 AGENT_LONGUEUR_MAX = 128
 NOYAUX_MAX = 8
@@ -137,6 +140,7 @@ def schema_outil(description: str) -> Dict[str, Any]:
                 "timeout_s": {"type": "integer", "description": "Délai en secondes (120 par défaut, 600 au plus).",
                               "minimum": 1, "maximum": TIMEOUT_MAX},
                 AGENT: {"type": "string", "description": "Rempli par le connecteur : ne pas le donner."},
+                DOSSIER: {"type": "string", "description": "Rempli par le connecteur : ne pas le donner."},
             },
             "required": ["code"],
         },
@@ -149,6 +153,14 @@ def agent_de(arguments: Dict[str, Any]) -> str:
     if isinstance(valeur, str) and 0 < len(valeur) <= AGENT_LONGUEUR_MAX and valeur.isprintable():
         return valeur
     return PRINCIPAL
+
+
+def dossier_de(arguments: Dict[str, Any], defaut: str) -> str:
+    """Dossier où démarre le noyau de l'agent : celui posé par le connecteur s'il existe, sinon `defaut`."""
+    valeur = arguments.get(DOSSIER)
+    if isinstance(valeur, str) and os.path.isabs(valeur) and os.path.isdir(valeur):
+        return valeur
+    return defaut
 
 
 @dataclass
@@ -211,14 +223,15 @@ class Serveur:
             self.vers = lien(self.env)
         return self.vers
 
-    def prendre(self, agent: str) -> tuple[Poste, bool]:
-        """Le poste de l'agent, créé au besoin, réservé jusqu'à `rendre` ; vrai si son noyau avait été arrêté."""
+    def prendre(self, agent: str, dossier: Optional[str] = None) -> tuple[Poste, bool]:
+        """Le poste de l'agent, créé au besoin (noyau démarré dans `dossier`), réservé jusqu'à `rendre` ;
+        vrai si son noyau avait été arrêté."""
         assert self.amorce is not None
         with self.verrou:
             poste = self.postes.get(agent)
             libere = False
             if poste is None:
-                poste = Poste(Noyau(self.amorce, self.max_sortie, self.cwd, self.vers))
+                poste = Poste(Noyau(self.amorce, self.max_sortie, dossier or self.cwd, self.vers))
                 self.postes[agent] = poste
                 libere = agent in self.liberes
                 self.liberes.discard(agent)
@@ -254,7 +267,7 @@ class Serveur:
             return self.texte(ident, "argument `code` manquant (texte)", erreur=True)
         delai = arguments.get("timeout_s", TIMEOUT_DEFAUT)
         delai = min(max(delai, 1), TIMEOUT_MAX) if isinstance(delai, int) and not isinstance(delai, bool) else TIMEOUT_DEFAUT
-        poste, libere = self.prendre(agent_de(arguments))
+        poste, libere = self.prendre(agent_de(arguments), dossier_de(arguments, self.cwd))
         try:
             with poste.verrou:
                 prefixe = LIBERE if libere else ""

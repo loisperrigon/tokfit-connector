@@ -89,6 +89,8 @@ export type Options = {
   // Outil `python` du noyau : texte rendu pour le code reçu (arguments entiers à côté), ou ses blocs de texte dans l'ordre
   // (le serveur ajoute un second bloc `[noyau:fini]` quand `fini()` est appelé) ; `error` : la
   // cellule a échoué. Par défaut, aucun outil ne tourne.
+  // Dossier de la session (`$.session.cwd()`) ; par défaut /projet.
+  cwd?: string
   python?: (code: string, args: Readonly<Record<string, unknown>>) => string | readonly string[] | { error: readonly string[] }
   // ToolSearch du moteur : noms trouvés pour la requête ; par défaut, il ne tourne pas.
   search?: (query: string) => string[]
@@ -204,6 +206,8 @@ export function world(on: On, options: Options = {}): World {
   })
   on('settings.read', async () => ({ value: options.settings ?? {} }))
   on('session.root', async () => ({ value: '/projet' }))
+  // Dossier de la boucle qui appelle (`$.session.cwd()` lu dans un hook) ; par défaut, la racine.
+  on('session.cwd', async () => ({ value: options.cwd ?? '/projet' }))
   on('session.messages', async ($, e) => ({ value: e.agentId ? options.agentMessages?.[e.agentId] ?? [] : options.messages ?? [] }))
   const listed = [...options.listed ?? []]
   on('agent.list', async () => ({

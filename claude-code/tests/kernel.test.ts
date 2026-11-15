@@ -273,6 +273,14 @@ describe('un noyau par agent', () => {
     expect(agents).toEqual(['main', 'agent-1', 'agent-2'])
   })
 
+  test('le dossier de la boucle part avec l’appel, celui écrit par le modèle est remplacé', async ($, on) => {
+    const dirs: unknown[] = []
+    world(on, connected({ cwd: '/projet/.worktrees/agent-1', python: (code, args) => (dirs.push(args.cwd), 'ok') }))
+    await step($, 0, { turnId: 't1' })
+    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: 'x = 1', cwd: '/ailleurs', agentId: 'agent-1' })
+    expect(dirs).toEqual(['/projet/.worktrees/agent-1'])
+  })
+
   test('un agent écrit par le modèle est remplacé par la vraie boucle', async ($, on) => {
     const { agents, options } = recorded()
     world(on, options)
