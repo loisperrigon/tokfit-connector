@@ -30,7 +30,12 @@ interface stable de Codex : un format inconnu ne fait perdre que des compteurs.
 
 Clé et adresse : `~/.config/tokfit/config.json` (`{"url", "key"}`, écrit
 par `connector/install.sh codex`, le même que pour Claude Code), ou le fichier
-de `TOKFIT_CONFIG`. Python 3.9+, bibliothèque standard seule.
+de `TOKFIT_CONFIG`. Sans clé dans ce fichier (essai sans inscription), le
+lancement demande une clé anonyme au service (`POST /v1/keys/anonymous`, sans
+identité) et la range à côté, dans `anonymous.json` (droits 600, liée à
+l'adresse du service) ; un échec n'est retenté qu'après ANONYMOUS_RETRY_S. Fin
+d'essai : le message du service (`notice` d'une réponse 402) est écrit tel quel
+sur la sortie d'erreur. Python 3.9+, bibliothèque standard seule.
 """
 from __future__ import annotations
 
@@ -56,6 +61,10 @@ NAME = "tokfit"
 # Attente maximale d'une décision (TIMEOUT_MS du plugin, ROUTE_MOD_TIMEOUT_S du service).
 TIMEOUT_S = 6.0
 USAGE_TIMEOUT_S = 10.0
+# Clé anonyme : attente maximale au lancement, délai avant de redemander après un échec, fichier.
+ANONYMOUS_TIMEOUT_S = 5.0
+ANONYMOUS_RETRY_S = 600
+ANONYMOUS_FILE = "anonymous.json"
 # Attente maximale du seuil de compaction : le lancement ne doit pas traîner.
 LIMIT_TIMEOUT_S = 2.0
 COMPACT_KEY = "model_auto_compact_token_limit"
@@ -203,8 +212,9 @@ def codex_home(env: Dict[str, str]) -> Path:
     return Path(env.get("CODEX_HOME") or Path(env.get("HOME", "~")).expanduser() / ".codex")
 
 
-def link(env: Dict[str, str]) -> Optional[Link]:
-    """(adresse, clé) du fichier de configuration ; None s'il manque ou s'il est douteux."""
+def link(env: Dict[str, str], ask: bool = False) -> Optional[Link]:
+    """(adresse, clé) du fichier de configuration, ou la clé anonyme rangée à côté (demandée au service
+    avec `ask`) ; None s'il manque ou s'il est douteux."""
     home = env.get("HOME", "")
     path = env.get("TOKFIT_CONFIG") or (f"{home}/.config/{NAME}/config.json" if home else "")
     try:
@@ -214,10 +224,59 @@ def link(env: Dict[str, str]) -> Optional[Link]:
         return None
     if not isinstance(data, dict):
         return None
-    url, key = str(data.get("url") or "").strip(), str(data.get("key") or "").strip()
-    if not KEY.fullmatch(key) or not ADDRESS.fullmatch(url):
+    url, key = str(data.get("url") or "").strip().rstrip("/"), str(data.get("key") or "").strip()
+    if not ADDRESS.fullmatch(url):
         return None
-    return url.rstrip("/"), key
+    if not key:
+        key = anonymous_key(Path(path).with_name(ANONYMOUS_FILE), url, ask) or ""
+    return (url, key) if KEY.fullmatch(key) else None
+
+
+def anonymous_key(file: Path, url: str, ask: bool) -> Optional[str]:
+    """Clé anonyme rangée pour `url` ; sinon, avec `ask`, demandée au service et rangée (droits 600)."""
+    try:
+        kept = json.loads(file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # Pas encore de clé anonyme (ou fichier abîmé) : elle sera demandée.
+        kept = None
+    kept = kept if isinstance(kept, dict) and kept.get("url") == url else {}
+    key = str(kept.get("key") or "")
+    if KEY.fullmatch(key):
+        return key
+    failed = kept.get("failed_at")
+    if not ask or (isinstance(failed, (int, float)) and time.time() - failed < ANONYMOUS_RETRY_S):
+        return None
+    reply = post((url, ""), "/v1/keys/anonymous", {}, ANONYMOUS_TIMEOUT_S)
+    try:
+        key = str(json.loads(reply[1]).get("key") or "") if reply is not None and reply[0] == 201 else ""
+    except (ValueError, AttributeError):
+        # Réponse illisible : comptée comme un échec.
+        key = ""
+    entry: Json = {"url": url, "key": key} if KEY.fullmatch(key) else {"url": url, "failed_at": time.time()}
+    try:
+        file.parent.mkdir(parents=True, exist_ok=True)
+        temporary = file.with_name(f".{file.name}.{os.getpid()}")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as out:
+            json.dump(entry, out)
+        os.replace(temporary, file)
+    except OSError:
+        # Dossier en lecture seule : la clé sert pour ce lancement, le suivant en redemandera une.
+        pass
+    return key if KEY.fullmatch(key) else None
+
+
+def trial_notice(reply: Reply) -> None:
+    """Fin d'essai : le message du service (`notice` d'une réponse 402), tel quel, sur la sortie d'erreur."""
+    if reply is None or reply[0] != 402:
+        return
+    try:
+        notice = json.loads(reply[1]).get("notice")
+    except (ValueError, AttributeError):
+        # Réponse illisible : rien à montrer.
+        return
+    if isinstance(notice, str) and notice.strip():
+        print(re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", notice).strip()[:2000], file=sys.stderr)
 
 
 def bounded(text: str, head: int, tail: int) -> str:
@@ -353,10 +412,12 @@ def decision(text: str) -> Optional[Tuple[Optional[str], Optional[str]]]:
     return model, effort
 
 
-def post(to: Link, path: str, body: object, timeout: float) -> Reply:
-    """POST JSON borné dans le temps (total) ; None sur toute erreur réseau ou lenteur."""
-    request = urllib.request.Request(to[0] + path, data=json.dumps(body).encode(), method="POST",
-                                     headers={"content-type": "application/json", "authorization": f"Bearer {to[1]}"})
+def post(to: Link, path: str, body: object, timeout: float, shows_notice: bool = False) -> Reply:
+    """POST JSON borné dans le temps (total) ; None sur toute erreur réseau ou lenteur. `shows_notice` :
+    la réponse peut porter le message de fin d'essai, que l'appelant montre (`trial_notice`)."""
+    headers = {"content-type": "application/json", **({"authorization": f"Bearer {to[1]}"} if to[1] else {}),
+               **({"x-show-notice": "1"} if shows_notice else {})}
+    request = urllib.request.Request(to[0] + path, data=json.dumps(body).encode(), method="POST", headers=headers)
     result: List[Reply] = [None]
 
     def call() -> None:
@@ -364,7 +425,8 @@ def post(to: Link, path: str, body: object, timeout: float) -> Reply:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 result[0] = (response.status, response.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as error:
-            result[0] = (error.code, "")
+            # Corps gardé (borné) : une réponse 402 porte le message de fin d'essai.
+            result[0] = (error.code, error.read(65536).decode("utf-8", "replace"))
         except (OSError, ValueError):
             # Injoignable ou réponse cassée : l'appelant garde le réglage.
             result[0] = None
@@ -383,7 +445,7 @@ def routed(args: List[str], launch: Launch, model: Optional[str], effort: Option
 def decide(args: List[str], env: Dict[str, str]) -> List[str]:
     """Arguments de `codex` : avec le réglage du service, ou inchangés sur toute panne."""
     launch = parse(args)
-    to = link(env)
+    to = link(env, ask=True)
     if to is None:
         return args
     try:
@@ -398,7 +460,8 @@ def decide(args: List[str], env: Dict[str, str]) -> List[str]:
         payload = facts(launch, model, effort)
         if catalog:
             payload["available_models"] = catalog
-        reply = post(to, "/v1/route", payload, TIMEOUT_S) if catalog else None
+        reply = post(to, "/v1/route", payload, TIMEOUT_S, shows_notice=True) if catalog else None
+        trial_notice(reply)
         choice = decision(reply[1]) if reply is not None and reply[0] == 200 else None
         if choice is not None and catalog:
             target = model if launch.keep_model else choice[0] or model

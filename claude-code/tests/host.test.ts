@@ -1,4 +1,4 @@
-import { EXECUTION_SECTION } from '../hooks/thinking'
+import { EXECUTION_SECTION } from './plan'
 // Application hôte (Open Codex) : relais du service avec son jeton, issue de
 // chaque décision sur son pont local au lieu de la ligne d'état, leviers coupés
 // par ses réglages. Hors de l'application, rien de cela ne joue.

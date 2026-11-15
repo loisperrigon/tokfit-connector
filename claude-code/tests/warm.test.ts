@@ -2,7 +2,7 @@
 // relancer ; le connecteur relance la dernière requête du fil par $.model.fork,
 // sans sous-agent ni routage, et la compte à part.
 import { describe, expect, test } from 'claude-code/testing'
-import { PING_PROMPT } from '../hooks/warm'
+import { PING_TEXT as PING_PROMPT } from './plan'
 import { SESSION, URL, complete, config, end, step, user, world } from './support'
 import type { Reply } from './support'
 
@@ -220,4 +220,73 @@ describe('fork-ping', () => {
     await w.clock.advance(600_000)
     expect(w.forks).toEqual([])
   })
+
+  // Open Codex met en veille le moteur d'une conversation calme depuis 30 min : chaque
+  // attente armée lui dit son échéance par le fichier OPEN_CODEX_KEEP_AWAKE.
+  const AWAKE = '/data/sessions/c1/keep-awake'
+  const awakeWrites = (w: { written: string[] }): string[] => w.written
+    .filter(line => line.startsWith('fs.write '))
+    .map(line => JSON.parse(line.slice('fs.write '.length)) as { path: string; text: string })
+    .filter(e => e.path === AWAKE).map(e => e.text)
+
+  test('Open Codex : échéance de chaque relance écrite, fichier vidé quand la chaîne s’arrête', async ($, on) => {
+    const w = world(on, { messages: [user('x')], warm: delays(3_240, 3_240, null), env: { OPEN_CODEX_KEEP_AWAKE: AWAKE } })
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    // Horloge simulée partie de 1 000 s : relance prévue à 1 000 + 3 240 s.
+    expect(awakeWrites(w)).toEqual(['4240'])
+    await w.clock.advance(3_240_000)
+    await w.clock.settle()
+    expect(awakeWrites(w)).toEqual(['4240', '7480'])
+    await w.clock.advance(3_240_000)
+    await w.clock.settle()
+    expect(w.forks).toHaveLength(2)
+    expect(awakeWrites(w)).toEqual(['4240', '7480', ''])
+  })
+
+  test('Open Codex : l’utilisateur revient pendant l’attente, fichier vidé', async ($, on) => {
+    const w = world(on, { messages: [user('x')], warm: delays(270), env: { OPEN_CODEX_KEEP_AWAKE: AWAKE } })
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    await w.clock.advance(100_000)
+    await step($, 0, { turnId: 't2' })
+    await w.clock.settle()
+    expect(awakeWrites(w)).toEqual(['1270', ''])
+  })
+
+  test('Open Codex : compaction du fil pendant la pause, fichier vidé', async ($, on) => {
+    const w = world(on, { messages: [user('x')], warm: delays(270, 270), env: { OPEN_CODEX_KEEP_AWAKE: AWAKE } })
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    await $.session.compact({ trigger: 'auto', messages: [user('résumé')] })
+    await w.clock.settle()
+    expect(awakeWrites(w).at(-1)).toBe('')
+  })
+
+  test('Open Codex : réponse nulle, aucune échéance', async ($, on) => {
+    const w = world(on, { messages: [user('x')], warm: delays(null), env: { OPEN_CODEX_KEEP_AWAKE: AWAKE } })
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    expect(awakeWrites(w).filter(text => text !== '')).toEqual([])
+  })
+
+  for (const [name, env] of [
+    ['hors de l’application', {}],
+    ['chemin qui n’est pas le fichier de session', { OPEN_CODEX_KEEP_AWAKE: '/home/lois/.bashrc' }],
+  ] as const) {
+    test(`${name} : rien n’est écrit`, async ($, on) => {
+      const w = world(on, { messages: [user('x')], warm: delays(270, null), env })
+      await step($, 0, { turnId: 't1' })
+      await complete($, 't1')
+      await w.clock.settle()
+      await w.clock.advance(270_000)
+      await w.clock.settle()
+      expect(w.forks).toHaveLength(1)
+      expect(w.written.filter(line => line.startsWith('fs.write '))).toEqual([])
+    })
+  }
 })

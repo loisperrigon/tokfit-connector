@@ -4,6 +4,7 @@
 // un lot renvoyé après une coupure n'est compté qu'une fois par le service.
 import type { EngineInterface, PluginOptions, SessionRateLimit, TurnUsage } from 'claude-code'
 import { EFFORTS, USAGE_TIMEOUT_MS, link, post } from './service'
+import type { TimeFacts } from './timing'
 
 // Lot maximal accepté par le service (USAGE_BATCH_MAX de service/usage.py).
 export const BATCH_MAX = 50
@@ -28,7 +29,7 @@ export type Step = {
   idle_s?: number
   // Fork de relance du cache (warm.ts) : une dépense de l'outil, hors référence.
   ping?: true
-} & LeverFacts
+} & StepFacts
 
 // Faits des leviers sur l'étape qu'ils touchent (service/levers.py) : des nombres seulement.
 export type LeverFacts = {
@@ -47,11 +48,23 @@ export type LeverFacts = {
   fanout?: true
   // Réflexion demandée en anglais dans une conversation qui ne l'est pas.
   lean_thinking?: true
-  // Modèle que l'utilisateur a choisi pour la session : la référence de ses économies.
+  // Modèle que l'utilisateur a choisi pour la session (référence de la mesure, au service).
   reference_model?: string
   // Modèle fixé par l'utilisateur (routage coupé par lui ou son application, balise) : étape hors mesure.
   pinned?: true
+  // Levier kernel (kernel.ts), pris depuis l'étape précédente de la même boucle : appels de
+  // l'outil `python` et appels refusés d'outils intégrés. Jamais le code, seulement leur nombre.
+  kernel_calls?: number
+  kernel_denied?: number
+  // Levier actif mais outil `python` absent au départ de l'étape : rien n'a changé.
+  kernel_unavailable?: true
+  // Client relié mais plan de session absent (plan.ts) : statut HTTP de la réponse de
+  // `/v1/content`, 0 sans réponse. Les leviers du plan sont restés inactifs sur cette étape.
+  plan_missing?: number
 }
+
+// Faits joints aux compteurs d'une étape : ceux des leviers et les durées (timing.ts).
+export type StepFacts = LeverFacts & TimeFacts
 
 // Ce que le connecteur sait du cache au moment de l'étape.
 export type CacheFacts = { subagent: boolean; idleS: number | undefined; ping?: boolean }
@@ -64,7 +77,7 @@ export async function stepId(session: string, agentId: string | undefined, turnI
 
 export async function stepOf(session: string, agentId: string | undefined, turnId: string, index: number,
                              effort: unknown, usage: TurnUsage, limits: readonly SessionRateLimit[],
-                             cache: CacheFacts, levers: LeverFacts = {}): Promise<Step> {
+                             cache: CacheFacts, levers: StepFacts = {}): Promise<Step> {
   // Quota : la fenêtre la plus entamée, comme la relève le service.
   const used = limits.map(limit => limit.percentUsed).filter(value => Number.isFinite(value))
   return {

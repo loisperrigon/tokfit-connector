@@ -2,19 +2,20 @@
 // { model, effort } et garde le réglage en cours sur toute erreur, lenteur ou
 // clé refusée, sans rien montrer.
 import { describe, expect, test } from 'claude-code/testing'
-import { KEY, SESSION, URL, aborted, assistant, complete, config, step, submit, user, world } from './support'
+import { KEY, SESSION, URL, aborted, assistant, complete, config, messages, step, submit, unconfigured, user, world } from './support'
 import type { Reply } from './support'
 import { DEFAULT_URL } from '../hooks/service'
 
 const OTHER = 'ek_' + 'z'.repeat(43)
 
 describe('configuration', () => {
-  test('sans fichier de configuration : aucun appel, réglage inchangé', async ($, on) => {
+  test('sans fichier de configuration : aucun appel, réglage inchangé (adresse officielle seule en copie publique)', async ($, on) => {
     const w = world(on, { config: null, messages: [user('bonjour')] })
     await step($, 0)
-    expect(w.sent).toEqual([])
-    expect(w.steps[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high' })
-    expect(w.shown).toEqual([])
+    await unconfigured(w.sent, () => {
+      expect(w.steps[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high' })
+      expect(w.shown).toEqual([])
+    })
   })
 
   test('clé et adresse lues dans le fichier hors dépôt', async ($, on) => {
@@ -65,8 +66,21 @@ describe('configuration', () => {
     expect(w.routes()).toHaveLength(1)
   })
 
+  // Fichier illisible : traité comme absent (copie publique : clé d'essai à l'adresse officielle).
+  const unreadable: [string, string][] = [['JSON illisible', '{'], ['pas un objet', '[]']]
+  for (const [name, text] of unreadable) {
+    test(`${name} : comme sans fichier`, async ($, on) => {
+      const w = world(on, { config: text, messages: [user('x')] })
+      await step($, 0)
+      await unconfigured(w.sent, () => {
+        expect(w.steps[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high' })
+        expect(w.shown).toEqual([])
+      })
+    })
+  }
+
   const refused: [string, string][] = [
-    ['JSON illisible', '{'], ['pas un objet', '[]'], ['clé mal formée', config(URL, 'pas-une-cle')],
+    ['clé mal formée', config(URL, 'pas-une-cle')],
     ['adresse en clair hors machine', config('http://service.test', KEY)], ['autre protocole', config('ftp://x', KEY)],
   ]
   for (const [name, text] of refused) {
@@ -365,5 +379,38 @@ describe('mémoire de la conversation', () => {
     await step($, 0)
     expect(w.routes()[0]?.body).toMatchObject({ keep_model: true, model: 'fable' })
     expect(w.steps[0]).toMatchObject({ model: 'fable' })
+  })
+})
+
+describe('limites du compte', () => {
+  const NOTICE = 'Opus est bloqué sur ce compte : Sonnet à la place.'
+
+  test('réglage imposé par une limite : il passe devant la balise, sa phrase est montrée une fois, hors du prompt', async ($, on) => {
+    const msgs = [user('[opus] [max] refonte complète')]
+    const w = world(on, { messages: msgs, route: () => ({ status: 200, body: { model: 'sonnet', effort: null, notice: NOTICE } }) })
+    await step($, 0, { turnId: 't1' })
+    expect(w.routes()[0]?.body).toMatchObject({ keep_model: true, keep_effort: true, model: 'opus' })
+    // Le modèle imposé passe devant la balise ; la réflexion, non bloquée, reste celle de la balise.
+    expect(w.steps[0]).toMatchObject({ model: 'sonnet', effort: 'max' })
+    msgs.push(assistant('fait'), user('[opus] encore'))
+    await step($, 0, { turnId: 't2' })
+    expect(w.steps[1]).toMatchObject({ model: 'sonnet' })
+    expect(messages(w)).toEqual([`ui.log ${NOTICE}`])
+    expect(JSON.stringify(w.steps)).not.toContain('bloqué')
+  })
+
+  test('réflexion imposée par une limite : elle passe devant la balise de réflexion', async ($, on) => {
+    const notice = 'La réflexion max est bloquée sur ce compte : xhigh à la place.'
+    const w = world(on, { messages: [user('[max] refonte')], route: () => ({ status: 200, body: { model: null, effort: 'xhigh', notice } }) })
+    await step($, 0)
+    expect(w.steps[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'xhigh' })
+    expect(messages(w)).toEqual([`ui.log ${notice}`])
+  })
+
+  test('sans phrase du service, la balise passe toujours devant', async ($, on) => {
+    const w = world(on, { messages: [user('[opus] refonte')], route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } }) })
+    await step($, 0, { model: 'claude-sonnet-5-5' })
+    expect(w.steps[0]).toMatchObject({ model: 'opus', effort: 'low' })
+    expect(messages(w)).toEqual([])
   })
 })

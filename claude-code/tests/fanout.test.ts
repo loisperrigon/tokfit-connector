@@ -1,7 +1,7 @@
 // Sous-agents lancés ensemble : ceux d'un même type attendent que le premier
 // ait écrit leur début commun dans le cache (au plus FANOUT_WAIT_MS).
 import { describe, expect, test } from 'claude-code/testing'
-import { FANOUT_WAIT_MS } from '../hooks/fanout'
+import { FANOUT_MS as FANOUT_WAIT_MS } from './plan'
 import { URL, config, spawn, step, user, world } from './support'
 import type { Options, World } from './support'
 import type { Engine } from 'claude-code/testing'

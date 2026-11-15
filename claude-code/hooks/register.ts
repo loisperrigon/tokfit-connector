@@ -16,14 +16,18 @@
 // l'application Open Codex (host.ts : pont, voyant, relais, leviers coupés
 // par ses réglages), compteurs remontés par lots (usage.ts), sous-agents tous routés,
 // cache gardé au chaud pendant une pause (warm.ts), sorties de commandes
-// bruyantes raccourcies (output.ts), réflexion en anglais (thinking.ts), faits
-// des leviers joints aux compteurs (usage.ts). Le texte des messages ne part que vers /v1/route : ni
+// bruyantes raccourcies (output.ts), réflexion en anglais (section du plan), faits
+// des leviers joints aux compteurs (usage.ts), outils intégrés remplacés par le
+// noyau Python du plugin quand il est connecté (kernel.ts). Le texte des messages ne part que vers /v1/route : ni
 // stocké, ni journalisé, ni affiché (tests/witness.test.ts).
 import type { AgentSpawnInput, EngineInterface, PluginOptions, Register, SessionMessage, TurnStepInput, TurnStepResult } from 'claude-code'
 import { EFFORTS, TIMEOUT_MS, field, link, post } from './service'
 import type { Link } from './service'
+import { showNotice } from './trial'
 import { add, flush, queue, stepOf } from './usage'
-import type { LeverFacts, Queue } from './usage'
+import type { Queue, StepFacts } from './usage'
+import { began, ended, modelTime, queued as timed, ran, timing, toolTime } from './timing'
+import type { Timing } from './timing'
 import { audit } from './audit'
 import { compactNow, wanted } from './compact'
 import type { Try } from './compact'
@@ -34,12 +38,20 @@ import { chosen, holdout, levers } from './experiments'
 import type { Holdout } from './experiments'
 import { compacted, observed, rereads, stepped } from './rereads'
 import type { Rereads } from './rereads'
-import { THINKING_SECTION, EXECUTION_SECTION, language } from './thinking'
-import { report, status } from './host'
+import { host, report, status } from './host'
 import type { RouteReport, Seen } from './host'
-import { back, cancel, rest, waited, warm } from './warm'
+import { awake, back, cancel, rest, waited, warm } from './warm'
 import { REFUSED, twin } from './single'
+import { plans, section, sessionPlan } from './plan'
+import { carried, prefix, taken } from './prefix'
+import type { Prefix } from './prefix'
+import type { KernelPlan, Plans, PrefixPlan, SessionPlan } from './plan'
 import type { Warm } from './warm'
+import { called, composed, contradicts, finalAnswer, isAccountTool, isBehind, isDenied, isKernelTool, KERNEL_TOOL, kernel, kernelFacts, kernelReady, passed, placed, refused, searchable, shortened, summaryOf, unlisted, withAgent } from './kernel'
+import type { Kernel } from './kernel'
+import { access } from './access'
+import { notice, planNotice } from './state'
+import type { Notice } from './state'
 
 type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 type Choice = { model?: string; effort?: Effort }
@@ -86,9 +98,12 @@ function forced(text: string, ultrathinkWorks: boolean): Tags {
 
 // Décision du service sous les choix de l'utilisateur : ses balises passent
 // devant, et une réflexion qu'il garde (balise, ultrathink) n'est jamais remplacée.
-function underUser(answer: Choice, own: Choice, keepEffort: boolean): Choice {
+// Sauf réglage imposé par une limite du compte (`enforced` : la réponse porte
+// `notice`) : ce que le service pose passe alors devant les balises.
+function underUser(answer: Choice, own: Choice, keepEffort: boolean, enforced = false): Choice {
   const { effort, ...rest } = answer
-  return { ...rest, ...(effort && !keepEffort ? { effort } : {}), ...own }
+  const chosen = { ...rest, ...(effort && !keepEffort ? { effort } : {}), ...own }
+  return enforced ? { ...chosen, ...answer } : chosen
 }
 
 function family(model: string): string {
@@ -154,7 +169,7 @@ type State = {
   requested: Map<string, { model?: string; effort?: string }>
   sources: Map<string, string>
   // Dernier appel du fil principal par famille de modèle : quand, et combien de
-  // tokens il a laissés dans le cache. Le service en déduit ce que coûte un changement.
+  // tokens il a laissés dans le cache (fait transmis au service).
   lastCall: Map<string, { at: number; tokens: number }>
   // Vrai après une compaction du fil principal, jusqu'à sa prochaine réponse.
   compacted: boolean
@@ -171,10 +186,14 @@ type State = {
   compactedFrom: number | undefined
   // Issue de la dernière compaction voulue par le service, en attente de l'étape suivante du fil.
   compactTry: Try | undefined
-  // Réflexion en anglais dans une conversation qui ne l'est pas (thinking.ts).
+  // La consigne de réflexion joue sur la conversation, selon le service (`lean_thinking` de /v1/route).
   lean: boolean
+  // Sections du prompt système passées dans le contexte du premier message (prefix.ts).
+  prefix: Prefix
   // Fichiers relus après une compaction du connecteur (rereads.ts).
   rereads: Rereads
+  // Message du plan de session absent, déjà montré ou non (state.ts).
+  noticed: Notice
   // Leviers coupés pour cette session (experiments.ts), et leur dernière liste lue.
   holdout: Holdout
   off: ReadonlySet<string>
@@ -185,13 +204,18 @@ type State = {
   workSteps: number
   // Fichiers modifiés par le fil principal depuis ce même message.
   workEdits: number
-  // Modèle que l'utilisateur a choisi pour la session (celui du moteur, hors routage) :
-  // le service n'en descend qu'à bon escient, ne propose Fable que s'il s'y trouve, et
-  // c'est la référence de ses économies (ce qu'il aurait utilisé sans l'outil).
+  // Modèle que l'utilisateur a choisi pour la session (celui du moteur, hors routage),
+  // transmis au service (`session_model`, `reference_model`).
   sessionModel: string | undefined
   // Routage coupé par l'utilisateur ou son application (experiments.ts, `chosen`) : avec une
   // balise de modèle, c'est un modèle fixé, dont les étapes sont hors mesure (`pinned`).
   cut: boolean
+  // Levier kernel : outil `python` vu connecté, compteurs, invalidation du cache (kernel.ts).
+  kernel: Kernel
+  // Durées des étapes, des outils et des tours, jointes aux compteurs (timing.ts).
+  timing: Timing
+  // Plan de session reçu du service (plan.ts) : sans lui, les leviers qui en dépendent restent inactifs.
+  content: Plans
 }
 
 // D'où vient un sous-agent (mêmes mots que le mod oc-route d'Open Codex, pour
@@ -247,10 +271,8 @@ async function notified($: EngineInterface): Promise<boolean> {
 
 // Message tapé pendant un tour en cours : Claude Code interrompt l'étape
 // (`turn.complete` « aborted ») et relance le travail par un nouveau tour qui
-// porte ce seul message (vu en vrai, Claude Code 2.1.318, le 06/11/2026). C'est
-// la suite du même travail : modèle et réflexion du tour restent, sans demande
-// au service (sinon « et pense aux tests » jugé seul ferait descendre le
-// travail en cours sur un petit modèle).
+// porte ce seul message. C'est la suite du même tour : modèle et réflexion
+// restent, sans nouvelle demande au service.
 async function continued($: EngineInterface, s: State): Promise<boolean> {
   if (s.steered.size === 0) return false
   const typed = [...s.steered]
@@ -333,7 +355,7 @@ function pinged(s: State): void {
 }
 
 // Faits des leviers pour l'étape : ceux pris avant elle, plus ceux qui l'attendaient.
-function leverFacts(s: State, step: TurnStepInput, before: LeverFacts): LeverFacts {
+function leverFacts(s: State, step: TurnStepInput, before: StepFacts): StepFacts {
   const loop = step.agentId ?? 'main'
   const trimmed = s.trimmed.get(loop)
   s.trimmed.delete(loop)
@@ -351,12 +373,13 @@ function leverFacts(s: State, step: TurnStepInput, before: LeverFacts): LeverFac
     // Modèle fixé par l'utilisateur, pour ce message et les sous-agents qu'il lance : hors mesure.
     // Une session témoin (routage coupé par le tirage du service) ne l'est pas.
     ...(s.cut || s.tags.model !== undefined ? { pinned: true as const } : {}),
+    ...kernelFacts(s.kernel, step.agentId),
   }
 }
 
 // Après la réponse : mémoire du cache (fil principal et sous-agents) et compteurs de l'étape.
 async function counted($: EngineInterface, s: State, step: TurnStepInput, result: TurnStepResult,
-                       idleS: number | undefined, before: LeverFacts): Promise<void> {
+                       idleS: number | undefined, before: StepFacts): Promise<void> {
   const usage = result.usage
   if (!usage) return
   const name = family(usage.model)
@@ -379,6 +402,7 @@ async function counted($: EngineInterface, s: State, step: TurnStepInput, result
   const reference = s.sessionModel !== undefined ? { reference_model: s.sessionModel } : {}
   const counters = await stepOf(await $.session.id(), step.agentId, result.turnId, result.index, step.effort, usage, limits,
     cache, { ...levers, ...reference })
+  if (step.agentId === undefined) timed(s.timing, result.turnId, counters)
   if (add(s.queue, counters)) void flush($, s.queue)
 }
 
@@ -400,15 +424,18 @@ async function loopCache($: EngineInterface, loop: Loop): Promise<Record<string,
   return { [family(loop.model)]: { idle_s: idle(await $.clock.now(), loop.at), tokens: loop.tokens } }
 }
 
-async function ask($: EngineInterface, to: Link, facts: Facts): Promise<Choice | null> {
+async function ask($: EngineInterface, to: Link, facts: Facts): Promise<{ choice: Choice; enforced: boolean } | null> {
   const answer = await asked($, to, facts)
-  return answer.state === 'ok' ? answer.choice : null
+  return answer.state === 'ok' ? { choice: answer.choice, enforced: answer.enforced === true } : null
 }
 
 // Issue d'une demande, pour le voyant d'une application hôte (host.ts) : la
 // décision et sa raison (rendue aux seuls clients qui la reçoivent), ou la
 // cause d'un échec. Hors application hôte, seule la décision sert.
-type Asked = { state: 'ok'; choice: Choice; reason: string } | { state: 'failing' | 'not_configured'; reason: string }
+// `lean` : le service dit si la consigne de réflexion joue sur ce message (absent : il ne sait pas).
+// `enforced` : une limite du compte a changé le réglage ; sa phrase (`notice`) est montrée une fois (trial.ts).
+type Asked = { state: 'ok'; choice: Choice; reason: string; lean?: boolean; enforced?: true }
+  | { state: 'failing' | 'not_configured'; reason: string }
 
 async function asked($: EngineInterface, to: Link, facts: Facts): Promise<Asked> {
   const started = await $.clock.now()
@@ -424,7 +451,13 @@ async function asked($: EngineInterface, to: Link, facts: Facts): Promise<Asked>
   const choice = decision(reply.text)
   if (choice === null) return { state: 'failing', reason: 'réponse illisible' }
   const reason = field(reply.text, 'reason')
-  return { state: 'ok', choice, reason: typeof reason === 'string' ? reason.slice(0, 300) : '' }
+  const lean = field(reply.text, 'lean_thinking')
+  const enforced = typeof field(reply.text, 'notice') === 'string'
+  if (enforced) showNotice($, reply.text)
+  return {
+    state: 'ok', choice, reason: typeof reason === 'string' ? reason.slice(0, 300) : '',
+    ...(typeof lean === 'boolean' ? { lean } : {}), ...(enforced ? { enforced: true as const } : {}),
+  }
 }
 
 // Lancement d'un sous-agent, quel qu'il soit (appel du modèle, définition,
@@ -498,7 +531,7 @@ async function routed($: EngineInterface, s: State, to: Link, facts: AgentFacts,
     keep_effort: tags.effort !== undefined || tags.ultrathink,
   })
   return answer === null ? { ...fallback, ...own }
-    : { model: facts.model, ...underUser(answer, own, tags.effort !== undefined || tags.ultrathink) }
+    : { model: facts.model, ...underUser(answer.choice, own, tags.effort !== undefined || tags.ultrathink, answer.enforced) }
 }
 
 // Un coéquipier `idle` attend un message : il ne travaille pas.
@@ -529,8 +562,6 @@ async function decide($: EngineInterface, s: State, e: TurnStepInput): Promise<C
   const assistant = before.filter((m: SessionMessage) => m.role === 'assistant' && m.text !== '').at(-1)
   const tags = forced(text, !(await ultrathinkOff($)))
   s.tags = tags
-  const spokenIn = language(text)
-  if (spokenIn !== undefined) s.lean = spokenIn === 'other'
   const model = s.routedModel ?? e.model
   const keepModel = tags.model !== undefined
   const keepEffort = tags.effort !== undefined || tags.ultrathink
@@ -569,9 +600,10 @@ async function decide($: EngineInterface, s: State, e: TurnStepInput): Promise<C
     told(answer)
     return own
   }
-  const choice = underUser(answer.choice, own, keepEffort)
+  if (answer.lean !== undefined) s.lean = answer.lean
+  const choice = underUser(answer.choice, own, keepEffort, answer.enforced)
   const shownEffort = choice.effort ?? effort
-  // Claude Code préfixe déjà la ligne du nom du plugin (vu en vrai le 02/11/2026).
+  // Claude Code préfixe déjà la ligne du nom du plugin.
   await status($, s.seen, `${family(choice.model ?? model)}${shownEffort ? ` · ${shownEffort}` : ''}`)
   told({ state: 'ok', model: family(choice.model ?? model), effort: shownEffort ?? '', reason: answer.reason })
   return choice
@@ -583,29 +615,54 @@ function cooled(s: State): void {
   s.compacted = true
 }
 
-// Pause après un tour du fil principal : compaction si le service la veut, puis
-// relances du cache sur la conversation telle qu'elle est. Ne lève jamais.
-// Une compaction efface la réponse de l'écran : elle attend que l'utilisateur
-// soit absent depuis le délai que rend le service (compact.ts). Son issue part
-// avec l'étape suivante du fil (`compact_try`) : sans elle, rien ne dit pourquoi
-// une compaction voulue n'a pas eu lieu.
+// Plan de session du client relié au service ; null sans lien ni plan.
+async function planned($: EngineInterface, s: State): Promise<SessionPlan | null> {
+  const to = await link($, s.options)
+  return to ? sessionPlan($, s.content, to) : null
+}
+
+// Plan du levier kernel s'il est actif : client relié au service, levier non coupé (témoin
+// du service, application hôte, TOKFIT_OFF), présent dans le plan, et outil `python`
+// connecté ; sinon null et rien ne change.
+async function kernelOn($: EngineInterface, s: State): Promise<KernelPlan | null> {
+  const to = await link($, s.options)
+  if (!to || (await levers($, s.holdout, to)).has('kernel')) return null
+  const plan = (await sessionPlan($, s.content, to))?.kernel
+  return plan && (await kernelReady($, s.kernel)) ? plan : null
+}
+
+// Plan du levier prefix s'il est actif : client relié au service, levier non coupé, présent dans le plan.
+async function prefixOn($: EngineInterface, s: State): Promise<PrefixPlan | null> {
+  const to = await link($, s.options)
+  if (!to || (await levers($, s.holdout, to)).has('prefix')) return null
+  return (await sessionPlan($, s.content, to))?.prefix ?? null
+}
+
+// Pause après un tour du fil principal : compaction si le service la veut, après l'absence
+// qu'il rend, puis relances du cache. Les consignes viennent du plan de session ; l'issue
+// de la compaction part avec l'étape suivante du fil (`compact_try`). Ne lève jamais.
 async function paused($: EngineInterface, s: State): Promise<void> {
   const generation = s.warm.generation
   const idle = (): boolean => s.warm.generation === generation
+  let ping: string | undefined
   try {
     const to = await link($, s.options)
     if (to && !s.audited) {
       s.audited = true
       await audit($, to)
     }
+    const plan = to ? await sessionPlan($, s.content, to) : null
+    ping = plan?.warm
+    const instructions = plan?.compaction
     const off = to ? await levers($, s.holdout, to) : new Set<string>()
     const model = s.warm.main?.model
-    const after = to && model && !off.has('compaction') ? await wanted($, to, model) : null
-    if (after !== null) {
+    const after = to && model && instructions !== undefined && !off.has('compaction')
+      ? await wanted($, to, model, (await host($, s.seen)) !== null) : null
+    if (after !== null && instructions !== undefined) {
       s.compactTry = 'back'
       if ((await waited($, s.warm, after)) && idle()) {
         const before = (await $.session.usage()).context.tokens
-        s.compactTry = await compactNow($, idle)
+        s.compactTry = await compactNow($, idle, instructions)
         if (s.compactTry === 'done') {
           cooled(s)
           compacted(s.rereads)
@@ -617,7 +674,9 @@ async function paused($: EngineInterface, s: State): Promise<void> {
     // Service en panne ou session illisible : conversation entière.
   }
   // L'utilisateur est revenu pendant l'attente : son tour relancera la pause.
-  if (idle() && !s.off.has('warm')) await rest($, s.warm, s.options, s.queue)
+  if (idle() && ping !== undefined && !s.off.has('warm')) await rest($, s.warm, s.options, s.queue, ping)
+  // Sans relance après la compaction : plus rien de prévu (warm.ts, `awake`).
+  else if (idle()) await awake($, s.warm, null)
 }
 
 export const register: Register = (on, options) => {
@@ -625,10 +684,14 @@ export const register: Register = (on, options) => {
     options, queue: queue(options), to: null, routedModel: undefined, turn: {}, steered: new Set(), tags: NO_TAGS, plans: new Map(),
     pending: new Map(), spawning: 0, loops: new Map(), requested: new Map(), sources: new Map(), lastCall: new Map(),
     compacted: false, warm: warm(), audited: false, fanout: fanout(), trimmed: new Map(), compactedFrom: undefined,
-    compactTry: undefined, lean: false,
+    compactTry: undefined, lean: false, prefix: prefix(),
     rereads: rereads(), holdout: holdout(), off: new Set(), seen: {}, workSteps: 0, workEdits: 0, sessionModel: undefined,
-    cut: false,
+    cut: false, kernel: kernel(), content: plans(), timing: timing(), noticed: notice(),
   }
+
+  // Essai sans inscription : clé anonyme dès le démarrage, commande du tableau de bord et de
+  // l'état des leviers (access.ts, state.ts).
+  access(on, options, { holdout: s.holdout, content: s.content, kernel: s.kernel })
 
   // Une autre copie du connecteur sur le point de se charger : refusée (single.ts).
   // En cas d'échec du jugement, elle se charge : jamais de blocage par le connecteur.
@@ -636,7 +699,28 @@ export const register: Register = (on, options) => {
     .catch(($, e, next) => next(e))
 
   on('turn.step', async function* ($, e, next) {
-    const before: LeverFacts = {}
+    // Levier kernel : la cellule précédente du fil principal a appelé `fini(resume)`.
+    // L'étape suivante du même tour rend ce résumé sans requête au modèle : le tour
+    // s'arrête, le résumé est son dernier message (kernel.ts). Une première étape
+    // (nouveau tour, l'utilisateur a interrompu le précédent) n'hérite de rien.
+    if (e.agentId === undefined) {
+      const summary = s.kernel.summary
+      s.kernel.summary = undefined
+      s.kernel.stopped = summary !== undefined && e.index > 0
+      if (summary !== undefined && e.index > 0) {
+        const answer = finalAnswer(e.turnId, e.index, summary)
+        for (const chunk of answer.chunks) yield chunk
+        return answer.result
+      }
+    }
+    const before: StepFacts = {}
+    try {
+      const now = await $.clock.now()
+      if (e.agentId === undefined && e.index === 0) began(s.timing, now)
+      Object.assign(before, toolTime(s.timing, e.agentId ?? 'main'))
+    } catch {
+      // Horloge illisible : les durées manquent, rien d'autre.
+    }
     if (e.agentId === undefined) {
       cancel(s.warm)
       pinged(s)
@@ -646,13 +730,32 @@ export const register: Register = (on, options) => {
         // Horloge illisible : le fait manque au levier, rien d'autre.
       }
     }
+    let plan: SessionPlan | null = null
     try {
       // Le lien se pose ici, à chaque étape : les compteurs remontent même quand aucune
       // décision n'est demandée (routage coupé), sinon l'étape manquerait au service.
       s.to = await link($, s.options)
-      s.off = s.to ? await levers($, s.holdout, s.to) : new Set()
+      const to = s.to
+      ;[s.off, plan] = to ? await Promise.all([levers($, s.holdout, to), sessionPlan($, s.content, to)]) : [new Set<string>(), null]
     } catch {
-      // Liste illisible : tous les leviers restent actifs.
+      // Liste ou plan illisible : leviers coupés gardés, leviers du plan inactifs.
+    }
+    passed(s.kernel)
+    try {
+      // Client relié sans plan de session : leviers du plan inactifs, dit au service et à la personne.
+      const missing = s.content.missing
+      if (s.to && plan === null && missing !== undefined) {
+        before.plan_missing = missing
+        planNotice($, s.noticed, missing)
+      }
+    } catch {
+      // Ligne de la conversation refusée : le fait part quand même.
+    }
+    try {
+      // Levier voulu mais noyau absent : rien n'a été retiré, le service le sait par l'étape.
+      if (s.to && plan?.kernel && !s.off.has('kernel') && !(await kernelReady($, s.kernel))) before.kernel_unavailable = true
+    } catch {
+      // Liste des outils illisible : le fait manque au levier, rien d'autre.
     }
     let step: TurnStepInput = e
     try {
@@ -664,8 +767,9 @@ export const register: Register = (on, options) => {
     // Premier pas d'un sous-agent lancé avec d'autres du même type : après le premier.
     let lead = (): void => undefined
     try {
-      if (step.agentId !== undefined && step.index === 0 && s.to && !s.off.has('fanout')) {
-        const turn = await queued($, s.fanout, step.agentId)
+      const wait = plan?.fanout
+      if (step.agentId !== undefined && step.index === 0 && s.to && wait !== undefined && !s.off.has('fanout')) {
+        const turn = await queued($, s.fanout, step.agentId, wait)
         lead = turn.release
         if (turn.waited) before.fanout = true
       }
@@ -681,10 +785,21 @@ export const register: Register = (on, options) => {
       // Horloge illisible : l'écart manque au compteur, rien d'autre.
     }
     let result: TurnStepResult
+    let sent: number | undefined
+    try {
+      sent = await $.clock.now()
+    } catch {
+      // Horloge illisible : l'attente du modèle manque, rien d'autre.
+    }
     try {
       result = yield* next(step)
     } finally {
       lead()
+    }
+    try {
+      if (sent !== undefined) Object.assign(before, modelTime(sent, await $.clock.now()))
+    } catch {
+      // Horloge illisible : l'attente du modèle manque, rien d'autre.
     }
     try {
       await counted($, s, step, result, idleS, before)
@@ -696,6 +811,10 @@ export const register: Register = (on, options) => {
 
   // Ce que l'agent principal a fixé, et la source de chaque type d'agent : faits
   // pour le journal du service, jamais une raison de ne pas router.
+  // Un noyau par agent (kernel.ts, `withAgent`) : l'agent qui appelle `python` part avec
+  // l'appel, levier coupé ou non (l'outil reste le même, son noyau ne se partage jamais).
+  on('tool.call', { tool: KERNEL_TOOL }, ($, e, next) => next(withAgent(e)))
+
   on('tool.call', { tool: 'Agent' }, ($, e, next) => {
     s.requested.set(e.tool_use_id, { ...(e.model ? { model: e.model } : {}), ...(e.effort ? { effort: e.effort } : {}) })
     return next(e)
@@ -707,8 +826,10 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const result = await next(e)
     try {
-      if (result.deny !== undefined || result.isError || s.off.has('output') || !(await link($, s.options))) return result
-      const short = shorten(e.command, result.result)
+      if (result.deny !== undefined || result.isError || s.off.has('output')) return result
+      const rules = (await planned($, s))?.output
+      if (!rules) return result
+      const short = shorten(e.command, result.result, rules)
       if (!short) return result
       const removed = chars(result.result) - chars(short.record)
       const loop = e.agentId ?? 'main'
@@ -720,16 +841,22 @@ export const register: Register = (on, options) => {
     }
   })
 
-  // Réflexion en anglais (thinking.ts) : section fixe en fin de prompt système,
-  // pour un client relié au service seulement.
+  // Sections du plan de session en fin de prompt système (réflexion, persistance, et pour un client admin
+  // la consigne de retour, sans témoin), et consigne du noyau à la place de la section que le plan désigne ;
+  // client relié au service seulement.
   on('prompt.compose', async ($, e, next) => {
     const result = await next(e)
     try {
       const to = await link($, s.options)
       if (!to) return result
-      const off = await levers($, s.holdout, to)
-      return { sections: [...result.sections, ...(!off.has('thinking') ? [THINKING_SECTION] : []),
-        ...(!off.has('persistence') ? [EXECUTION_SECTION] : [])] }
+      const [off, plan] = await Promise.all([levers($, s.holdout, to), sessionPlan($, s.content, to)])
+      if (!plan) return result
+      const kernelPlan = !off.has('kernel') && plan.kernel && (await kernelReady($, s.kernel)) ? plan.kernel : undefined
+      const sections = kernelPlan ? composed(result.sections, kernelPlan) : result.sections
+      return { sections: [...sections,
+        ...(plan.thinking !== undefined && !off.has('thinking') ? [section('thinking', plan.thinking)] : []),
+        ...(plan.persistence !== undefined && !off.has('persistence') ? [section('execution', plan.persistence)] : []),
+        ...(plan.feedback !== undefined ? [section('feedback', plan.feedback)] : [])] }
     } catch {
       // Configuration illisible : prompt inchangé.
       return result
@@ -737,9 +864,32 @@ export const register: Register = (on, options) => {
   })
 
   // Fichiers lus et modifiés par le fil principal (rereads.ts) : chemins en mémoire seulement.
+  // Appels de `python` comptés (kernel.ts), jamais lus : leur code ne quitte pas la machine.
+  // Seul le bloc du résumé de `fini()` est lu, dans le fil principal, pour arrêter le tour.
   // Pas de `.catch` qui rappellerait `next` : l'outil tournerait deux fois.
   on('tool.call', async ($, e, next) => {
+    let start: number | undefined
+    try {
+      start = await $.clock.now()
+    } catch {
+      // Horloge illisible : la durée de l'outil manque, rien d'autre.
+    }
     const result = await next(e)
+    try {
+      if (start !== undefined) ran(s.timing, e.agentId ?? 'main', start, await $.clock.now())
+    } catch {
+      // Horloge illisible : la durée de l'outil manque, rien d'autre.
+    }
+    try {
+      const plan = isKernelTool(e.tool) && result.deny === undefined ? await kernelOn($, s) : null
+      if (plan) {
+        called(s.kernel, e.agentId)
+        const summary = e.agentId === undefined && !result.isError ? summaryOf(result.result, plan.finished) : undefined
+        if (summary !== undefined) s.kernel.summary = summary
+      }
+    } catch {
+      // Configuration ou liste des outils illisible : l'appel n'est pas compté, rien d'autre.
+    }
     try {
       const path = 'file_path' in e ? e.file_path : undefined
       if (e.agentId === undefined && typeof path === 'string' && result.deny === undefined && !result.isError) {
@@ -750,6 +900,112 @@ export const register: Register = (on, options) => {
       // Appel illisible : rien à suivre.
     }
     return result
+  })
+
+  // Levier kernel (kernel.ts) : `python` et `compte` devant, outils intégrés d'action et outils
+  // qui n'agissent pas derrière ToolSearch. Sur toute erreur, la place du moteur reste.
+  on('tool.describe', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      const plan = await kernelOn($, s)
+      return plan && (isKernelTool(e.tool) || isAccountTool(e.tool) || isBehind(plan, e.tool))
+        ? placed(s.kernel, plan, e, result) : result
+    } catch {
+      // Configuration ou liste des outils illisible : description inchangée.
+      return result
+    }
+  })
+
+  // Levier kernel : ToolSearch ne trouve ni ne charge plus les outils refusés (leurs noms retirés de sa
+  // réponse, que le moteur traduit ensuite en schémas) ; la raison du refus jointe pour le modèle.
+  // Sur toute erreur, la réponse du moteur. Pas de `.catch` qui rappellerait `next`.
+  on('tool.call', { tool: 'ToolSearch' }, async ($, e, next) => {
+    const result = await next(e)
+    try {
+      if (result.deny !== undefined || result.isError) return result
+      const found: unknown = result.result
+      const matches = typeof found === 'object' && found !== null ? (found as { matches?: unknown }).matches : undefined
+      const plan = Array.isArray(matches) ? await kernelOn($, s) : null
+      if (!plan || !Array.isArray(matches)) return result
+      const kept = searchable(plan, matches)
+      if (kept.length === matches.length) return result
+      return { result: { ...(found as object), matches: kept } as typeof result.result,
+        context: [...(result.context ?? []), plan.refusal] }
+    } catch {
+      return result
+    }
+  })
+
+  // Outil retiré que le modèle appelle quand même (chargé par ToolSearch) : refusé
+  // avec la consigne de passer par `python`. Seul un vrai appel compte (pas une
+  // question `$.tool.check` d'un plugin). Sur toute erreur, la décision du moteur.
+  on('tool.check', async ($, e, next) => {
+    try {
+      const plan = await kernelOn($, s)
+      if (plan && isDenied(plan, e.tool)) {
+        if (e.tool_use_id !== undefined) refused(s.kernel, e.agentId)
+        return { decision: 'deny' as const, reason: plan.refusal }
+      }
+    } catch {
+      // Configuration ou liste des outils illisible : le moteur décide.
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // Levier prefix (prefix.ts) : la section que le plan nomme quitte le prompt système et rejoint le
+  // contexte du premier message, que le moteur refait après une compaction. Sur toute erreur, rien ne bouge.
+  on('prompt.section', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      const plan = await prefixOn($, s)
+      return plan?.context.has(e.name) && taken(s.prefix, e.name, result.text) ? { ...result, text: null } : result
+    } catch {
+      return result
+    }
+  }).catch(($, e, next) => next(e))
+
+  on('prompt.context', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      const plan = await prefixOn($, s)
+      if (!plan) return result
+      const own = await carried($, s.prefix, plan.context)
+      if (own.length === 0) return result
+      return { ...result, blocks: [...result.blocks.filter(block => !own.some(found => found.name === block.name)), ...own] }
+    } catch {
+      return result
+    }
+  }).catch(($, e, next) => next(e))
+
+  // Levier kernel : la pièce jointe que le plan désigne est retirée de la requête, les
+  // listes qu'il nomme sont raccourcies, et la liste des outils différés perd les outils refusés
+  // (kernel.ts). Sur toute erreur, celle du moteur.
+  on('prompt.attachment', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      const plan = result.text !== null ? await kernelOn($, s) : null
+      if (plan && result.text !== null) {
+        if (contradicts(plan, e.type, result.text)) return { text: null }
+        const short = unlisted(plan, e.type, shortened(plan, e.type, result.text))
+        if (short !== result.text) return { ...result, text: short }
+      }
+    } catch {
+      // Configuration ou liste des outils illisible : pièce jointe gardée.
+    }
+    return result
+  }).catch(($, e, next) => next(e))
+
+  // Tour du fil principal arrêté par `fini()` : fin voulue par le modèle, tâche
+  // vérifiée. Les hooks Stop des réglages (dont completion.py, levier persistence,
+  // qui relance sur un plan natif ouvert) tournent, mais leur relance (`block`) est
+  // retirée. Pas de `.catch` qui rappellerait `next` : ils tourneraient deux fois.
+  on('classic.Stop', async ($, e, next) => {
+    const stopped = s.kernel.stopped
+    s.kernel.stopped = false
+    const result = await next(e)
+    if (!stopped || result.block === undefined) return result
+    const { block: _relaunch, ...kept } = result
+    return kept
   })
 
   on('agent.offer', ($, e, next) => {
@@ -810,6 +1066,12 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (e.agentId === undefined && e.reason !== 'aborted') s.steered.clear()
     if (e.agentId === undefined) {
+      try {
+        // Durée du tour jusqu'à sa réponse finale, avant que le lot ne parte (timing.ts).
+        if (e.reason === 'answer') ended(s.timing, e.turnId, await $.clock.now(), s.queue.steps)
+      } catch {
+        // Horloge illisible : la durée du tour manque, rien d'autre.
+      }
       void flush($, s.queue)
       void paused($, s)
     }

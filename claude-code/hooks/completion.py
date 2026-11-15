@@ -79,6 +79,25 @@ def pending(rows: Iterable[object]) -> int:
     return min(10000, count + sum(status in ("pending", "in_progress") for status in tasks.values()))
 
 
+def store_folder(env: dict[str, str]) -> Path:
+    """Folder of the plugin stores (`$.store`) under Claude Code's configuration directory."""
+    return Path(env.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")) / "plugins" / "store"
+
+
+def stored_link(env: dict[str, str]) -> tuple[str, str] | None:
+    """(url, key) of the anonymous key the connector keeps in its plugin store (hooks/key.ts), if any."""
+    for path in sorted(store_folder(env).glob("tokfit_*.json")):
+        try:
+            with path.open("rb") as file:
+                entry = json.loads(file.read(MAX_INPUT)).get("anonymous_key")
+        except (OSError, ValueError, AttributeError):
+            # Unreadable store: another copy's file may still hold the key.
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("url"), str) and isinstance(entry.get("key"), str):
+            return entry["url"].rstrip("/"), entry["key"]
+    return None
+
+
 def link(env: dict[str, str]) -> tuple[str, str] | None:
     url, key = env.get("TOKFIT_RELAY_URL"), env.get("TOKFIT_RELAY_TOKEN")
     relay = bool(url and key)
@@ -94,6 +113,10 @@ def link(env: dict[str, str]) -> tuple[str, str] | None:
         # Claude passes plugin options in the hook environment, never in argv.
         url = env.get("CLAUDE_PLUGIN_OPTION_SERVICE_URL") or config.get("url")
         key = env.get("CLAUDE_PLUGIN_OPTION_API_KEY") or config.get("key")
+    if not relay and not key:
+        stored = stored_link(env)
+        if stored is not None and (not isinstance(url, str) or not url or url.rstrip("/") == stored[0]):
+            url, key = stored
     if not isinstance(url, str) or not isinstance(key, str) or not key:
         return None
     parsed = urlsplit(url)

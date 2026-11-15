@@ -5,7 +5,7 @@
 // étape, la réflexion sur chaque étape. Un fork ou une reprise envoie les vrais
 // faits de cache : le service décide si changer de modèle vaut la réécriture.
 import { describe, expect, test } from 'claude-code/testing'
-import { agent, assistant, spawn, step, user, world } from './support'
+import { agent, assistant, spawn, step, unconfigured, user, world } from './support'
 import type { Reply } from './support'
 
 const ROUTED: Reply = { status: 200, body: { model: 'haiku', effort: 'low' } }
@@ -243,6 +243,15 @@ describe('balises de l’utilisateur, propagées aux sous-agents de son message'
     expect(w.steps[1]).toMatchObject({ effort: 'max' })
   })
 
+  test('limite du compte : le modèle imposé par le service passe devant la balise du sous-agent', async ($, on) => {
+    const notice = 'Opus est bloqué sur ce compte : Sonnet à la place.'
+    const w = world(on, { messages: [user('[opus] audit complet')], route: () => ({ status: 200, body: { model: 'sonnet', effort: null, notice } }) })
+    await step($, 0, { turnId: 't1' })
+    expect(await agent($, 'audite le module')).toBe('sonnet')
+    expect(w.routes()[1]?.body).toMatchObject({ kind: 'subagent', keep_model: true, model: 'opus' })
+    expect(w.shown.filter(line => line.startsWith('ui.log '))).toEqual([`ui.log ${notice}`])
+  })
+
   test('balise et service en panne : la balise s’applique quand même', async ($, on) => {
     const w = world(on, { messages: [user('[sonnet] fais-le')], route: () => 'down' })
     await step($, 0, { turnId: 't1' })
@@ -283,11 +292,13 @@ describe('repli silencieux', () => {
     expect((await pending).model).toBe('claude-opus-5-5')
   })
 
-  test('sans clé : aucun appel, rien ne change', async ($, on) => {
+  test('sans clé : aucun appel, rien ne change (adresse officielle seule en copie publique)', async ($, on) => {
     const w = world(on, { config: null, messages: [user('x')] })
-    expect(await agent($, 'x', { fork: true })).toBe('claude-opus-5-5')
+    const model = await agent($, 'x', { fork: true })
     await step($, 0, { turnId: 'f-t1', agentId: 'agent-1' })
-    expect(w.sent).toEqual([])
-    expect(w.steps[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high' })
+    await unconfigured(w.sent, () => {
+      expect(model).toBe('claude-opus-5-5')
+      expect(w.steps[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high' })
+    })
   })
 })

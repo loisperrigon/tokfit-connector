@@ -1,14 +1,21 @@
 {
   "name": "tokfit",
-  "version": "0.4.1",
+  "version": "0.7.1",
   "description": "Consommer moins avec le même abonnement : modèle et réflexion de Claude Code choisis à chaque message par le service.",
   "author": { "name": "Lois Perrigon" },
   "icon": "./icon.png",
+  "mcpServers": {
+    "outils": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/kernel/server.py"],
+      "env": { "CLAUDE_PLUGIN_OPTION_API_KEY": "${user_config.api_key}", "CLAUDE_PLUGIN_OPTION_SERVICE_URL": "${user_config.service_url}" }
+    }
+  },
   "userConfig": {
     "api_key": {
       "type": "string",
       "title": "Clé du service",
-      "description": "Clé reçue à l'inscription (ek_…). Gardée dans le trousseau, jamais dans settings.json.",
+      "description": "Facultatif : sans clé, l'essai démarre tout seul (clé anonyme). Après l'abonnement, la clé remise une fois (ek_…). Gardée dans le trousseau, jamais dans settings.json.",
       "sensitive": true,
       "required": false
     },

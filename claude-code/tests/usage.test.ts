@@ -1,7 +1,7 @@
 // Compteurs de tokens : remontés par lots vers /v1/usage, avec la session et
 // un identifiant d'étape stable (renvoi sans double compte), jamais bloquants.
 import { describe, expect, test } from 'claude-code/testing'
-import { SESSION, URL, complete, end, messages, step, turn, user, world } from './support'
+import { SESSION, URL, complete, end, messages, step, turn, unconfigured, user, world } from './support'
 import type { Reply } from './support'
 
 type Sent = Record<string, unknown>
@@ -15,6 +15,8 @@ describe('remontée par lots', () => {
     const w = world(on, {
       messages: [user('x')], route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } }),
       rateLimits: [{ kind: 'five_hour', percentUsed: 12.5 }, { kind: 'seven_day', percentUsed: 40 }],
+      // Plugin installé tel quel : le noyau est connecté (sinon `kernel_unavailable`, kernel.test.ts).
+      tools: ['Read', 'mcp__plugin_tokfit_outils__python'],
     })
     await step($, 0, { turnId: 't1' })
     await step($, 1, { turnId: 't1' })
@@ -93,11 +95,11 @@ describe('remontée par lots', () => {
     expect(stepsOf(w.usages()[0]?.body ?? {})).toHaveLength(1)
   })
 
-  test('sans configuration : rien à remonter', async ($, on) => {
+  test('sans configuration : rien à remonter (adresse officielle seule en copie publique)', async ($, on) => {
     const w = world(on, { config: null, messages: [user('x')] })
     await turn($, 't1', 2)
     await end($)
-    expect(w.sent).toEqual([])
+    await unconfigured(w.sent, () => {})
   })
 
   test('étape sans compteurs (aucune réponse de l’API) : rien à remonter', async ($, on) => {

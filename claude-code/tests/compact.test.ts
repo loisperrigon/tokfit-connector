@@ -3,11 +3,12 @@
 // du cache partent sur la conversation résumée.
 import { describe, expect, test } from 'claude-code/testing'
 import type { EngineInterface } from 'claude-code'
-import { COMPACT_INSTRUCTIONS, compactNow } from '../hooks/compact'
+import { compactNow } from '../hooks/compact'
+import { COMPACT_TEXT as COMPACT_INSTRUCTIONS, TEST_PLAN } from './plan'
 import { SESSION, URL, complete, config, step, user, world } from './support'
 import type { Reply } from './support'
 
-const YES = (): Reply => ({ status: 200, body: { compact: true } })
+const YES = (): Reply => ({ status: 200, body: { compact: true, after_s: 240 } })
 
 function stepsOf(body: Record<string, unknown>): Record<string, unknown>[] {
   return body.steps as Record<string, unknown>[]
@@ -21,7 +22,7 @@ describe('compaction au coût', () => {
     await w.clock.settle()
     expect(w.compacts()).toHaveLength(1)
     expect(w.compacts()[0]?.url).toBe(`${URL}/v1/compact`)
-    expect(w.compacts()[0]?.body).toEqual({ model: 'claude-opus-5-5', context_tokens: 42_000, session_id: SESSION })
+    expect(w.compacts()[0]?.body).toEqual({ model: 'claude-opus-5-5', context_tokens: 42_000, session_id: SESSION, host: false })
     expect(w.compactions).toEqual([])
   })
 
@@ -75,6 +76,29 @@ describe('compaction au coût', () => {
     })
   }
 
+  test('oui sans délai lisible : aucune compaction', async ($, on) => {
+    const w = world(on, { messages: [user('x')], compact: () => ({ status: 200, body: { compact: true } }) })
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    await w.clock.advance(3_600_000)
+    expect(w.compactions).toEqual([])
+  })
+
+  test('plan sans consignes de compaction ni de relance : ni demande, ni compaction, ni relance', async ($, on) => {
+    const { compaction: _c, warm: _w, ...rest } = TEST_PLAN
+    const w = world(on, { messages: [user('x')], compact: YES, warm: () => ({ status: 200, body: { after_s: 10 } }),
+      content: () => ({ status: 200, body: { version: 'v-test', claude: rest } }) })
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    await w.clock.advance(600_000)
+    expect(w.compacts()).toEqual([])
+    expect(w.compactions).toEqual([])
+    expect(w.warms()).toEqual([])
+    expect(w.forks).toEqual([])
+  })
+
   test('le délai d’absence est celui que rend le service', async ($, on) => {
     const w = world(on, { messages: [user('x')], compact: () => ({ status: 200, body: { compact: true, after_s: 5 } }) })
     await step($, 0, { turnId: 't1' })
@@ -84,6 +108,25 @@ describe('compaction au coût', () => {
     expect(w.compactions).toEqual([])
     await w.clock.advance(1_000)
     expect(w.compactions).toEqual([{ instructions: COMPACT_INSTRUCTIONS }])
+  })
+
+  // Plafond de contexte (service/compact.py) : sans attendre une absence qui n'arrive pas chez un
+  // client actif, la compaction part dès la fin du tour, avant que l'utilisateur ne réponde.
+  test('au plafond, le service rend 0 : compaction dès la fin du tour', async ($, on) => {
+    const w = world(on, { messages: [user('x')], compact: () => ({ status: 200, body: { compact: true, after_s: 0 } }) })
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    expect(w.compactions).toEqual([{ instructions: COMPACT_INSTRUCTIONS }])
+  })
+
+  // Dans Open Codex, sa rotation des conversations est le plafond : le service le sait par `host`.
+  test('dans l’application hôte, la demande le dit', async ($, on) => {
+    const w = world(on, { messages: [user('x')], env: { OPEN_CODEX_PANE: 'pane-7', OPEN_CODEX_BRIDGE: '/support/bridge.json' } })
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    expect(w.compacts()[0]?.body).toMatchObject({ host: true })
   })
 
   // Vu en vrai le 11/11/2026 (Claude Code 2.1.322) : dans le tchat d'Open Codex (mode SDK), aucune
@@ -99,13 +142,13 @@ describe('compaction au coût', () => {
 
   test('session sans terminal : le moteur refuse, la compaction passe par la commande /compact', async () => {
     const ran: unknown[] = []
-    const outcome = await compactNow(headless(async input => { ran.push(input); return {} }), () => true)
+    const outcome = await compactNow(headless(async input => { ran.push(input); return {} }), () => true, COMPACT_INSTRUCTIONS)
     expect(outcome).toBe('done')
     expect(ran).toEqual([{ command: 'compact', args: COMPACT_INSTRUCTIONS }])
   })
 
   test('session sans terminal, commande refusée elle aussi : issue « error », rien ne lève', async () => {
-    const outcome = await compactNow(headless(async () => { throw new Error('past a host limit') }), () => true)
+    const outcome = await compactNow(headless(async () => { throw new Error('past a host limit') }), () => true, COMPACT_INSTRUCTIONS)
     expect(outcome).toBe('error')
   })
 

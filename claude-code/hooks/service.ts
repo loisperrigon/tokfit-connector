@@ -6,7 +6,8 @@
 // `claude plugin install … --config api_key=ek_…`, gardée dans le trousseau),
 // sinon d'un fichier hors dépôt (~/.config/tokfit/config.json, écrit par
 // install.sh, ou TOKFIT_CONFIG). Champ par champ, la configuration du
-// plugin passe avant le fichier.
+// plugin passe avant le fichier. Sans clé configurée : clé anonyme (key.ts).
+// Réponse 402 : message de fin d'essai (trial.ts).
 //
 // Exception : une application qui lance Claude Code et relaie le service avec
 // son propre jeton (Open Codex, host.ts) pose ses deux variables de relais
@@ -14,6 +15,9 @@
 // alors avant tout le reste. Son adresse peut être en clair sur un réseau privé
 // (le trajet appartient à l'application), son jeton n'est pas une clé `ek_`.
 import type { EngineInterface, HttpResponse, PluginOptions } from 'claude-code'
+import { bounded } from './bounded'
+import { anonymousKey } from './key'
+import { trialNotice } from './trial'
 
 // Nom du connecteur : ligne d'état et dossier de configuration. La copie
 // publique porte le nom de production (connector/publish.py renomme cette
@@ -48,10 +52,10 @@ export async function link($: EngineInterface, options: PluginOptions): Promise<
   const relay = await relayed($)
   if (relay) return relay
   const file = await configFile($)
-  const key = text(options.api_key) || text(file.key)
-  const url = text(options.service_url) || text(file.url) || DEFAULT_URL
-  if (!KEY.test(key) || !ADDRESS.test(url)) return null
-  return { url: url.replace(/\/+$/, ''), key }
+  const url = (text(options.service_url) || text(file.url) || DEFAULT_URL).replace(/\/+$/, '')
+  if (!ADDRESS.test(url)) return null
+  const key = text(options.api_key) || text(file.key) || (await anonymousKey($, url, options)) || ''
+  return KEY.test(key) ? { url, key } : null
 }
 
 // Relais d'une application hôte : adresse http(s) sans identifiants, jeton sans espace.
@@ -100,18 +104,14 @@ export function field(text: string, name: string): unknown {
 }
 
 // POST JSON vers le service ; null s'il est injoignable ou plus lent que `timeoutMs`.
+// Une réponse 402 passe par le message de fin d'essai (trial.ts) avant d'être rendue.
 export async function post($: EngineInterface, to: Link, path: string, body: unknown,
                            timeoutMs: number): Promise<HttpResponse | null> {
-  const stop = new AbortController()
-  const request = $.http.fetch(`${to.url}${path}`, {
+  const reply = await bounded($, `${to.url}${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${to.key}` },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${to.key}`, 'x-show-notice': '1' },
     body: JSON.stringify(body),
-  }).catch(() => null)
-  const late = $.clock.sleep(timeoutMs, { signal: stop.signal }).then(() => null, () => null)
-  try {
-    return await Promise.race([request, late])
-  } finally {
-    stop.abort()
-  }
+  }, timeoutMs)
+  if (reply) trialNotice($, reply.status, reply.text)
+  return reply
 }

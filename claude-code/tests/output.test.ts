@@ -1,8 +1,12 @@
 // Sorties de commandes bruyantes raccourcies avant que le modèle ne les lise :
 // nettoyage sans perte, puis début, fin et erreurs d'une longue sortie.
 import { describe, expect, test } from 'claude-code/testing'
-import { LONG, RAW, noisy, trim } from '../hooks/output'
+import { RAW, noisy as noisyWith, trim as trimWith } from '../hooks/output'
+import { OUTPUT } from './plan'
 import { URL, config, world } from './support'
+
+const noisy = (command: string): boolean => noisyWith(command, OUTPUT)
+const trim = (text: string): ReturnType<typeof trimWith> => trimWith(text, OUTPUT)
 
 const lines = (count: number, at: (n: number) => string): string => Array.from({ length: count }, (_, n) => at(n)).join('\n')
 
@@ -41,9 +45,9 @@ describe('raccourci', () => {
     expect(kept[0]).toBe('ok 0')
     expect(kept.at(-1)).toBe('ok 999')
     expect(kept).toContain('501: Error: attendu 2, reçu 3')
-    expect(out.hidden).toBe(1000 - 60 - 100 - 1)
+    expect(out.hidden).toBe(1000 - OUTPUT.head - OUTPUT.tail - 1)
     expect(kept.length).toBeLessThan(200)
-    expect(trim(lines(LONG, n => `ok ${n}`)).hidden).toBe(0)
+    expect(trim(lines(OUTPUT.long, n => `ok ${n}`)).hidden).toBe(0)
   })
 })
 
@@ -72,6 +76,15 @@ describe('dans Claude Code', () => {
     expect((plain.result as { stdout: string }).stdout).toBe(long)
     expect(plain.context).toBeUndefined()
   })
+
+  for (const [name, content] of [['en panne', () => 'down' as const], ['qui refuse', () => ({ status: 402 })]] as const) {
+    test(`sans plan de session (service ${name}) : rien ne change`, async ($, on) => {
+      world(on, { bash: () => ({ stdout: long }), content })
+      const plain = await $.tool.call({ tool: 'Bash', command: 'npm test' })
+      expect((plain.result as { stdout: string }).stdout).toBe(long)
+      expect(plain.context).toBeUndefined()
+    })
+  }
 
   test('l’outil échoue : l’erreur passe telle quelle', async ($, on) => {
     world(on, { bash: () => 'error' })

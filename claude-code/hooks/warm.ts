@@ -1,29 +1,25 @@
-// Cache du fil principal gardé au chaud pendant une pause (« fork-ping »).
+// Relance du fil principal pendant une pause (`$.model.fork` : la dernière requête du fil
+// suivie de la consigne du plan de session, sans outil). À la fin d'un tour, le connecteur
+// demande au service (/v1/warm) quand relancer, attend, relance, et redemande. Tout nouveau
+// pas du fil principal, toute compaction du fil, toute fin de session ou toute réponse nulle
+// arrête la chaîne. Les compteurs de chaque relance partent avec `ping`.
 //
-// `$.model.fork` renvoie la dernière requête du fil principal (modèle,
-// réflexion, consigne système, outils, messages) suivie d'une consigne d'une
-// ligne, sans outil : elle relit tout le préfixe en cache et remet sa durée à
-// zéro, sans rien ajouter à la conversation ni lancer de sous-agent (donc sans
-// relecture du mode auto, qui relit chaque sous-agent qui rend la main). Le
-// connecteur ne décide rien : à la fin d'un tour, il demande au service
-// (/v1/warm) quand relancer, attend, relance, et redemande. Tout nouveau pas du
-// fil principal, toute compaction du fil (le fork relirait l'ancien préfixe),
-// toute fin de session ou toute réponse nulle arrête la chaîne.
-// Les compteurs de chaque relance partent avec `ping`.
+// Dans Open Codex, qui met en veille (arrête) le moteur d'une conversation calme depuis
+// 30 min, chaque attente armée écrit son échéance (secondes depuis l'epoch) dans le fichier
+// que l'application donne par OPEN_CODEX_KEEP_AWAKE ; la veille attend cette échéance
+// (bornée côté application). Le fichier est vidé quand plus rien n'est prévu : attente
+// interrompue (nouveau pas, compaction, fin), chaîne arrêtée. Le connecteur ne décide rien :
+// il rapporte l'échéance rendue par le service. Hors de l'application, rien n'est écrit.
 import type { EngineInterface, ModelEffort, ModelUsage, PluginOptions } from 'claude-code'
 import { EFFORTS, USAGE_TIMEOUT_MS, field, link, post } from './service'
 import { add, stepOf } from './usage'
 import type { Queue } from './usage'
 
-// Consigne de la relance : une réponse de quelques tokens.
-export const PING_PROMPT = 'Réponds seulement « ok », sans aucun autre texte.'
 // Au-delà, une réponse du service est tenue pour illisible.
 const MAX_AFTER_S = 86_400
 
-// Compaction à l'inactivité de Claude Code (2.1.299) : une conversation d'au
-// moins IDLE_COMPACT_TOKENS (CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS) laissée ~54 min
-// est résumée par le moteur avant que son cache d'une heure n'expire ;
-// `"idleCompaction": false` la coupe. Fait transmis au service, qui décide.
+// Compaction à l'inactivité du moteur (depuis 2.1.299) : seuil par défaut, réglable par
+// CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS, coupée par `"idleCompaction": false`. Fait transmis au service.
 const IDLE_COMPACT_SINCE: readonly number[] = [2, 1, 299]
 const IDLE_COMPACT_TOKENS = 200_000
 
@@ -41,6 +37,28 @@ export type Warm = {
   // Fin de la dernière relance : l'âge du cache du fil repart de là.
   pingedAt: number | undefined
   main: MainSetting | undefined
+  // Fichier « garde-moi éveillé » de l'application hôte, lu une fois ; undefined hors d'elle.
+  awake?: Promise<string | undefined>
+}
+
+// Nom du fichier dans le dossier de session de l'application (son `keep_awake.rs`).
+const AWAKE_FILE = /[\\/]keep-awake$/
+
+function awakePath($: EngineInterface, w: Warm): Promise<string | undefined> {
+  return (w.awake ??= $.env.get('OPEN_CODEX_KEEP_AWAKE')
+    .then(path => (path && AWAKE_FILE.test(path) ? path : undefined))
+    .catch(() => undefined))
+}
+
+// Échéance de la prochaine action prévue pendant la pause (ms depuis l'epoch), ou null :
+// plus rien de prévu. Pour l'application hôte seulement ; ne lève jamais.
+export async function awake($: EngineInterface, w: Warm, untilMs: number | null): Promise<void> {
+  try {
+    const path = await awakePath($, w)
+    if (path) await $.fs.write(path, untilMs === null ? '' : String(Math.ceil(untilMs / 1000)))
+  } catch {
+    // Fichier inaccessible : la veille suit son délai habituel.
+  }
 }
 
 export function warm(): Warm {
@@ -68,10 +86,13 @@ export async function waited($: EngineInterface, w: Warm, ms: number): Promise<b
   const stop = new AbortController()
   w.stop = stop
   try {
+    await awake($, w, (await $.clock.now()) + ms)
     await $.clock.sleep(ms, { signal: stop.signal })
     return true
   } catch {
-    // Interrompue : l'utilisateur a repris la main.
+    // Interrompue : l'utilisateur a repris la main. Plus rien de prévu, sauf si une
+    // attente plus récente est déjà armée.
+    if (w.stop === stop || w.stop === null) await awake($, w, null)
     return false
   } finally {
     if (w.stop === stop) w.stop = null
@@ -79,7 +100,7 @@ export async function waited($: EngineInterface, w: Warm, ms: number): Promise<b
 }
 
 // Fin d'un tour du fil principal : chaîne de relances tant que le service en veut. Ne lève jamais.
-export async function rest($: EngineInterface, w: Warm, options: PluginOptions, q: Queue): Promise<void> {
+export async function rest($: EngineInterface, w: Warm, options: PluginOptions, q: Queue, prompt: string): Promise<void> {
   cancel(w)
   const generation = w.generation
   w.pings = 0
@@ -88,7 +109,7 @@ export async function rest($: EngineInterface, w: Warm, options: PluginOptions, 
     while (w.generation === generation) {
       const after = await nextPing($, w, options)
       if (after === null || !(await waited($, w, after * 1000)) || w.generation !== generation) return
-      const reply = await $.model.fork({ prompt: PING_PROMPT, ...(await sameEffort($, w)) })
+      const reply = await $.model.fork({ prompt, ...(await sameEffort($, w)) })
       // Rien à relancer (aucun tour fini, `/clear`) : pas de requête, pas de compteurs.
       if (!('usage' in reply)) return
       await counted($, w, q, reply.usage, 'effort' in reply ? reply.effort : undefined)
@@ -97,6 +118,9 @@ export async function rest($: EngineInterface, w: Warm, options: PluginOptions, 
     }
   } catch {
     // Horloge ou relance en échec : plus de relance, rien d'affiché.
+  } finally {
+    // Chaîne arrêtée (réponse nulle, relance sans suite, échec) : plus rien de prévu.
+    if (w.generation === generation) await awake($, w, null)
   }
 }
 
@@ -120,12 +144,8 @@ function atLeast(base: string | undefined, wanted: readonly number[]): boolean {
   return true
 }
 
-// Un fork part au niveau de la session (vu en vrai : fil routé en high,
-// relance en low). Réflexion par message (API d'Anthropic, 5.5) : sans effet
-// sur le cache. Réflexion pour toute la requête (Bedrock, Vertex, passerelles,
-// effort par message refusé) : un autre niveau que celui de la dernière étape
-// du fil réécrit toute la conversation au lieu de la relire (types 2.1.318,
-// ModelForkRequest.effort). L'option existe depuis 2.1.318.
+// La relance reprend la réflexion de la dernière étape du fil (`ModelForkRequest.effort`,
+// depuis 2.1.318).
 const FORK_EFFORT_SINCE: readonly number[] = [2, 1, 318]
 
 async function sameEffort($: EngineInterface, w: Warm): Promise<{ effort?: ModelEffort }> {

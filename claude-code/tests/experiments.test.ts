@@ -1,4 +1,4 @@
-import { EXECUTION_SECTION } from '../hooks/thinking'
+import { EXECUTION_SECTION } from './plan'
 // Leviers coupés pour une session (mesure de leur gain) : le connecteur demande
 // la liste une fois par session et n'applique pas ceux qu'elle cite.
 import { describe, expect, test } from 'claude-code/testing'
@@ -11,6 +11,8 @@ type Sent = Record<string, unknown>
 const COMPOSE = { model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: [], tools: [], outputStyle: null, traits: [] }
 const LONG = Array.from({ length: 1_000 }, (_, n) => `ligne ${n}`).join('\n')
 const FRENCH = [user('Peux-tu corriger le test qui échoue dans ce fichier ?')]
+// Ce que le service rend pour ce message : la consigne de réflexion y joue.
+const LEAN = (): Reply => ({ status: 200, body: { model: null, effort: null, lean_thinking: true } })
 
 function cut(...levers: string[]): Options['levers'] {
   return (): Reply => ({ status: 200, body: { off: levers } })
@@ -32,7 +34,7 @@ describe('leviers coupés pour la session', () => {
   })
 
   test('réflexion coupée : ni section ni lean_thinking', async ($, on) => {
-    const w = world(on, { messages: FRENCH, levers: cut('thinking') })
+    const w = world(on, { messages: FRENCH, route: LEAN, levers: cut('thinking') })
     expect((await $.prompt.compose(COMPOSE)).sections).toEqual([...CORE_PROMPT, EXECUTION_SECTION])
     await step($, 0, { turnId: 't1' })
     expect((await sentSteps($, w))[0]?.lean_thinking).toBeUndefined()
@@ -72,7 +74,7 @@ describe('leviers coupés pour la session', () => {
 
   for (const [name, reply] of [['service en panne', (): Reply => 'down'], ['réponse illisible', (): Reply => ({ status: 200, text: 'oups' })]] as const) {
     test(`${name} : tous les leviers restent actifs`, async ($, on) => {
-      const w = world(on, { messages: FRENCH, levers: reply })
+      const w = world(on, { messages: FRENCH, route: LEAN, levers: reply })
       expect((await $.prompt.compose(COMPOSE)).sections).toHaveLength(CORE_PROMPT.length + 2)
       await step($, 0, { turnId: 't1' })
       expect((await sentSteps($, w))[0]?.lean_thinking).toBe(true)

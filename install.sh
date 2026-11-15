@@ -1,13 +1,16 @@
 #!/bin/sh
 # Installe un connecteur du service (tokfit) en une
-# commande : la clé du client est écrite dans ~/.config/tokfit/config.json
+# commande. Sans clé, l'essai démarre sans inscription : le connecteur demande
+# lui-même une clé anonyme au service au premier lancement. Avec une clé (celle
+# de l'abonnement), elle est écrite dans ~/.config/tokfit/config.json
 # (droits 600, hors de tout dépôt), puis
 #   - claude (défaut) : le plugin est installé dans Claude Code (CLI et onglet
 #     Code de Claude Desktop, qui lisent la même configuration) ;
 #   - codex : le lanceur `tokfit codex …` est posé dans ~/.local/bin.
 #
-#   sh install.sh [claude|codex]               demande la clé (saisie masquée)
+#   sh install.sh [claude|codex]               demande la clé (saisie masquée ; vide : essai)
 #   TOKFIT_KEY=ek_… sh install.sh codex   sans question (automatisation, essais)
+#   TOKFIT_KEY= sh install.sh             sans question ni clé : essai sans inscription
 #   curl -fsSL <dépôt public>/install.sh | sh -s codex   sans clone : plugin et
 #                       lanceur pris dans le dépôt public (REPO), jamais dans le dossier courant
 #
@@ -80,10 +83,11 @@ case "$url" in
   *[!A-Za-z0-9.:/_~%-]*) fail "adresse du service refusée : caractères inattendus." ;;
 esac
 
-if [ -n "${TOKFIT_KEY-}" ]; then
+if [ -n "${TOKFIT_KEY+set}" ]; then
   key="$TOKFIT_KEY"
-elif [ -r /dev/tty ] && { : </dev/tty; } 2>/dev/null; then
-  printf 'Clé %s (ek_…, saisie masquée) : ' "$NAME" >/dev/tty
+elif [ -r /dev/tty ] && { true </dev/tty; } 2>/dev/null; then
+  # `true`, pas `:` : une redirection ratée sur `:` (commande spéciale) arrête tout le script.
+  printf 'Clé %s (ek_…, saisie masquée ; vide : essai sans inscription) : ' "$NAME" >/dev/tty
   stty -echo </dev/tty
   trap 'stty echo </dev/tty' EXIT INT TERM
   IFS= read -r key </dev/tty || key=""
@@ -91,29 +95,40 @@ elif [ -r /dev/tty ] && { : </dev/tty; } 2>/dev/null; then
   trap - EXIT INT TERM
   printf '\n' >/dev/tty
 else
-  fail "clé absente : lance la commande dans un terminal, ou pose TOKFIT_KEY."
+  # Sans terminal ni clé : essai sans inscription.
+  key=""
 fi
 
-case "$key" in
-  ek_*) ;;
-  *) fail "clé refusée : elle commence par ek_." ;;
-esac
-case "${key#ek_}" in
-  "" | *[!A-Za-z0-9_-]*) fail "clé refusée : caractères inattendus." ;;
-esac
-[ "${#key}" -ge 23 ] && [ "${#key}" -le 203 ] || fail "clé refusée : longueur inattendue."
+if [ -n "$key" ]; then
+  case "$key" in
+    ek_*) ;;
+    *) fail "clé refusée : elle commence par ek_." ;;
+  esac
+  case "${key#ek_}" in
+    "" | *[!A-Za-z0-9_-]*) fail "clé refusée : caractères inattendus." ;;
+  esac
+  [ "${#key}" -ge 23 ] && [ "${#key}" -le 203 ] || fail "clé refusée : longueur inattendue."
+fi
 
-umask 077
-dir=$(dirname -- "$config")
-mkdir -p -- "$dir"
-# Dossier propre au connecteur : fermé aux autres comptes de la machine.
-[ -n "${TOKFIT_CONFIG-}" ] || chmod 700 "$dir"
-tmp=$(mktemp "$dir/.config.XXXXXX")
-trap 'rm -f -- "$tmp"' EXIT INT TERM
-printf '{"url": "%s", "key": "%s"}\n' "$url" "$key" >"$tmp"
-chmod 600 "$tmp"
-mv -f -- "$tmp" "$config"
-trap - EXIT INT TERM
+# Fichier écrit avec une clé ; sans clé, seulement pour une autre adresse que l'officielle (ou pour
+# le lanceur Codex, qui n'en a pas), et jamais par-dessus un fichier existant (il peut porter une clé).
+if [ -n "$key" ] || { [ ! -e "$config" ] && { [ "$url" != "$DEFAULT_URL" ] || [ "$target" = codex ]; }; }; then
+  umask 077
+  dir=$(dirname -- "$config")
+  mkdir -p -- "$dir"
+  # Dossier propre au connecteur : fermé aux autres comptes de la machine.
+  [ -n "${TOKFIT_CONFIG-}" ] || chmod 700 "$dir"
+  tmp=$(mktemp "$dir/.config.XXXXXX")
+  trap 'rm -f -- "$tmp"' EXIT INT TERM
+  if [ -n "$key" ]; then
+    printf '{"url": "%s", "key": "%s"}\n' "$url" "$key" >"$tmp"
+  else
+    printf '{"url": "%s"}\n' "$url" >"$tmp"
+  fi
+  chmod 600 "$tmp"
+  mv -f -- "$tmp" "$config"
+  trap - EXIT INT TERM
+fi
 
 fetch() { # chemin dans le dépôt, destination : copie du clone, sinon téléchargement
   if [ -n "$here" ]; then

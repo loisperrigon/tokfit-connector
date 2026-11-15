@@ -2,8 +2,8 @@
 // réflexion en anglais par une section fixe du prompt système.
 import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import { FANOUT_WAIT_MS } from '../hooks/fanout'
-import { THINKING_SECTION, EXECUTION_SECTION, language } from '../hooks/thinking'
+import { FANOUT_MS as FANOUT_WAIT_MS } from './plan'
+import { THINKING_SECTION, EXECUTION_SECTION } from './plan'
 import { CORE_PROMPT, URL, complete, config, end, spawn, step, user, world } from './support'
 import type { Reply, World } from './support'
 
@@ -28,20 +28,25 @@ describe('réflexion en anglais', () => {
     expect(THINKING_SECTION.scope).toBe('session')
   })
 
+  test('sans plan de session (service en panne) : prompt inchangé', async ($, on) => {
+    world(on, { content: () => 'down' })
+    expect((await $.prompt.compose(COMPOSE)).sections).toEqual(CORE_PROMPT)
+  })
+
   test('sans clé valide : prompt inchangé', async ($, on) => {
     world(on, { config: config(URL, 'mauvaise') })
     expect((await $.prompt.compose(COMPOSE)).sections).toEqual(CORE_PROMPT)
   })
 
-  test('langue du message : anglais, autre, ou trop court pour le dire', () => {
-    expect(language('Can you fix the failing test in this file?')).toBe('en')
-    expect(language('Peux-tu corriger le test qui échoue dans ce fichier ?')).toBe('other')
-    expect(language('ok go')).toBeUndefined()
-  })
-
-  test('conversation en français : les étapes portent lean_thinking, un message court ne change rien', async ($, on) => {
+  test('lean_thinking suit ce que rend le service ; une réponse qui n’en dit rien ne change rien', async ($, on) => {
     const messages = [user('Peux-tu corriger le test qui échoue dans ce fichier ?')]
-    const w = world(on, { messages })
+    const lean: Record<string, boolean> = { 'Peux-tu corriger le test qui échoue dans ce fichier ?': true,
+      'Now please explain what the change does and why it works.': false }
+    const route = (body: Record<string, unknown>): Reply => {
+      const said = lean[String(body.message)]
+      return { status: 200, body: { model: null, effort: null, ...(said === undefined ? {} : { lean_thinking: said }) } }
+    }
+    const w = world(on, { messages, route })
     await step($, 0, { turnId: 't1' })
     messages.push(user('ok go'))
     await step($, 0, { turnId: 't2' })
@@ -65,7 +70,7 @@ describe('faits des leviers', () => {
   })
 
   test('compaction du connecteur : la première étape après porte le contexte d’avant', async ($, on) => {
-    const w = world(on, { messages: [user('x')], compact: (): Reply => ({ status: 200, body: { compact: true } }), contextTokens: () => 300_000 })
+    const w = world(on, { messages: [user('x')], compact: (): Reply => ({ status: 200, body: { compact: true, after_s: 240 } }), contextTokens: () => 300_000 })
     await step($, 0, { turnId: 't1' })
     await complete($, 't1')
     await w.clock.settle()
@@ -79,7 +84,7 @@ describe('faits des leviers', () => {
 
   test('après une compaction : seuls les fichiers déjà lus, inchangés, relus comptent, une fois', async ($, on) => {
     const files: Record<string, string> = { '/p/a.ts': 'a'.repeat(1_000), '/p/b.ts': 'b'.repeat(2_000), '/p/c.ts': 'c'.repeat(4_000) }
-    const w = world(on, { messages: [user('x')], compact: (): Reply => ({ status: 200, body: { compact: true } }),
+    const w = world(on, { messages: [user('x')], compact: (): Reply => ({ status: 200, body: { compact: true, after_s: 240 } }),
       read: path => files[path] ?? '' })
     await step($, 0, { turnId: 't1' })
     await $.tool.call({ tool: 'Read', file_path: '/p/a.ts' })

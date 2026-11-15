@@ -3,17 +3,38 @@
 // l'écran ou s'écrit sur la machine. Aucun réseau, aucun disque.
 import type { AgentSpawnInput, ModelForkResult, PromptComposeSection, SessionContextBreakdown, On, SessionMessage, TurnStepInput, TurnStepResult, TurnUsage } from 'claude-code'
 import type { Engine, MockClock } from 'claude-code/testing'
-import { mock } from 'claude-code/testing'
+import { expect, mock } from 'claude-code/testing'
+import { DEFAULT_URL } from '../hooks/service'
+import { TEST_PLAN } from './plan'
 
 export const HOME = '/Users/ana'
 export const CONFIG_PATH = `${HOME}/.config/tokfit/config.json`
 export const URL = 'https://service.test'
 export const KEY = 'ek_' + 'a'.repeat(43)
+// Clé que le service simulé émet pour un client anonyme.
+export const ANONYMOUS_KEY = 'ek_' + 'n'.repeat(43)
 export const SESSION = '0f8e2a4c-6b1d-4e3f-9a7b-2c5d8e1f4a6b'
 
 // Réponse du service : statut et corps, coupure réseau, ou silence.
 export type Reply = { status: number; body?: unknown; text?: string } | 'down' | 'silent'
 export type Sent = { url: string; headers: Record<string, string>; body: Record<string, unknown> }
+
+// Client sans configuration lisible. Copie de travail : DEFAULT_URL vide, rien ne part et le
+// connecteur reste inerte. Copie publique : connector/publish.py pose l'adresse officielle, le
+// client reçoit une clé d'essai et tout part vers cette adresse, nulle part ailleurs. Un essai
+// qui part d'un client sans configuration passe dans les deux copies par `unconfigured`
+// (`python3 connector/publish.py --essai` rejoue les essais sur la copie publique).
+export { DEFAULT_URL }
+
+export async function unconfigured(sent: Sent[], inert: () => void | Promise<void>): Promise<void> {
+  if (!DEFAULT_URL) {
+    expect(sent).toEqual([])
+    await inert()
+    return
+  }
+  expect(sent.length).toBeGreaterThan(0)
+  expect(sent.filter((call) => !call.url.startsWith(`${DEFAULT_URL}/`))).toEqual([])
+}
 
 export type Options = {
   config?: string | null
@@ -29,6 +50,8 @@ export type Options = {
   breakdown?: SessionContextBreakdown
   // Étape de sous-agent retenue jusqu'à ce que la promesse rendue se résolve ; par défaut, immédiate.
   holdAgent?: (agentId: string) => Promise<void>
+  // Durées simulées (ms, horloge du monde) : réponse de chaque requête au modèle, et de chaque outil.
+  slow?: { step?: number; tool?: number }
   // Compaction au coût : par défaut, ne jamais compacter.
   compact?: (body: Record<string, unknown>) => Reply
   // Refus de `$.session.compact` par le moteur, avec ce message (session sans terminal, tour en cours).
@@ -37,6 +60,8 @@ export type Options = {
   warm?: (body: Record<string, unknown>) => Reply
   // Leviers coupés pour la session : par défaut, aucun.
   levers?: (body: Record<string, unknown>) => Reply
+  // Plan de session (`/v1/content`) : par défaut, le plan de test (plan.ts).
+  content?: (body: Record<string, unknown>) => Reply
   // Réponse de `$.model.fork` (relance du cache) ; par défaut, « ok » sur le cache du fil.
   fork?: () => ModelForkResult
   // Contexte rendu par `$.session.usage()` (tokens) ; par défaut 42 000.
@@ -58,6 +83,26 @@ export type Options = {
   version?: string
   // Réglages fusionnés (`$.settings.read()`) ; par défaut aucun.
   settings?: Record<string, unknown>
+  // Noms des outils que le modèle peut appeler (`$.tool.list()`) ; un nom `mcp__…` est celui d'un
+  // serveur MCP. Par défaut, aucun : le noyau du connecteur n'est pas connecté.
+  tools?: string[]
+  // Outil `python` du noyau : texte rendu pour le code reçu (arguments entiers à côté), ou ses blocs de texte dans l'ordre
+  // (le serveur ajoute un second bloc `[noyau:fini]` quand `fini()` est appelé) ; `error` : la
+  // cellule a échoué. Par défaut, aucun outil ne tourne.
+  python?: (code: string, args: Readonly<Record<string, unknown>>) => string | readonly string[] | { error: readonly string[] }
+  // ToolSearch du moteur : noms trouvés pour la requête ; par défaut, il ne tourne pas.
+  search?: (query: string) => string[]
+  // Hooks Stop des réglages sous le connecteur (`hooks/completion.py`, ceux de l'utilisateur) : leur
+  // réponse ; par défaut, aucune relance.
+  stop?: () => { block?: string }
+  // Prompt système du moteur (`prompt.compose`) ; par défaut CORE_PROMPT.
+  prompt?: PromptComposeSection[]
+  // Demande de clé anonyme (`/v1/keys/anonymous`) ; par défaut, une clé neuve (201).
+  anonymous?: () => Reply
+  // Magasin du plugin (`$.store`) au départ ; par défaut vide.
+  store?: Record<string, unknown>
+  // Lien du tableau de bord (`/v1/dashboard/link`) ; par défaut 404.
+  dashboard?: () => Reply
 }
 
 export type World = {
@@ -70,6 +115,7 @@ export type World = {
   warms: () => Sent[]
   compacts: () => Sent[]
   leverCalls: () => Sent[]
+  contentCalls: () => Sent[]
   // Compactions reçues par le moteur (déclencheur et consignes).
   compactions: { trigger?: string; instructions?: string }[]
   // Lancements de sous-agents tels que le moteur les a reçus.
@@ -83,6 +129,11 @@ export type World = {
   shown: string[]
   // Tout ce que le connecteur écrit sur la machine ou envoie ailleurs qu'au service.
   written: string[]
+  // Magasin du plugin (`$.store`), tel que le connecteur l'a laissé.
+  store: Record<string, unknown>
+  anonymousCalls: () => Sent[]
+  // Commandes enregistrées par le connecteur (`$.command.register`).
+  commands: string[]
 }
 
 // Prompt système du moteur dans le monde simulé.
@@ -104,11 +155,14 @@ export function world(on: On, options: Options = {}): World {
   if (text !== null) files[options.configPath ?? CONFIG_PATH] = text
   const w: World = {
     files, clock, sent: [], steps: [], shown: [], written: [], spawned: [], forks: [], forkEfforts: [], compactions: [],
+    store: { ...options.store }, commands: [],
+    anonymousCalls: () => w.sent.filter(s => s.url.endsWith('/v1/keys/anonymous')),
     routes: () => w.sent.filter(s => s.url.endsWith('/v1/route')),
     usages: () => w.sent.filter(s => s.url.endsWith('/v1/usage')),
     warms: () => w.sent.filter(s => s.url.endsWith('/v1/warm')),
     compacts: () => w.sent.filter(s => s.url.endsWith('/v1/compact')),
     leverCalls: () => w.sent.filter(s => s.url.endsWith('/v1/levers')),
+    contentCalls: () => w.sent.filter(s => s.url.endsWith('/v1/content')),
   }
   on('fs.read', async ($, e) => {
     const found = files[e.path]
@@ -117,15 +171,23 @@ export function world(on: On, options: Options = {}): World {
   })
   on('fs.exists', async ($, e) => ({ value: files[e.path] !== undefined }))
   on('fs.write', async ($, e) => { w.written.push(`fs.write ${JSON.stringify(e)}`); return { value: undefined } })
-  on('store.set', async ($, e) => { w.written.push(`store.set ${JSON.stringify(e)}`); return { value: undefined } })
+  on('store.set', async ($, e) => {
+    w.written.push(`store.set ${JSON.stringify(e)}`)
+    w.store[e.key] = JSON.parse(JSON.stringify(e.value)) as unknown
+    return { value: undefined }
+  })
+  on('store.get', async ($, e) => ({ value: w.store[e.key] }))
   on('http.fetch', async ($, e) => {
-    const body = JSON.parse(e.init?.body ?? '{}') as Record<string, unknown>
+    const body = JSON.parse(bodyText(e.init?.body)) as Record<string, unknown>
     w.sent.push({ url: e.url, headers: e.init?.headers ?? {}, body })
     const answer: (body: Record<string, unknown>) => Reply = e.url.endsWith('/v1/route') ? options.route ?? (() => ({ status: 200, body: { model: null, effort: null } }))
       : e.url.endsWith('/v1/usage') ? options.usage ?? (() => ({ status: 200, body: { recorded: 1 } }))
       : e.url.endsWith('/v1/compact') ? options.compact ?? (() => ({ status: 200, body: { compact: false } }))
       : e.url.endsWith('/v1/warm') ? options.warm ?? (() => ({ status: 200, body: { after_s: null } }))
       : e.url.endsWith('/v1/levers') ? options.levers ?? (() => ({ status: 200, body: { off: [] } }))
+      : e.url.endsWith('/v1/dashboard/link') ? options.dashboard ?? (() => ({ status: 404 }))
+      : e.url.endsWith('/v1/keys/anonymous') ? options.anonymous ?? (() => ({ status: 201, body: { key: ANONYMOUS_KEY } }))
+      : e.url.endsWith('/v1/content') ? options.content ?? (() => ({ status: 200, body: { version: 'v-test', claude: TEST_PLAN } }))
       : () => ({ status: 404 })
     const reply = answer(body)
     if (reply === 'down') throw new Error('connexion refusée')
@@ -134,6 +196,8 @@ export function world(on: On, options: Options = {}): World {
     return { value: { status: reply.status, ok: reply.status >= 200 && reply.status < 300, headers: {}, text: out } }
   })
   on('session.id', async () => ({ value: SESSION }))
+  on('session.start', async ($, e) => ({ cwd: e.cwd }))
+  on('command.register', async ($, e) => { w.commands.push(e.name); return { value: { command: e.name } } })
   on('session.version', async () => {
     const version = options.version ?? '2.1.280'
     return { value: { version, base: version, builtAt: '2026-10-01T00:00:00Z' } }
@@ -171,11 +235,31 @@ export function world(on: On, options: Options = {}): World {
   on('turn.step', async function* ($, e) {
     w.steps.push(e)
     if (e.agentId !== undefined && options.holdAgent) await options.holdAgent(e.agentId)
+    if (options.slow?.step) await clock.sleep(options.slow.step)
     const model = e.model.includes('claude-') ? e.model : `claude-${e.model}-5-5`
     const usage = options.counted === false ? null : usageOf(model)
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: usage ? 'end_turn' : null, usage }
   })
+  on('classic.Stop', async () => options.stop?.() ?? {})
+  // Pièces jointes du moteur : rendues telles quelles sous le connecteur.
+  on('prompt.attachment', async ($, e) => ({ text: e.text }))
+  on('tool.list', async () => ({
+    value: (options.tools ?? []).map(name => ({ name, description: `outil ${name}`, mcp: name.startsWith('mcp__') })),
+  }))
   on('tool.call', async ($, e) => {
+    if (options.slow?.tool) await clock.sleep(options.slow.tool)
+    if (options.python && e.tool.startsWith('mcp__') && e.tool.endsWith('__python')) {
+      const out = options.python('code' in e ? String(e.code) : '', e)
+      const failed = typeof out === 'object' && 'error' in out
+      const blocks = typeof out === 'string' ? [out] : 'error' in out ? out.error : out
+      const text = blocks.join('\n')
+      const result = { content: blocks.map(block => ({ type: 'text', text: block })), isError: failed }
+      return failed ? { isError: true as const, result, text } : { ref: 1, result, text }
+    }
+    if (options.search && e.tool === 'ToolSearch') {
+      const matches = options.search(e.query)
+      return { ref: 1, result: { matches, query: e.query, total_deferred_tools: 12 }, text: matches.join('\n') }
+    }
     const read = options.read
     if (read && e.tool === 'Read') {
       const text = read(e.file_path)
@@ -205,7 +289,13 @@ export function world(on: On, options: Options = {}): World {
     const usage = { input_tokens: 4, output_tokens: 2, cache_read_input_tokens: 52_000, cache_creation_input_tokens: 300 }
     return { value: options.fork?.() ?? { isAnswered: true as const, text: 'ok', usage } }
   })
-  on('prompt.compose', async () => ({ sections: CORE_PROMPT }))
+  on('prompt.compose', async () => ({ sections: options.prompt ?? CORE_PROMPT }))
+  // Section du prompt système et contexte du premier message : ceux que le moteur calcule.
+  on('prompt.section', async ($, e) => ({ text: e.text }))
+  on('prompt.context', async ($, e) => ({ blocks: e.blocks }))
+  // Décision du moteur sur un appel d'outil : toujours permis ; place de chaque outil : la sienne.
+  on('tool.check', async () => ({ decision: 'allow' as const }))
+  on('tool.describe', async ($, e) => ({ description: e.description, ...(e.isDeferred ? { isDeferred: true } : {}) }))
   on('turn.complete', async ($, e) => ({ text: e.answer }))
   on('prompt.submit', async ($, e) => ({ text: e.text }))
   on('session.end', async ($, e) => ({ sessionId: e.sessionId }))
@@ -217,6 +307,14 @@ export function world(on: On, options: Options = {}): World {
     return { messages: e.messages ?? [{ role: 'user' as const, text: 'résumé', toolUses: [] }] }
   })
   return w
+}
+
+// Corps d'une requête : du texte, ou des octets (`{ base64 }`, Claude Code 2.1.323) relus en
+// UTF-8, pour que les tests lisent ce qui part quelle que soit sa forme.
+function bodyText(body: string | { readonly base64: string } | undefined): string {
+  if (body === undefined) return '{}'
+  if (typeof body === 'string') return body
+  return new TextDecoder().decode(Uint8Array.from(atob(body.base64), char => char.charCodeAt(0)))
 }
 
 // Ce qui s'est affiché d'autre que la ligne d'état d'une décision aboutie.
@@ -244,6 +342,21 @@ export async function step($: Engine, index: number, options: { turnId?: string;
   return read.value
 }
 
+// Une étape et tout ce qui en sort (morceaux montrés et enregistrés, résultat).
+export async function streamed($: Engine, index: number, options: { turnId?: string; agentId?: string } = {}): Promise<{ chunks: unknown[]; result: TurnStepResult }> {
+  const stream = $.turn.step({
+    turnId: options.turnId ?? 'turn-1', index, model: 'claude-opus-5-5', messageCount: 1 + index, effort: 'high',
+    ...(options.agentId ? { agentId: options.agentId } : {}),
+  })
+  const chunks: unknown[] = []
+  let read = await stream.next()
+  while (!read.done) {
+    chunks.push(read.value)
+    read = await stream.next()
+  }
+  return { chunks, result: read.value }
+}
+
 // Un tour complet du fil principal : ses étapes puis sa fin.
 export async function turn($: Engine, turnId: string, steps: number, model = 'claude-opus-5-5'): Promise<void> {
   for (let index = 0; index < steps; index++) await step($, index, { turnId, model })
@@ -259,9 +372,10 @@ export async function aborted($: Engine, turnId: string): Promise<void> {
   await $.turn.complete({ turnId, answer: '', durationMs: 1, isAborted: true, reason: 'aborted' })
 }
 
-// Message de l'utilisateur ; `during` : identifiant du tour en cours quand il est tapé.
+// Message de l'utilisateur, tapé dans la zone de saisie (`composer` depuis Claude Code 2.1.323) ;
+// `during` : identifiant du tour en cours quand il est tapé.
 export async function submit($: Engine, text: string, during?: string): Promise<void> {
-  await $.prompt.submit({ text, wait: false, origin: { kind: 'user' }, ...(during ? { turnId: during } : {}) })
+  await $.prompt.submit({ text, wait: false, origin: { kind: 'composer' }, ...(during ? { turnId: during } : {}) })
 }
 
 export type AgentCall = {
