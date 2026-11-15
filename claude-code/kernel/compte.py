@@ -7,7 +7,9 @@ service et clé : `kernel/pack.py`). Le service valide les noms et applique les 
 routage ; ici, seulement l'appel et un texte court. La clé n'apparaît jamais dans le texte.
 Sans changement de limites (ou avec `bilan_depuis`), l'outil rend d'abord le bilan
 (`GET /v1/bilan`, depuis l'installation ou depuis le jour `bilan_depuis`) : son champ `text`,
-composé par le service, tel quel.
+composé par le service pour une personne qui n'est pas du métier, tel quel. Les limites ne
+suivent que si quelque chose est bloqué, si elles sont demandées (`limites`) ou après un
+changement. La description de l'outil dit à l'agent comment présenter ce texte (`PRESENTATION`).
 
 Bibliothèque standard seulement, Python 3.9+.
 """
@@ -28,21 +30,33 @@ JOUR = re.compile(r"\d{4}-\d{2}-\d{2}")
 ARGUMENTS = {"bloquer": "block", "debloquer": "unblock"}
 
 
+# Règle de présentation, dans la description de l'outil : le texte du bilan est écrit pour une personne qui n'est pas
+# du métier, l'agent le rend sans le recomposer.
+PRESENTATION = ("Présentation à l'utilisateur : reprends le texte rendu tel quel ou presque, en phrases courtes, "
+                "dans la langue de l'utilisateur (traduis-le si besoin). Aucun terme technique (tokens, modèle, "
+                "banc, routage, réflexion, cache, levier) ; les montants sont des estimations : dis « environ ». "
+                "N'ajoute ni calcul, ni détail, ni liste de limites que le texte ne donne pas.")
+
+
 def schema() -> Dict[str, Any]:
     liste = {"type": "array", "items": {"type": "string"}}
     return {
         "name": "compte",
         "description": ("Bilan d'économie de tokfit et limites du compte. À appeler quand l'utilisateur demande "
-                        "combien il a économisé (tokens, dollars) avec tokfit, depuis son installation ou depuis une "
-                        "date. Sans argument : le bilan depuis l'installation, puis les limites ; `bilan_depuis` "
-                        "(AAAA-MM-JJ) : le bilan depuis ce jour. Limites : modèles Claude (haiku, sonnet, opus, fable) "
-                        "et niveaux de réflexion (low, medium, high, xhigh, max) que le routage n'utilise jamais, sur "
-                        "tout le compte ; `bloquer` / `debloquer` : listes de noms."),
+                        "combien il a économisé avec tokfit, depuis son installation ou depuis une date. Sans "
+                        "argument : le bilan depuis l'installation ; `bilan_depuis` (AAAA-MM-JJ) : le bilan depuis ce "
+                        "jour. Les limites (modèles Claude haiku, sonnet, opus, fable et niveaux de réflexion low, "
+                        "medium, high, xhigh, max que tokfit n'utilise jamais, sur tout le compte) ne sont rendues "
+                        "que si quelque chose est bloqué, avec `limites` (seulement si l'utilisateur les demande) "
+                        "ou après `bloquer` / `debloquer` (listes de noms). " + PRESENTATION),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "bilan_depuis": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
                                  "description": "Facultatif : début du bilan (AAAA-MM-JJ) ; absent : depuis l'installation."},
+                "limites": {"type": "boolean",
+                            "description": "Facultatif : true pour rendre aussi les limites du compte, même si rien "
+                                           "n'est bloqué (seulement si l'utilisateur les demande)."},
                 "bloquer": {**liste, "description": "Noms à bloquer (modèles ou niveaux de réflexion)."},
                 "debloquer": {**liste, "description": "Noms à débloquer."},
             },
@@ -61,12 +75,15 @@ def noms(valeur: object) -> Optional[List[str]]:
     return None
 
 
-def liste(valeurs: object, vide: str) -> str:
-    return ", ".join(v for v in valeurs if isinstance(v, str)) if isinstance(valeurs, list) and valeurs else vide
+def liste(valeurs: List[Any], majuscule: bool = False) -> str:
+    noms_lus = [v for v in valeurs if isinstance(v, str)]
+    return ", ".join(nom.capitalize() if majuscule else nom for nom in noms_lus) or "aucun"
 
 
-def resume(reponse: object) -> Optional[str]:
-    """Texte des limites rendues par le service ; None si la réponse n'a pas la forme attendue."""
+def resume(reponse: object, toujours: bool) -> Optional[str]:
+    """Texte des limites rendues par le service, en clair : une ligne par sorte de limite qui bloque quelque chose ;
+    rien (\"\") si rien n'est bloqué, sauf `toujours` (limites demandées ou changées). None si la réponse n'a pas la
+    forme attendue."""
     if not isinstance(reponse, dict):
         return None
     champs = [reponse.get(nom) for nom in ("blocked_models", "blocked_efforts", "models", "efforts")]
@@ -75,10 +92,19 @@ def resume(reponse: object) -> Optional[str]:
     modeles, efforts, tous_modeles, tous_efforts = champs
     assert isinstance(modeles, list) and isinstance(efforts, list)
     assert isinstance(tous_modeles, list) and isinstance(tous_efforts, list)
-    permis_modeles = [nom for nom in tous_modeles if nom not in modeles]
-    permis_efforts = [nom for nom in tous_efforts if nom not in efforts]
-    return (f"Modèles bloqués : {liste(modeles, 'aucun')} (autorisés : {liste(permis_modeles, 'aucun')}).\n"
-            f"Réflexion bloquée : {liste(efforts, 'aucune')} (autorisée : {liste(permis_efforts, 'aucune')}).")
+    lignes = []
+    if modeles:
+        permis = [nom for nom in tous_modeles if nom not in modeles]
+        lignes.append(f"Modèles Claude que tokfit n'utilise jamais pour toi : {liste(modeles, True)} "
+                      f"(encore utilisés : {liste(permis, True)}).")
+    if efforts:
+        permis = [nom for nom in tous_efforts if nom not in efforts]
+        lignes.append(f"Niveaux de réflexion que tokfit n'utilise jamais pour toi : {liste(efforts)} "
+                      f"(encore utilisés : {liste(permis)}).")
+    if not lignes and toujours:
+        lignes.append("Rien n'est bloqué : tokfit peut utiliser tous les modèles Claude et tous les niveaux de "
+                      "réflexion.")
+    return "\n".join(lignes)
 
 
 def refus(erreur: urllib.error.HTTPError) -> str:
@@ -127,10 +153,11 @@ def compte(vers: Optional[Lien], arguments: Dict[str, Any]) -> Tuple[str, bool]:
         return refus(erreur), True
     except (OSError, ValueError) as erreur:
         return f"Service injoignable ({type(erreur).__name__}) : limites inchangées.", True
-    texte = resume(reponse)
+    demandees = arguments.get("limites") is True
+    texte = resume(reponse, bool(corps) or demandees)
     if texte is None:
         return "Réponse illisible du service.", True
-    limites = f"Limites enregistrées.\n{texte}" if corps else texte
+    limites = f"C'est noté.\n{texte}" if corps else texte
     if corps and depuis is None:
         return limites, False
-    return f"{bilan(vers, depuis)}\n{limites}", False
+    return "\n".join(morceau for morceau in (bilan(vers, depuis), limites) if morceau), False
