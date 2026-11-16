@@ -6,7 +6,7 @@ réponses repartent sur un autre (`{"sortie": …, "ok": …, "fini": …}`) : s
 donc `input()` lève EOFError au lieu de lire le protocole, et les `print` du
 code vont dans une capture bornée, jamais dans le tube des réponses.
 
-Chaque cellule est inscrite dans `linecache` sous `<cellule-N>` :
+Chaque cellule est inscrite dans `linecache` sous `<cell-N>` :
 `inspect.getsource` retrouve ainsi les fonctions définies dans le noyau
 (c'est ce que `sauve_outil` lit). SIGINT interrompt la cellule en cours
 (`KeyboardInterrupt`) sans perdre l'état : le worker pose lui-même son
@@ -15,7 +15,7 @@ parent (SIG_IGN sous `nohup` ou un shell non interactif en arrière-plan), et
 un délai dépassé finirait en arrêt forcé, l'état perdu.
 
 La sortie rendue est coupée à `<limite>` ; la sortie entière de la dernière
-cellule reste dans `_sortie`, à découper sans relancer. `fini()` (défini par
+cellule reste dans `_output`, à découper sans relancer. `fini()` (défini par
 l'amorce) écrit son résumé dans `__fini__` : il ne remonte que si la cellule
 s'est terminée sans exception, le dernier appel l'emporte. Les appels d'outils
 comptés par l'amorce (`__usage__`) remontent avec la réponse, puis repartent à zéro.
@@ -30,16 +30,22 @@ import signal
 import sys
 import traceback
 from types import CodeType, TracebackType
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kernel.output import COMPLET_MAX, DANS_SORTIE, Capture, resume_traceback, tronque  # noqa: E402
 from kernel.pack import prendre_lien  # noqa: E402
 
-CELLULE = "<cellule-{}>"
+CELLULE = "<cell-{}>"
 FINI = "__fini__"
 USAGE = "__usage__"
+# Images posées par `look` de l'amorce (`{"data": base64, "mimeType": …}`), rendues en blocs image par le
+# serveur ; `IMAGES_OK` dit à l'amorce que ce connecteur sait les rendre.
+IMAGES = "__images__"
+IMAGES_OK = "__images_ok__"
+TYPES_IMAGE = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+IMAGES_MAX = 4
 
 
 def compiler(code: str, nom: str) -> Tuple[Optional[CodeType], Optional[CodeType]]:
@@ -89,17 +95,27 @@ def executer(code: str, numero: int, espace: Dict[str, Any], limite: int) -> Dic
     finally:
         sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
     complete = capture.valeur()
-    espace["_sortie"] = complete
+    espace["_output"] = espace["_sortie"] = complete  # `_sortie` : ancien nom, gardé en alias
     fini = espace.pop(FINI, None)
     usage = espace.pop(USAGE, None)
     return {"sortie": tronque(complete, limite, DANS_SORTIE), "ok": ok,
             "fini": str(fini) if ok and fini is not None else None,
             "usage": {cle: n for cle, n in usage.items() if isinstance(cle, str) and type(n) is int}
-            if isinstance(usage, dict) else {}}
+            if isinstance(usage, dict) else {},
+            "images": images_valides(espace.pop(IMAGES, None))}
+
+
+def images_valides(images: object) -> List[Dict[str, str]]:
+    """Les images bien formées posées pendant la cellule (IMAGES_MAX au plus), le reste ignoré."""
+    if not isinstance(images, list):
+        return []
+    return [{"data": image["data"], "mimeType": image["mimeType"]} for image in images
+            if isinstance(image, dict) and isinstance(image.get("data"), str)
+            and image.get("mimeType") in TYPES_IMAGE][:IMAGES_MAX]
 
 
 def boucle(fd_requetes: int, fd_reponses: int, limite: int) -> None:
-    espace: Dict[str, Any] = {"__name__": "__main__", "__builtins__": __builtins__}
+    espace: Dict[str, Any] = {"__name__": "__main__", "__builtins__": __builtins__, IMAGES_OK: True}
     requetes = os.fdopen(fd_requetes, "r", encoding="utf-8")
     reponses = os.fdopen(fd_reponses, "w", encoding="utf-8")
     numero = 0

@@ -66,7 +66,7 @@ DOSSIER = "cwd"
 PRINCIPAL = "main"
 AGENT_LONGUEUR_MAX = 128
 NOYAUX_MAX = 8
-LIBERE = "[noyau de cet agent arrêté après inactivité, d'autres agents travaillaient : état perdu]\n"
+LIBERE = "[this agent's kernel was stopped after inactivity while other agents were working: state lost]\n"
 log = logging.getLogger("tokfit.kernel")
 
 
@@ -88,7 +88,7 @@ def code_amorce(paquet: Paquet) -> str:
             "from kernel.pack import sauver_outil as _sauver\n"
             "_m = _t.ModuleType('noyau_amorce')\n"
             "_s.modules['noyau_amorce'] = _m\n"
-            f"exec(compile({paquet.amorce!r}, '<amorce>', 'exec'), _m.__dict__)\n"
+            f"exec(compile({paquet.amorce!r}, '<bootstrap>', 'exec'), _m.__dict__)\n"
             f"_m.charger(globals(), {paquet.modules!r}, {paquet.catalogue!r}, _sauver)\n"
             "del _s, _t, _m, _sauver")
 
@@ -136,11 +136,11 @@ def schema_outil(description: str) -> Dict[str, Any]:
         "inputSchema": {
             "type": "object",
             "properties": {
-                "code": {"type": "string", "description": "Code Python ; la valeur de la dernière expression est affichée."},
-                "timeout_s": {"type": "integer", "description": "Délai en secondes (120 par défaut, 600 au plus).",
+                "code": {"type": "string", "description": "Python code; the value of the last expression is shown."},
+                "timeout_s": {"type": "integer", "description": "Timeout in seconds (120 by default, 600 at most).",
                               "minimum": 1, "maximum": TIMEOUT_MAX},
-                AGENT: {"type": "string", "description": "Rempli par le connecteur : ne pas le donner."},
-                DOSSIER: {"type": "string", "description": "Rempli par le connecteur : ne pas le donner."},
+                AGENT: {"type": "string", "description": "Filled in by the connector: do not set it."},
+                DOSSIER: {"type": "string", "description": "Filled in by the connector: do not set it."},
             },
             "required": ["code"],
         },
@@ -208,7 +208,7 @@ class Serveur:
             return self.resultat(ident, {"tools": outils})
         if methode == "tools/call":
             return self.appel(ident, message.get("params") or {})
-        return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32601, "message": f"méthode inconnue : {methode}"}}
+        return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32601, "message": f"unknown method: {methode}"}}
 
     @staticmethod
     def en_parallele(message: Dict[str, Any]) -> bool:
@@ -260,11 +260,11 @@ class Serveur:
             texte, erreur = compte(self.vers, arguments if isinstance(arguments, dict) else {})
             return self.texte(ident, texte, erreur)
         if params.get("name") != OUTIL or self.amorce is None or self.paquet is None:
-            return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32602, "message": "outil inconnu"}}
+            return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32602, "message": "unknown tool"}}
         arguments = params.get("arguments") or {}
         code = arguments.get("code")
         if not isinstance(code, str):
-            return self.texte(ident, "argument `code` manquant (texte)", erreur=True)
+            return self.texte(ident, "missing `code` argument (text)", erreur=True)
         delai = arguments.get("timeout_s", TIMEOUT_DEFAUT)
         delai = min(max(delai, 1), TIMEOUT_MAX) if isinstance(delai, int) and not isinstance(delai, bool) else TIMEOUT_DEFAUT
         poste, libere = self.prendre(agent_de(arguments), dossier_de(arguments, self.cwd))
@@ -280,9 +280,12 @@ class Serveur:
         if execution.usage:
             self.compteur.ajouter(execution.usage)
         texte = (prefixe + execution.sortie) if prefixe else execution.sortie
-        reponse = self.texte(ident, texte if texte.strip() else "(aucune sortie)", erreur=not execution.ok)
+        reponse = self.texte(ident, texte if texte.strip() else "(no output)", erreur=not execution.ok)
+        # Images de `look` : blocs image du résultat MCP, après la sortie texte (le modèle les voit).
+        reponse["result"]["content"].extend({"type": "image", "data": image["data"], "mimeType": image["mimeType"]}
+                                            for image in execution.images or [])
         if execution.ok and execution.fini is not None:
-            # Contrat avec le connecteur (hooks) : second bloc, préfixe exact, jamais avec isError.
+            # Contrat avec le connecteur (hooks) : un bloc après la sortie (et ses images), préfixe exact, jamais avec isError.
             reponse["result"]["content"].append({"type": "text", "text": self.paquet.fini + execution.fini})
         return reponse
 
@@ -339,7 +342,7 @@ def main() -> None:
             try:
                 message = json.loads(ligne)
             except ValueError:
-                sortie.ecrire({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "JSON illisible"}})
+                sortie.ecrire({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "unreadable JSON"}})
                 continue
             if not isinstance(message, dict):
                 continue

@@ -11,14 +11,14 @@ ERREUR = re.compile(r"Traceback|error|FAIL|panicked|assert", re.IGNORECASE)
 PART_DEBUT = 0.2
 PART_ERREURS = 0.4
 FIN_ERREURS = "[…]\n"
-# Sortie entière d'une cellule, gardée dans `_sortie` du noyau : bornée quand même (mémoire).
+# Sortie entière d'une cellule, gardée dans `_output` du noyau (et `_sortie`, ancien nom) : bornée quand même (mémoire).
 COMPLET_MAX = 1_000_000
 TRACEBACK_LIGNES = 15
-DANS_SORTIE = ", tout est dans _sortie"
+DANS_SORTIE = ", full text in _output"
 
 
 def marqueur(retires: int, indice: str = "") -> str:
-    return f"\n[… {retires} caractères retirés{indice} …]\n"
+    return f"\n[… {retires} characters removed{indice} …]\n"
 
 
 def erreurs_du_milieu(texte: str, debut: int, fin: int, place: int) -> Tuple[List[str], int]:
@@ -47,7 +47,7 @@ def tronque(texte: str, maximum: int = MAX_SORTIE, indice: str = "") -> str:
     égales."""
     if len(texte) <= maximum:
         return texte
-    indice_erreurs = f"{indice} ; lignes d'erreur gardées"
+    indice_erreurs = f"{indice}; error lines kept"
     place = max(maximum - len(marqueur(len(texte), indice_erreurs)) - len(FIN_ERREURS), 2)
     tete = int(place * PART_DEBUT)
     queue_min = place - tete - int(place * PART_ERREURS)
@@ -69,7 +69,7 @@ def resume_traceback(tb: str, lignes: int = TRACEBACK_LIGNES) -> str:
     toutes = tb.rstrip("\n").splitlines()
     if len(toutes) <= lignes:
         return "\n".join(toutes)
-    return "\n".join([f"[… {len(toutes) - lignes} lignes …]"] + toutes[-lignes:])
+    return "\n".join([f"[… {len(toutes) - lignes} lines …]"] + toutes[-lignes:])
 
 
 class Capture:

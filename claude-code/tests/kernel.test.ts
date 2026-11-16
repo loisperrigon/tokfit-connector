@@ -303,7 +303,7 @@ describe('arrêt par fini', () => {
   test('résultat de python avec le marqueur : le tour s’arrête sur le résumé, sans requête au modèle', async ($, on) => {
     const w = world(on, connected({ python: () => finished('Corrigé, 3 tests verts.') }))
     await step($, 0, { turnId: 't1' })
-    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: "fini('Corrigé, 3 tests verts.')" })
+    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: "finish('Corrigé, 3 tests verts.')" })
     const { chunks, result } = await streamed($, 1, { turnId: 't1' })
     expect(w.steps.map(s => s.index)).toEqual([0])
     expect(result).toEqual({ turnId: 't1', index: 1, answer: 'Corrigé, 3 tests verts.', toolUses: [], stopReason: 'end_turn', usage: null })
@@ -316,7 +316,7 @@ describe('arrêt par fini', () => {
   test('l’appel python qui finit reste compté, sur l’étape suivante qui part au modèle', async ($, on) => {
     const w = world(on, connected({ python: () => finished('fait') }))
     await step($, 0, { turnId: 't1' })
-    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: "fini('fait')" })
+    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: "finish('fait')" })
     await step($, 1, { turnId: 't1' })
     await step($, 0, { turnId: 't2' })
     const steps = await sentSteps($, w)
@@ -325,7 +325,7 @@ describe('arrêt par fini', () => {
 
   test('résumé multiligne gardé tel quel', async ($, on) => {
     world(on, connected({ python: () => finished('Ligne 1\nLigne 2\n[noyau:fini]\ndans le texte') }))
-    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: 'fini(r)' })
+    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: 'finish(r)' })
     expect((await step($, 1)).answer).toBe('Ligne 1\nLigne 2\n[noyau:fini]\ndans le texte')
   })
 
@@ -338,14 +338,14 @@ describe('arrêt par fini', () => {
 
   test('cellule en erreur : jamais d’arrêt', async ($, on) => {
     const w = world(on, connected({ python: () => ({ error: finished('fait', 'Traceback') }) }))
-    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: "fini('fait')" })
+    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: "finish('fait')" })
     await step($, 1)
     expect(w.steps.map(s => s.index)).toEqual([1])
   })
 
   test('fini dans un sous-agent : sa boucle et le fil principal continuent', async ($, on) => {
     const w = world(on, connected({ python: () => finished('fait') }))
-    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: "fini('fait')", agentId: 'agent-1' })
+    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: "finish('fait')", agentId: 'agent-1' })
     await step($, 1, { agentId: 'agent-1', turnId: 'a1' })
     await step($, 1, { turnId: 't1' })
     expect(w.steps.map(s => [s.agentId, s.index])).toEqual([['agent-1', 1], [undefined, 1]])
@@ -354,7 +354,7 @@ describe('arrêt par fini', () => {
   test('tour interrompu après fini : le tour suivant n’hérite pas du résumé', async ($, on) => {
     const w = world(on, connected({ python: () => finished('fait') }))
     await step($, 0, { turnId: 't1' })
-    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: "fini('fait')" })
+    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: "finish('fait')" })
     expect((await step($, 0, { turnId: 't2' })).answer).toBe('')
     await step($, 1, { turnId: 't2' })
     expect(w.steps.map(s => [s.turnId, s.index])).toEqual([['t1', 0], ['t2', 0], ['t2', 1]])
@@ -362,7 +362,7 @@ describe('arrêt par fini', () => {
 
   test('levier coupé ou noyau absent : le marqueur ne fait rien', async ($, on) => {
     const w = world(on, connected({ env: { TOKFIT_OFF: 'kernel' }, python: () => finished('fait') }))
-    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: "fini('fait')" })
+    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: "finish('fait')" })
     await step($, 1)
     expect(w.steps.map(s => s.index)).toEqual([1])
   })
@@ -370,7 +370,7 @@ describe('arrêt par fini', () => {
   test('arrêt par fini : un hook Stop qui relance (completion.py) est neutralisé, une fois', async ($, on) => {
     world(on, connected({ python: () => finished('fait'), stop: () => ({ block: 'Termine les étapes du plan.' }) }))
     await step($, 0, { turnId: 't1' })
-    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: "fini('fait')" })
+    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: "finish('fait')" })
     await step($, 1, { turnId: 't1' })
     expect(await $.classic.Stop({ stop_hook_active: false })).toEqual({})
     // Fin ordinaire du tour suivant : la relance du plan ouvert garde son effet.

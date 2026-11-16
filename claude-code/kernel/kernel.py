@@ -23,15 +23,15 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, NamedTuple, Optional
+from typing import Dict, List, NamedTuple, Optional
 
 from kernel.output import MAX_SORTIE, tronque
 from kernel.pack import Lien, environnement_du_noyau
 
 WORKER = Path(__file__).with_name("worker.py")
 GRACE_S = 2.0
-REDEMARRE = "[noyau redémarré : état perdu]"
-ARRETE = "[noyau arrêté : la session se ferme]"
+REDEMARRE = "[kernel restarted: state lost]"
+ARRETE = "[kernel stopped: the session is closing]"
 log = logging.getLogger("tokfit.kernel")
 SHIM_PYTHON = """#!/bin/sh
 # python du noyau : le .venv du dossier courant s'il existe, sinon python3.
@@ -46,6 +46,8 @@ class Execution(NamedTuple):
     fini: Optional[str] = None
     # Appels par outil pendant la cellule (`module.nom` -> nombre).
     usage: Optional[Dict[str, int]] = None
+    # Images montrées par `look` (`{"data": base64, "mimeType": …}`), rendues en blocs image.
+    images: Optional[List[Dict[str, str]]] = None
 
 
 def creer_shims(dossier: Path) -> Path:
@@ -138,9 +140,9 @@ class Noyau:
             os.kill(self.processus.pid, signal.SIGINT)
             reponse = self.lire(GRACE_S)
             if reponse is not None:
-                return Execution(tronque(f"{reponse['sortie']}[interrompu après {timeout_s} s]", self.max_sortie), False)
+                return Execution(tronque(f"{reponse['sortie']}[interrupted after {timeout_s} s]", self.max_sortie), False)
             log.warning("noyau sourd à SIGINT après %s s : redémarrage", timeout_s)
-            sortie = f"[interrompu après {timeout_s} s]\n{REDEMARRE}"
+            sortie = f"[interrupted after {timeout_s} s]\n{REDEMARRE}"
         except NoyauMort:
             if self.ferme:
                 return Execution(ARRETE, False)
@@ -155,8 +157,12 @@ class Noyau:
         usage = reponse.get("usage")
         appels = {cle: n for cle, n in usage.items() if isinstance(cle, str) and isinstance(n, int) and n > 0} \
             if isinstance(usage, dict) else {}
+        brutes = reponse.get("images")
+        images = [{"data": str(image["data"]), "mimeType": str(image["mimeType"])} for image in brutes
+                  if isinstance(image, dict) and isinstance(image.get("data"), str)
+                  and isinstance(image.get("mimeType"), str)] if isinstance(brutes, list) else []
         return Execution(tronque(str(reponse["sortie"]), self.max_sortie), ok,
-                         fini if ok and isinstance(fini, str) else None, appels or None)
+                         fini if ok and isinstance(fini, str) else None, appels or None, images or None)
 
     def envoyer(self, code: str) -> None:
         assert self.requetes is not None

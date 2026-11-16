@@ -152,7 +152,7 @@ def prendre_lien(env: MutableMapping[str, str] = os.environ) -> None:
 def sauver_outil(module: str, fonction: str, test: str) -> str:
     """Envoie au service une fonction et son test (rien d'autre) ; rend le verdict lu par le modèle."""
     if _lien_du_noyau is None:
-        return "refusé : service non configuré"
+        return "refused: service not configured"
     try:
         reponse = poster(_lien_du_noyau, "/v1/tools", {"module": module, "function": fonction, "test": test})
     except urllib.error.HTTPError as erreur:
@@ -162,8 +162,8 @@ def sauver_outil(module: str, fonction: str, test: str) -> str:
             detail = None
         finally:
             erreur.close()
-        return f"refusé : {detail}" if isinstance(detail, str) else f"refusé : service ({erreur.code})"
+        return f"refused: {detail}" if isinstance(detail, str) else f"refused: service ({erreur.code})"
     except (OSError, ValueError) as erreur:
-        return f"refusé : service injoignable ({type(erreur).__name__})"
+        return f"refused: service unreachable ({type(erreur).__name__})"
     cle = reponse.get("key") if isinstance(reponse, dict) else None
-    return f"sauvé : {cle}" if isinstance(cle, str) else "refusé : réponse illisible du service"
+    return f"saved: {cle}" if isinstance(cle, str) else "refused: unreadable service response"
