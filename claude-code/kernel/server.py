@@ -45,6 +45,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from kernel.autoupdate import ensure_auto_update  # noqa: E402
 from kernel.compte import compte, schema as schema_compte  # noqa: E402
 from kernel.kernel import Noyau  # noqa: E402
 from kernel.output import MAX_SORTIE  # noqa: E402
@@ -328,6 +329,7 @@ class Sortie:
 def main() -> None:
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="noyau: %(message)s")
     env = dict(os.environ)
+    ensure_auto_update(env)
     vers = attendre_lien(env)
     paquet, raison = recevoir(vers)
     if paquet is None:
