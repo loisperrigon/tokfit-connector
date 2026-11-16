@@ -3,7 +3,8 @@
 Même configuration que les hooks (relais d'une application hôte, options du
 plugin, fichier de configuration) : `link` de `hooks/completion.py`. Le paquet
 reste en mémoire ; rien n'est écrit sur le disque. Sans réponse valable, pas
-de paquet et le serveur ne propose pas l'outil.
+de paquet, le serveur ne propose pas l'outil jusqu'à ce que le paquet arrive
+(le serveur le redemande en arrière-plan, `kernel/server.py`, `rattraper`).
 
 Dans le processus du noyau, le lien arrive par une variable retirée dès le
 démarrage (`prendre_lien`) : les commandes que lance le code du modèle n'en
@@ -26,6 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 from completion import link, store_folder  # noqa: E402
 
 DELAI_S = 5.0
+# Délai d'une demande de paquet après la première : en arrière-plan, rien n'attend dessus.
+DELAI_RELANCE_S = 10.0
 # Attente maximale de la clé anonyme au démarrage du noyau (premier démarrage sans clé configurée).
 ATTENTE_CLE_S = 8.0
 TAILLE_MAX = 4 * 1024 * 1024
@@ -54,12 +57,17 @@ def lien(env: Dict[str, str]) -> Optional[Lien]:
     return link({nom: valeur for nom, valeur in env.items() if not valeur.startswith("${")})
 
 
+def cle_attendue(env: Dict[str, str]) -> bool:
+    """Vrai quand un connecteur peut encore créer la clé anonyme (dossier des magasins de plugins présent)."""
+    return store_folder(env).is_dir()
+
+
 def attendre_lien(env: Dict[str, str], delai_s: float = ATTENTE_CLE_S, pas_s: float = 0.25) -> Optional[Lien]:
     """Le lien, en attendant au plus `delai_s` la clé anonyme que le connecteur demande au même moment
     (premier démarrage). Sans dossier des magasins de plugins (pas de connecteur), aucune attente."""
     vers = lien(env)
     fin = time.monotonic() + delai_s
-    while vers is None and store_folder(env).is_dir() and time.monotonic() < fin:
+    while vers is None and cle_attendue(env) and time.monotonic() < fin:
         time.sleep(pas_s)
         vers = lien(env)
     return vers

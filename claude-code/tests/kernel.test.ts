@@ -402,6 +402,26 @@ describe('levier sans effet', () => {
     expect(steps.map(s => [s.kernel_unavailable, s.kernel_calls, s.kernel_denied])).toEqual([[true, undefined, undefined]])
   })
 
+  test('outil agir proposé en cours de session (paquet arrivé tard) : rien retiré avant, levier actif dès qu’il l’est', async ($, on) => {
+    // Le serveur du noyau a répondu sans outil (clé anonyme ou paquet en retard), puis annoncé sa liste changée.
+    const options = connected({ tools: TOOLS.filter(tool => tool !== PYTHON) })
+    const w = world(on, options)
+    await untouched($)
+    await step($, 0, { turnId: 't1' })
+    // Tant que `agir` manque : Read et Bash restent, rien n'est refusé, le prompt est celui du moteur.
+    await untouched($)
+    options.tools = TOOLS
+    expect((await placement($, 'Read')).isDeferred).toBe(true)
+    expect((await placement($, 'Bash')).isDeferred).toBe(true)
+    expect((await placement($, PYTHON, OURS, true)).isDeferred).toBe(false)
+    expect(await check($, 'Bash')).toEqual({ decision: 'deny', reason: REFUSAL })
+    const ids = (await $.prompt.compose(COMPOSE)).sections.map(section => section.id)
+    expect(ids).toContain('tokfit:kernel')
+    await step($, 1, { turnId: 't1' })
+    const steps = await sentSteps($, w)
+    expect(steps.map(s => s.kernel_unavailable)).toEqual([true, undefined])
+  })
+
   test('python connecté après le premier rendu : le levier prend dès qu’il apparaît', async ($, on) => {
     const tools = TOOLS.filter(tool => tool !== PYTHON)
     world(on, connected({ tools }))

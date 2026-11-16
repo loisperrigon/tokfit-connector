@@ -7,9 +7,14 @@ Code. Le protocole minimal suffit : `initialize`, `tools/list`, `tools/call`,
 stderr). Au démarrage, le paquet du noyau (amorce, modules des outils,
 catalogue, description de l'outil, marqueur de fin) est demandé au service
 (`kernel/pack.py`) et gardé en mémoire : l'amorce et les outils s'exécutent
-dans le noyau depuis les chaînes reçues, sans fichier. Sans paquet, le serveur
-ne propose aucun outil (le levier reste inactif, `kernel_unavailable` côté
-connecteur). Les appels d'outils comptés dans le noyau partent au service en
+dans le noyau depuis les chaînes reçues, sans fichier. Sans lien ni paquet à
+l'ouverture (première session : la clé anonyme se crée alors ; service lent), le
+serveur ne propose d'abord aucun outil (le levier reste inactif,
+`kernel_unavailable` côté connecteur), mais il les attend en arrière-plan
+(`rattraper`) : dès que le lien ou le paquet arrive, les outils sont proposés et
+le serveur envoie `notifications/tools/list_changed` (déclaré par
+`capabilities.tools.listChanged` ; Claude Code relit alors la liste, en session
+interactive comme avec `-p`). Les appels d'outils comptés dans le noyau partent au service en
 compteurs, après chaque cellule et à l'arrêt.
 L'outil `compte` (`kernel/compte.py`) rend le bilan d'économie du client et lit
 ou change les limites de son compte (modèles et niveaux de réflexion bloqués) ; il est proposé dès qu'un
@@ -41,7 +46,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -49,7 +54,7 @@ from kernel.autoupdate import ensure_auto_update  # noqa: E402
 from kernel.compte import compte, schema as schema_compte  # noqa: E402
 from kernel.kernel import Noyau  # noqa: E402
 from kernel.output import MAX_SORTIE  # noqa: E402
-from kernel.pack import Lien, Paquet, attendre_lien, compter, lien, recevoir  # noqa: E402
+from kernel.pack import DELAI_RELANCE_S, DELAI_S, Lien, Paquet, cle_attendue, compter, lien, recevoir  # noqa: E402
 
 NOM = "outils"
 # Nom neutre de l'outil d'action, affiché dans l'interface : il ne dit rien de la méthode (choix de Lois du 15/11/2026).
@@ -59,6 +64,18 @@ PROTOCOLES = ("2025-06-18", "2025-03-26", "2024-11-05")
 TIMEOUT_DEFAUT = 120
 TIMEOUT_MAX = 600
 ARRET_S = 2.0
+# Attente maximale de la réponse à `initialize` pour le lien et le paquet (cas ordinaire : service joignable,
+# clé déjà là, quelques centaines de ms, et le premier `tools/list` rend déjà l'outil) ; au-delà, le serveur répond
+# sans eux et les annonce plus tard.
+DEMARRAGE_S = 6.0
+# Écarts entre deux demandes du paquet après un échec (le dernier se répète), lien relu toutes les `PAS_LIEN_S` ;
+# borne : au-delà, la session garde le levier éteint (une activation tardive casse une fois le cache du prompt,
+# et un service indisponible une demi-heure ne reviendra pas pour cette session ; une demande par minute au plus
+# jusque-là, sans coût pour le service).
+RELANCES_S = (2.0, 4.0, 8.0, 15.0, 30.0, 60.0)
+PAS_LIEN_S = 0.5
+BORNE_S = 1800.0
+LISTE_CHANGEE = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
 # Argument que le connecteur ajoute à chaque appel de `python` : l'identifiant de la boucle.
 AGENT = "agent"
 # Dossier de la boucle qui appelle (worktree d'un sous-agent isolé), posé par le connecteur :
@@ -185,6 +202,14 @@ class Serveur:
         self.description = paquet.description if paquet is not None else ""
         self.amorce = code_amorce(paquet) if paquet is not None else None
         self.cwd = os.getcwd()
+        # Paquet, description et amorce arrivent d'un autre fil (`installer`) : lus et écrits sous `etat`.
+        self.etat = threading.Lock()
+        # Levé quand le client a fini d'ouvrir la session : une annonce n'est jamais écrite avant.
+        self.initialise = threading.Event()
+        # Levé quand la première tentative d'obtenir lien et paquet est finie ; `initialize` l'attend (`DEMARRAGE_S`).
+        self.premier = threading.Event()
+        self.premier.set()
+        self.depart = time.monotonic()
         self.postes: Dict[str, Poste] = {}
         self.liberes: set[str] = set()
         self.verrou = threading.Lock()
@@ -193,21 +218,24 @@ class Serveur:
         """La réponse JSON-RPC à un message ; None pour une notification."""
         methode = message.get("method")
         if "id" not in message:
+            if methode == "notifications/initialized":
+                self.initialise.set()
             return None
         ident = message["id"]
         if methode == "initialize":
             demande = (message.get("params") or {}).get("protocolVersion")
             version = demande if demande in PROTOCOLES else PROTOCOLES[0]
-            return self.resultat(ident, {"protocolVersion": version, "capabilities": {"tools": {}},
+            self.attendre_depart()
+            return self.resultat(ident, {"protocolVersion": version, "capabilities": {"tools": {"listChanged": True}},
                                          "serverInfo": {"name": NOM, "version": VERSION}})
         if methode == "ping":
             return self.resultat(ident, {})
         if methode == "tools/list":
-            outils = [schema_outil(self.description)] if self.amorce is not None else []
-            if self.lien() is not None:
-                outils.append(schema_compte())
-            return self.resultat(ident, {"tools": outils})
+            self.attendre_depart()
+            self.initialise.set()
+            return self.resultat(ident, {"tools": self.outils()})
         if methode == "tools/call":
+            self.attendre_depart()
             return self.appel(ident, message.get("params") or {})
         return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32601, "message": f"unknown method: {methode}"}}
 
@@ -218,11 +246,42 @@ class Serveur:
         return (message.get("method") == "tools/call" and "id" in message
                 and isinstance(params, dict) and params.get("name") == OUTIL)
 
+    def attendre_depart(self) -> None:
+        """Attend la première tentative d'obtenir lien et paquet, au plus `DEMARRAGE_S` depuis le départ du serveur
+        (délai commun à `initialize`, `tools/list` et `tools/call` : un client qui les enchaîne n'attend pas plus)."""
+        self.premier.wait(max(0.0, DEMARRAGE_S - (time.monotonic() - self.depart)))
+
     def lien(self) -> Optional[Lien]:
         """Le lien vers le service ; cherché de nouveau tant qu'il manque (clé anonyme arrivée après le démarrage)."""
         if self.vers is None:
             self.vers = lien(self.env)
+            if self.vers is not None:
+                self.compteur.vers = self.vers
         return self.vers
+
+    def outils(self) -> List[Dict[str, Any]]:
+        """Les outils proposés maintenant : `agir` avec le paquet, `compte` avec le lien (paquet reçu ou non)."""
+        with self.etat:
+            description, amorce = self.description, self.amorce
+        outils = [schema_outil(description)] if amorce is not None else []
+        if self.lien() is not None:
+            outils.append(schema_compte())
+        return outils
+
+    def noms(self) -> Tuple[str, ...]:
+        return tuple(str(outil["name"]) for outil in self.outils())
+
+    def installer(self, paquet: Paquet) -> None:
+        """Le paquet reçu après l'ouverture : `agir` est proposé dès l'appel suivant à `tools/list`."""
+        amorce = code_amorce(paquet)
+        with self.etat:
+            self.paquet, self.description, self.amorce = paquet, paquet.description, amorce
+
+    def annoncer(self, sortie: "Sortie") -> None:
+        """Dit au client que la liste des outils a changé, s'il a fini d'ouvrir la session (sinon son premier
+        `tools/list` la lira à jour)."""
+        if self.initialise.is_set():
+            sortie.ecrire(LISTE_CHANGEE)
 
     def prendre(self, agent: str, dossier: Optional[str] = None) -> tuple[Poste, bool]:
         """Le poste de l'agent, créé au besoin (noyau démarré dans `dossier`), réservé jusqu'à `rendre` ;
@@ -260,7 +319,9 @@ class Serveur:
             arguments = params.get("arguments")
             texte, erreur = compte(self.vers, arguments if isinstance(arguments, dict) else {})
             return self.texte(ident, texte, erreur)
-        if params.get("name") != OUTIL or self.amorce is None or self.paquet is None:
+        with self.etat:
+            paquet = self.paquet
+        if params.get("name") != OUTIL or self.amorce is None or paquet is None:
             return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32602, "message": "unknown tool"}}
         arguments = params.get("arguments") or {}
         code = arguments.get("code")
@@ -287,7 +348,7 @@ class Serveur:
                                             for image in execution.images or [])
         if execution.ok and execution.fini is not None:
             # Contrat avec le connecteur (hooks) : un bloc après la sortie (et ses images), préfixe exact, jamais avec isError.
-            reponse["result"]["content"].append({"type": "text", "text": self.paquet.fini + execution.fini})
+            reponse["result"]["content"].append({"type": "text", "text": paquet.fini + execution.fini})
         return reponse
 
     def fermer(self) -> None:
@@ -326,16 +387,60 @@ class Sortie:
             sys.stdout.flush()
 
 
+def rattraper(serveur: Serveur, arret: threading.Event, annoncer: Callable[[], None], *,
+              relances: Tuple[float, ...] = RELANCES_S, borne_s: float = BORNE_S, pas_s: float = PAS_LIEN_S,
+              delai_s: float = DELAI_S, delai_relance_s: float = DELAI_RELANCE_S) -> None:
+    """Obtient le lien puis le paquet, tant qu'il manque : lien relu toutes les `pas_s`, paquet redemandé
+    après `relances` (le dernier écart se répète), pendant `borne_s` au plus. Quand les outils proposés
+    changent (lien arrivé : `compte` ; paquet arrivé : `agir`), `annoncer` prévient le client. Lève
+    `serveur.premier` dès que la première tentative est finie, pour que `initialize` ne l'attende pas plus."""
+    fin = time.monotonic() + borne_s
+    prochain = 0.0
+    echecs = 0
+    try:
+        while not arret.is_set() and serveur.paquet is None and time.monotonic() < fin:
+            avant = serveur.noms()
+            vers = serveur.lien()
+            if vers is not None and time.monotonic() >= prochain:
+                try:
+                    paquet, raison = recevoir(vers, delai_s if echecs == 0 else delai_relance_s)
+                except Exception as erreur:  # noqa: BLE001 : le fil ne doit jamais mourir sur une réponse inattendue
+                    paquet, raison = None, f"erreur inattendue ({type(erreur).__name__})"
+                if paquet is not None:
+                    serveur.installer(paquet)
+                else:
+                    if echecs == 0:
+                        log.warning("paquet du noyau indisponible (%s) : redemandé en arrière-plan", raison)
+                    prochain = time.monotonic() + relances[min(echecs, len(relances) - 1)]
+                    echecs += 1
+            if serveur.noms() != avant:
+                try:
+                    annoncer()
+                except (OSError, ValueError):
+                    return  # stdout fermé : le client est parti
+            if serveur.paquet is not None or echecs > 0 or (vers is None and not cle_attendue(serveur.env)):
+                serveur.premier.set()
+            arret.wait(pas_s if vers is None else max(0.05, prochain - time.monotonic()))
+    finally:
+        serveur.premier.set()
+    if serveur.paquet is None and not arret.is_set():
+        log.warning("paquet du noyau toujours indisponible après %.0f s : outil non proposé pour cette session", borne_s)
+
+
 def main() -> None:
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="noyau: %(message)s")
     env = dict(os.environ)
     ensure_auto_update(env)
-    vers = attendre_lien(env)
-    paquet, raison = recevoir(vers)
-    if paquet is None:
-        log.warning("paquet du noyau indisponible (%s) : outil python non proposé", raison)
-    serveur = Serveur(env, paquet, vers)
+    serveur = Serveur(env, None, lien(env))
     sortie = Sortie()
+    # Lien et paquet sont cherchés dans un fil : `initialize` les attend au plus `DEMARRAGE_S`, les outils
+    # arrivés plus tard sont annoncés (`notifications/tools/list_changed`).
+    serveur.premier.clear()
+    serveur.depart = time.monotonic()
+    arret = threading.Event()
+    rattrapage = threading.Thread(target=rattraper, args=(serveur, arret, lambda: serveur.annoncer(sortie)),
+                                  name="lien-et-paquet", daemon=True)
+    rattrapage.start()
     appels: List[threading.Thread] = []
     try:
         for ligne in sys.stdin:
@@ -356,6 +461,8 @@ def main() -> None:
             else:
                 sortie.ecrire(serveur.repondre(message))
     finally:
+        arret.set()
+        rattrapage.join(ARRET_S)
         serveur.fermer()
         for appel in appels:
             appel.join(ARRET_S)
