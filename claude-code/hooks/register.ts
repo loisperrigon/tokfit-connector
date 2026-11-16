@@ -89,6 +89,25 @@ async function ultrathinkOff($: EngineInterface): Promise<boolean> {
   return ON.test((await $.env.get('CLAUDE_CODE_DISABLE_ULTRATHINK'))?.trim() ?? '')
 }
 
+// Effort que l'utilisateur a réglé lui-même : `CLAUDE_CODE_EFFORT_LEVEL` (qui passe devant les
+// réglages ; `auto` ou `unset` : aucun), sinon `effortLevel` des réglages. Le défaut du modèle n'en
+// est pas un. Un niveau fixé par `--effort` ou `/effort` en cours de session n'est lisible nulle
+// part dans l'API des hooks : il n'est pas un plancher, le moteur le garde seul tant que rien
+// ne l'a réécrit.
+async function effortFloor($: EngineInterface): Promise<Effort | undefined> {
+  const named = (await $.env.get('CLAUDE_CODE_EFFORT_LEVEL'))?.trim().toLowerCase() ?? ''
+  let level: unknown = named
+  if (named === '') {
+    try {
+      level = await $.settings.read({ key: 'effortLevel' })
+    } catch {
+      // Réglages illisibles : pas de plancher.
+      return undefined
+    }
+  }
+  return typeof level === 'string' && EFFORTS.includes(level.toLowerCase()) ? (level.toLowerCase() as Effort) : undefined
+}
+
 function forced(text: string, ultrathinkWorks: boolean): Tags {
   const out: Tags = { ultrathink: ultrathinkWorks && /\bultrathink\b/i.test(text) }
   for (const tag of text.matchAll(/\[(\w+)\]/g)) {
@@ -103,10 +122,17 @@ function forced(text: string, ultrathinkWorks: boolean): Tags {
 // devant, et une réflexion qu'il garde (balise, ultrathink) n'est jamais remplacée.
 // Sauf réglage imposé par une limite du compte (`enforced` : la réponse porte
 // `notice`) : ce que le service pose passe alors devant les balises.
-function underUser(answer: Choice, own: Choice, keepEffort: boolean, enforced = false): Choice {
+// `floor` : effort réglé par l'utilisateur, plancher de ce que le service propose et de l'effort
+// en cours (`current`) ; une balise ou ultrathink du message, plus précis, passent devant, et une
+// limite du compte (`enforced`) devant tout : le service a déjà tenu compte du plancher.
+function underUser(answer: Choice, own: Choice, keepEffort: boolean, enforced = false, floor?: Effort, current?: string): Choice {
   const { effort, ...rest } = answer
   const chosen = { ...rest, ...(effort && !keepEffort ? { effort } : {}), ...own }
-  return enforced ? { ...chosen, ...answer } : chosen
+  if (enforced) return { ...chosen, ...answer }
+  const level = chosen.effort ?? current
+  const under = !keepEffort && floor !== undefined && level !== undefined && EFFORTS.includes(level)
+    && EFFORTS.indexOf(level) < EFFORTS.indexOf(floor)
+  return under ? { ...chosen, effort: floor } : chosen
 }
 
 function family(model: string): string {
@@ -521,6 +547,7 @@ async function routed($: EngineInterface, s: State, to: Link, facts: AgentFacts,
   const tags = s.tags
   const own: Plan = { ...(tags.model ? { model: tags.model } : {}), ...(tags.effort ? { effort: tags.effort } : {}) }
   const usage = await $.session.usage()
+  const floor = await effortFloor($)
   const answer = await ask($, to, {
     kind: 'subagent',
     ...facts,
@@ -533,11 +560,12 @@ async function routed($: EngineInterface, s: State, to: Link, facts: AgentFacts,
     ...(s.sessionModel ? { session_model: s.sessionModel } : {}),
     model: tags.model ?? facts.model,
     ...(tags.effort ? { effort: tags.effort } : {}),
+    ...(floor ? { min_effort: floor } : {}),
     keep_model: tags.model !== undefined || facts.keep_model === true,
     keep_effort: tags.effort !== undefined || tags.ultrathink,
   })
   return answer === null ? { ...fallback, ...own }
-    : { model: facts.model, ...underUser(answer.choice, own, tags.effort !== undefined || tags.ultrathink, answer.enforced) }
+    : { model: facts.model, ...underUser(answer.choice, own, tags.effort !== undefined || tags.ultrathink, answer.enforced, floor) }
 }
 
 // Un coéquipier `idle` attend un message : il ne travaille pas.
@@ -573,6 +601,7 @@ async function decide($: EngineInterface, s: State, e: TurnStepInput): Promise<C
   const keepEffort = tags.effort !== undefined || tags.ultrathink
   const own: Choice = { ...(tags.model ? { model: tags.model } : {}), ...(tags.effort ? { effort: tags.effort } : {}) }
   const effort = typeof e.effort === 'string' ? e.effort : undefined
+  const floor = await effortFloor($)
   const usage = await $.session.usage()
   // Choix entier de l'utilisateur : le voyant de l'application hôte ne bouge pas.
   const shown = !(keepModel && keepEffort)
@@ -596,6 +625,7 @@ async function decide($: EngineInterface, s: State, e: TurnStepInput): Promise<C
     rate_limits: usage.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed })),
     model: keepModel ? tags.model : model,
     effort,
+    ...(floor ? { min_effort: floor } : {}),
     keep_model: keepModel,
     keep_effort: keepEffort,
   })
@@ -608,7 +638,7 @@ async function decide($: EngineInterface, s: State, e: TurnStepInput): Promise<C
     return own
   }
   if (answer.lean !== undefined) s.lean = answer.lean
-  const choice = underUser(answer.choice, own, keepEffort, answer.enforced)
+  const choice = underUser(answer.choice, own, keepEffort, answer.enforced, floor, effort)
   const shownEffort = choice.effort ?? effort
   // Claude Code préfixe déjà la ligne du nom du plugin.
   s.line.route = `${family(choice.model ?? model)}${shownEffort ? ` · ${shownEffort}` : ''}`

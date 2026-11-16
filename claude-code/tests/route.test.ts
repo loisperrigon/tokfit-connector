@@ -325,6 +325,84 @@ describe('faits envoyés', () => {
     expect(w.routes()[0]?.body).toMatchObject({ keep_effort: true })
   })
 
+  // Effort réglé par l'utilisateur (variable d'environnement, réglage) : plancher, jamais un défaut du modèle.
+  describe('effort réglé par l’utilisateur', () => {
+    const down: () => Reply = () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } })
+
+    test('CLAUDE_CODE_EFFORT_LEVEL : transmis au service, jamais abaissé', async ($, on) => {
+      const w = world(on, { messages: [user('petite question')], env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' }, route: down })
+      await step($, 0)
+      expect(w.routes()[0]?.body).toMatchObject({ min_effort: 'high', keep_effort: false })
+      expect(w.steps[0]).toMatchObject({ model: 'sonnet', effort: 'high' })
+    })
+
+    test('le service peut proposer plus haut', async ($, on) => {
+      const w = world(on, { messages: [user('refonte')], env: { CLAUDE_CODE_EFFORT_LEVEL: 'medium' },
+        route: () => ({ status: 200, body: { model: null, effort: 'xhigh' } }) })
+      await step($, 0)
+      expect(w.steps[0]).toMatchObject({ effort: 'xhigh' })
+    })
+
+    test('service sans avis et effort en cours sous le plancher : le plancher', async ($, on) => {
+      const w = world(on, { messages: [user('x')], env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' },
+        route: () => ({ status: 200, body: { model: null, effort: null } }) })
+      await step($, 0, { effort: 'medium' })
+      expect(w.steps[0]).toMatchObject({ effort: 'high' })
+    })
+
+    test('service sans avis et effort en cours au-dessus du plancher : rien ne change', async ($, on) => {
+      const w = world(on, { messages: [user('x')], env: { CLAUDE_CODE_EFFORT_LEVEL: 'medium' },
+        route: () => ({ status: 200, body: { model: null, effort: null } }) })
+      await step($, 0, { effort: 'xhigh' })
+      expect(w.steps[0]).toMatchObject({ effort: 'xhigh' })
+    })
+
+    test('réglage effortLevel quand la variable manque', async ($, on) => {
+      const w = world(on, { messages: [user('x')], settings: { effortLevel: 'medium' }, route: () => ({ status: 200, body: { model: null, effort: 'low' } }) })
+      await step($, 0)
+      expect(w.routes()[0]?.body).toMatchObject({ min_effort: 'medium' })
+      expect(w.steps[0]).toMatchObject({ effort: 'medium' })
+    })
+
+    test('la variable passe devant le réglage : auto ou unset, aucun plancher', async ($, on) => {
+      const w = world(on, { messages: [user('x')], env: { CLAUDE_CODE_EFFORT_LEVEL: 'auto' }, settings: { effortLevel: 'medium' },
+        route: () => ({ status: 200, body: { model: null, effort: 'low' } }) })
+      await step($, 0)
+      expect(w.routes()[0]?.body).not.toHaveProperty('min_effort')
+      expect(w.steps[0]).toMatchObject({ effort: 'low' })
+    })
+
+    const unusable: Record<string, string>[] = [{}, { CLAUDE_CODE_EFFORT_LEVEL: 'énorme' }]
+    for (const env of unusable) {
+      test(`aucun réglage valide (${JSON.stringify(env)}) : pas de plancher, le service décide`, async ($, on) => {
+        const w = world(on, { messages: [user('x')], env, settings: { effortLevel: 42 }, route: down })
+        await step($, 0)
+        expect(w.routes()[0]?.body).not.toHaveProperty('min_effort')
+        expect(w.steps[0]).toMatchObject({ effort: 'low' })
+      })
+    }
+
+    test('balise du message : choix plus précis, elle passe devant le plancher', async ($, on) => {
+      const w = world(on, { messages: [user('[low] petite question')], env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' }, route: down })
+      await step($, 0)
+      expect(w.steps[0]).toMatchObject({ effort: 'low' })
+    })
+
+    test('limite du compte : ce que le service impose passe devant le plancher', async ($, on) => {
+      const notice = 'La réflexion high est bloquée sur ce compte : medium à la place.'
+      const w = world(on, { messages: [user('x')], env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' },
+        route: () => ({ status: 200, body: { model: null, effort: 'medium', notice } }) })
+      await step($, 0)
+      expect(w.steps[0]).toMatchObject({ effort: 'medium' })
+    })
+
+    test('service en panne : le réglage de l’utilisateur reste', async ($, on) => {
+      const w = world(on, { messages: [user('x')], env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' }, route: () => 'down' })
+      await step($, 0)
+      expect(w.steps[0]).toMatchObject({ effort: 'high' })
+    })
+  })
+
   test('compaction : le cache de la conversation est froid jusqu’à la réponse suivante', async ($, on) => {
     const w = world(on, { messages: [user('x')] })
     await step($, 0, { turnId: 't1' })

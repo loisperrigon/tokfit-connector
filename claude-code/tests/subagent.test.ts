@@ -80,6 +80,19 @@ describe('nouveau sous-agent : le service décide, quoi qu’il soit fixé', () 
     expect(w.steps[1]).toMatchObject({ model: 'claude-sonnet-5-5', effort: 'medium' })
   })
 
+  test('effort réglé par l’utilisateur : plancher du sous-agent aussi, transmis au service', async ($, on) => {
+    const w = world(on, {
+      messages: [user('x')], env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' },
+      route: body => body.kind === 'main' ? { status: 200, body: { model: 'sonnet', effort: 'high' } }
+        : { status: 200, body: { model: null, effort: 'low' } },
+    })
+    await step($, 0, { turnId: 't1' })
+    await agent($, 'cherche', { type: 'Explore' })
+    expect(w.routes()[1]?.body).toMatchObject({ kind: 'subagent', min_effort: 'high' })
+    await step($, 0, { turnId: 'a-t1', agentId: 'agent-1', model: 'claude-sonnet-5-5' })
+    expect(w.steps[1]).toMatchObject({ effort: 'high' })
+  })
+
   test('première étape avant que le lancement ne rende l’identifiant : décision retrouvée par la consigne', async ($, on) => {
     const w = world(on, {
       messages: [user('x')], route: () => ROUTED, agentMessages: { 'agent-1': [user('compte les lignes')] },
