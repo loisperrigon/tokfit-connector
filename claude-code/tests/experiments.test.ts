@@ -25,12 +25,12 @@ async function sentSteps($: Engine, w: World): Promise<Sent[]> {
 }
 
 describe('leviers coupés pour la session', () => {
-  test('une seule demande par session, avec son identifiant seulement', async ($, on) => {
+  test('une seule demande par session, avec son identifiant et les versions lisibles (versions.ts)', async ($, on) => {
     const w = world(on, { messages: FRENCH })
     await $.prompt.compose(COMPOSE)
     await step($, 0, { turnId: 't1' })
     await step($, 1, { turnId: 't1' })
-    expect(w.leverCalls().map(sent => sent.body)).toEqual([{ session_id: SESSION }])
+    expect(w.leverCalls().map(sent => sent.body)).toEqual([{ session_id: SESSION, versions: { claude_code: '2.1.280' } }])
   })
 
   test('réflexion coupée : ni section ni lean_thinking', async ($, on) => {

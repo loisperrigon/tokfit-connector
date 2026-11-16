@@ -1,0 +1,19 @@
+{
+  "_": "Chemins du service appelés par ce connecteur (hooks/*.ts, kernel/*.py, runtime/*.py ; tests/test_routes.py). `relayed` : ce qu'une application hôte qui relaie le service doit laisser passer, avec les méthodes ; `direct` : jamais relayé (le relais porte déjà un jeton).",
+  "relayed": [
+    {"path": "account", "methods": ["GET", "POST"]},
+    {"path": "bilan", "methods": ["GET"]},
+    {"path": "compact", "methods": ["POST"]},
+    {"path": "content", "methods": ["POST"]},
+    {"path": "context", "methods": ["POST"]},
+    {"path": "dashboard/link", "methods": ["POST"]},
+    {"path": "levers", "methods": ["POST"]},
+    {"path": "optimizations", "methods": ["POST"]},
+    {"path": "route", "methods": ["POST"]},
+    {"path": "tools", "methods": ["POST"]},
+    {"path": "tools/usage", "methods": ["POST"]},
+    {"path": "usage", "methods": ["POST"]},
+    {"path": "warm", "methods": ["POST"]}
+  ],
+  "direct": ["keys/anonymous"]
+}

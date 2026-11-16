@@ -103,6 +103,26 @@ export function field(text: string, name: string): unknown {
   }
 }
 
+// Clé refusée par le service (401, 403 : remplacée ou révoquée) ; le bandeau le dit (python.ts). Levé
+// seulement par une réponse acceptée : un 404 ne dit rien de la clé.
+let refused = false
+
+export function keyRefused(): boolean {
+  return refused
+}
+
+function noteStatus(status: number): void {
+  if (status === 401 || status === 403) refused = true
+  else if (status >= 200 && status < 300) refused = false
+}
+
+// Au démarrage de la session : la clé est-elle acceptée ? Lecture seule (`/v1/bilan`), pour que le bandeau
+// dise une clé refusée avant le premier message, au lieu d'attendre un paquet du noyau qui n'arrivera pas.
+export async function probeKey($: EngineInterface, to: Link, timeoutMs: number): Promise<void> {
+  const reply = await bounded($, `${to.url}/v1/bilan`, { method: 'GET', headers: { authorization: `Bearer ${to.key}` } }, timeoutMs)
+  if (reply) noteStatus(reply.status)
+}
+
 // POST JSON vers le service ; null s'il est injoignable ou plus lent que `timeoutMs`.
 // Une réponse 402 passe par le message de fin d'essai (trial.ts) avant d'être rendue.
 export async function post($: EngineInterface, to: Link, path: string, body: unknown,
@@ -112,6 +132,9 @@ export async function post($: EngineInterface, to: Link, path: string, body: unk
     headers: { 'content-type': 'application/json', authorization: `Bearer ${to.key}`, 'x-show-notice': '1' },
     body: JSON.stringify(body),
   }, timeoutMs)
-  if (reply) trialNotice($, reply.status, reply.text)
+  if (reply) {
+    noteStatus(reply.status)
+    trialNotice($, reply.status, reply.text)
+  }
   return reply
 }

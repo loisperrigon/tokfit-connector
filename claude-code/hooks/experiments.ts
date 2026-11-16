@@ -9,23 +9,33 @@
 // variable d'environnement ne se modifie pas dans un processus lancé, donc
 // la variable de fichier de l'hôte désigne un fichier (même liste, séparée par des virgules)
 // relu à chaque message ; quand il se lit, il prime sur les variables.
+// La même réponse dit aussi ce que le compte du client a coupé lui-même (`disabled` : routage par message
+// en bêta) et la version minimale du connecteur (`min_version`) ; la demande joint les versions
+// (versions.ts).
 import type { EngineInterface } from 'claude-code'
 import { field, post } from './service'
 import type { Link } from './service'
+import { reported, updateNotice } from './versions'
+import type { Versions } from './versions'
 
 // Attente maximale de la liste : elle peut précéder la première requête au modèle.
 export const LEVERS_TIMEOUT_MS = 3_000
 const NONE: ReadonlySet<string> = new Set()
 
+// Réponse de /v1/levers pour la session : leviers témoins, coupés par le compte, ligne de mise à jour.
+export type Answer = { off: ReadonlySet<string>; disabled: ReadonlySet<string>; outdated: string | null }
+
 export type Holdout = {
-  session: string | undefined; off: Promise<ReadonlySet<string>> | undefined
+  session: string | undefined; off: Promise<Answer> | undefined
+  // Dernière réponse reçue (lue par le rendu du bandeau sans rien demander).
+  answer: Answer | undefined
   // Variables lues une fois ; `file` : dernier relevé du fichier (relu au plus toutes les OFF_FILE_TTL_MS).
   local: Promise<{ env: ReadonlySet<string>; path: string | undefined }> | undefined
   file: { at: number; set: ReadonlySet<string> | null } | undefined
 }
 
 export function holdout(): Holdout {
-  return { session: undefined, off: undefined, local: undefined, file: undefined }
+  return { session: undefined, off: undefined, answer: undefined, local: undefined, file: undefined }
 }
 
 const LEVER = /^[a-z_]{1,32}$/
@@ -67,20 +77,46 @@ export async function chosen($: EngineInterface, h: Holdout): Promise<ReadonlySe
   }
 }
 
-// Leviers coupés pour la session en cours (une seule demande par session).
-export async function levers($: EngineInterface, h: Holdout, to: Link): Promise<ReadonlySet<string>> {
+// Réponse du service pour la session en cours (une seule demande par session).
+export async function answer($: EngineInterface, h: Holdout, to: Link): Promise<Answer> {
   const session = await $.session.id()
   if (h.session !== session || h.off === undefined) {
     h.session = session
-    h.off = asked($, to, session)
+    h.off = asked($, h, to, session)
   }
+  return h.off
+}
+
+// Leviers coupés pour la session en cours : témoins du service, et choix de l'hôte ou de l'utilisateur.
+// Ceux que le compte coupe (`disabled`) restent hors de cette liste : le service ne les applique déjà pas.
+export async function levers($: EngineInterface, h: Holdout, to: Link): Promise<ReadonlySet<string>> {
+  const { off } = await answer($, h, to)
   const local = await chosen($, h)
-  const off = await h.off
   return local.size === 0 ? off : new Set([...off, ...local])
 }
 
-async function asked($: EngineInterface, to: Link, session: string): Promise<ReadonlySet<string>> {
-  const reply = await post($, to, '/v1/levers', { session_id: session }, LEVERS_TIMEOUT_MS)
-  const off = reply?.status === 200 ? field(reply.text, 'off') : undefined
-  return Array.isArray(off) ? new Set(off.filter((lever): lever is string => typeof lever === 'string')) : NONE
+function names(value: unknown): ReadonlySet<string> {
+  return Array.isArray(value) ? new Set(value.filter((lever): lever is string => typeof lever === 'string')) : NONE
+}
+
+async function asked($: EngineInterface, h: Holdout, to: Link, session: string): Promise<Answer> {
+  let versions: Versions = {}
+  try {
+    versions = await reported($)
+  } catch {
+    // Versions illisibles : la demande part sans elles.
+  }
+  const reply = await post($, to, '/v1/levers', { session_id: session, versions }, LEVERS_TIMEOUT_MS)
+  const text = reply?.status === 200 ? reply.text : ''
+  const got: Answer = { off: names(field(text, 'off')), disabled: names(field(text, 'disabled')),
+    outdated: updateNotice(versions.plugin, field(text, 'min_version')) }
+  h.answer = got
+  if (got.outdated !== null) {
+    try {
+      $.ui.invalidate('ui.render')
+    } catch {
+      // Rendu indisponible : la ligne paraîtra au prochain dessin.
+    }
+  }
+  return got
 }

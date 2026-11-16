@@ -7,11 +7,13 @@
 # y propose `compte` sans `agir`. Rien n'est écrit sur stdout sauf le protocole MCP ; le journal va sur stderr et
 # dans le cache.
 #
-# Python : par défaut celui que tokfit installe dans son cache (python.pins : CPython de python-build-standalone,
-# version, publication et SHA-256 épinglés), le même sur toutes les machines. Un Python du système ne sert
-# qu'en secours, quand l'installation est impossible ou a échoué, et seulement s'il atteint MINIMUM et passe le
-# test d'import des modules du noyau. Toujours lancé avec -I : ni PYTHONPATH, ni PYTHONHOME, ni site de
-# l'utilisateur, ni dossier courant (venv activé, conda, pyenv, Python cassé n'y changent rien).
+# Python : d'abord celui que tokfit a déjà installé dans son cache, sinon un Python déjà présent sur la machine
+# (python3, puis python, du PATH) s'il atteint MINIMUM et passe le test d'import des modules du noyau : rien
+# n'est alors téléchargé. Sans l'un ni l'autre, tokfit installe le sien (python.pins : CPython de
+# python-build-standalone, version, publication et SHA-256 épinglés). Sous macOS sans outils de développement,
+# /usr/bin/python3 n'est qu'un relais qui ouvre la fenêtre d'installation de ces outils : jamais lancé.
+# Toujours lancé avec -I : ni PYTHONPATH, ni PYTHONHOME, ni site de l'utilisateur, ni dossier courant (venv
+# activé, conda, pyenv, Python cassé n'y changent rien).
 #
 # Sans Python prêt au démarrage (première session), l'installation part en arrière-plan et ce lanceur répond
 # lui-même au protocole MCP minimal (initialize, tools/list vide, ping). Dès que Python est prêt, il envoie
@@ -176,11 +178,20 @@ choisir() {
   return 1
 }
 
-# Python du système en secours (premier qui passe le test).
-secours() {
+# Relais de macOS (/usr/bin/python3 sans outils de développement installés) : le lancer ouvrirait la fenêtre
+# d'installation de ces outils. RELAIS_MACOS : chemin du relais (changé par les essais seulement).
+RELAIS_MACOS=${TOKFIT_RELAIS_MACOS:-/usr/bin/python3}
+relais_macos() {
+  [ "$1" = "$RELAIS_MACOS" ] && [ "$(uname -s 2>/dev/null)" = Darwin ] || return 1
+  ! xcode-select -p >/dev/null 2>&1
+}
+
+# Python déjà présent sur la machine (premier qui passe le test) : utilisé avant toute installation.
+systeme() {
   for nom in python3 python; do
     chemin=$(command -v "$nom" 2>/dev/null) || continue
     case $chemin in /*|[A-Za-z]:*) ;; *) continue ;; esac
+    relais_macos "$chemin" && continue
     if python_valide "$chemin"; then PY=$chemin; SOURCE=system; return 0; fi
   done
   return 1
@@ -198,6 +209,7 @@ wget_busybox() {
 python_ancien() {  # n'importe quel Python capable de télécharger (2.7 compris), hors du test du noyau
   for nom in python3 python; do
     chemin=$(command -v "$nom" 2>/dev/null) || continue
+    relais_macos "$chemin" && continue
     "$chemin" -E -s -c 'import sys' >/dev/null 2>&1 && { printf '%s' "$chemin"; return 0; }
   done
   return 1
@@ -353,13 +365,20 @@ installation_en_cours() {
   return 0
 }
 
+# Verrou = création exclusive du fichier pid par le shell (`set -C` : O_EXCL), jamais le code de retour de
+# `mkdir` : celui des coreutils réécrits en Rust (uutils 0.10, Ubuntu 26.04) répond parfois « créé » à deux
+# processus à la fois, et les deux téléchargeaient.
+poser_pid() {
+  mkdir -p "$VERROU" 2>/dev/null
+  ( set -C; echo $$ > "$VERROU/pid" ) 2>/dev/null
+}
+
 prendre_verrou() {
-  if mkdir "$VERROU" 2>/dev/null; then echo $$ > "$VERROU/pid"; return 0; fi
+  poser_pid && return 0
   installation_en_cours && return 1
   journal "verrou d'installation abandonné repris"
   rm -rf "$VERROU"
-  mkdir "$VERROU" 2>/dev/null || return 1
-  echo $$ > "$VERROU/pid"
+  poser_pid
 }
 
 rendre_verrou() {
@@ -574,18 +593,18 @@ repondeur() {
 }
 
 serveur() {
-  if choisir; then lancer_serveur; fi
+  if choisir || systeme; then lancer_serveur; fi
+  journal "aucun Python $PIN_MINIMUM+ utilisable sur la machine"
   RAISON_IMPOSSIBLE=$(impossible)
   if [ -z "$RAISON_IMPOSSIBLE" ]; then
     if echec_recent; then
-      journal "dernière installation échouée il y a moins de $REESSAI_S s : Python du système en secours"
+      journal "dernière installation échouée il y a moins de $REESSAI_S s : pas de nouvel essai"
     else
       installation_en_cours || installer_en_fond
       ecrire_lancement none python_installing ""
       repondeur
     fi
   fi
-  if secours; then lancer_serveur; fi
   if [ -n "$RAISON_IMPOSSIBLE" ]; then
     journal "aucun Python utilisable et installation impossible ($RAISON_IMPOSSIBLE)"
     ecrire_lancement none python_missing "$RAISON_IMPOSSIBLE"
@@ -599,7 +618,7 @@ hook() {
   [ $# -ge 1 ] || { journal "hook : script attendu"; exit 2; }
   script=$1
   shift
-  if choisir || secours; then
+  if choisir || systeme; then
     certificats
     exec "$PY" -I -X utf8 "$script" "$@"
   fi

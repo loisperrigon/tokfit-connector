@@ -76,6 +76,14 @@ describe('raison de l’absence de agir', () => {
     for (const [f, kernel, account, expected] of cases) expect(diagnose(kernel, account, f, true, at, at - START_GRACE_MS)).toEqual(expected)
   })
 
+  test('clé refusée par le service : dit avant « paquet non reçu », seulement quand le connecteur est relié', () => {
+    const f = parsed(files(install('ready'), launch('managed')))
+    expect(diagnose(false, true, f, true, at, at - START_GRACE_MS, true)).toEqual({ reason: 'key_refused' })
+    expect(diagnose(false, false, f, true, at, at - START_GRACE_MS, true)).toEqual({ reason: 'key_refused' })
+    expect(diagnose(true, true, f, true, at, at - START_GRACE_MS, true)).toBeNull()
+    expect(diagnose(false, false, f, false, at, at - START_GRACE_MS, true)).toBeNull()
+  })
+
   test('serveur lancé depuis moins que le délai de démarrage : pas une panne ; non relié : rien à juger', () => {
     const f = parsed(files(install('ready'), launch('managed')))
     expect(diagnose(false, false, f, true, at, at - 1000)).toEqual({ reason: 'server_starting' })
@@ -84,11 +92,12 @@ describe('raison de l’absence de agir', () => {
   })
 
   test('lignes du bandeau', () => {
-    expect(notice({ reason: 'python_installing' })).toBe('installation de Python en cours, l\'outil principal arrive')
+    expect(notice({ reason: 'python_installing' })).toBe('aucun Python 3.9+ sur la machine : téléchargement de Python en cours, l\'outil principal arrive')
     expect(notice({ reason: 'python_missing', detail: 'no_downloader' }))
       .toBe('outil principal indisponible (aucun outil de téléchargement : installez curl ou wget)')
     expect(notice({ reason: 'install_failed', detail: 'checksum' })).toMatch(/^installation de Python échouée \(archive altérée/)
-    expect(notice({ reason: 'pack_unavailable' })).toBe('outil principal en attente du service (paquet du noyau non reçu)')
+    expect(notice({ reason: 'pack_unavailable' })).toBe('outil principal en attente du service (pas encore de réponse) : /tokfit pour le détail')
+    expect(notice({ reason: 'key_refused' })).toMatch(/^clé tokfit refusée par le service \(remplacée ou révoquée\) : dans \/plugin/)
     expect(notice(null)).toBeNull()
   })
 })
@@ -98,7 +107,7 @@ describe('bandeau, étape et commande', () => {
     const tools: string[] = []
     const w = world(on, { messages: [user('x')], tools, files: files(install('installing'), launch('none', 'python_installing')) })
     await started($, w)
-    expect(await shown($)).toBe('tokfit : installation de Python en cours, l\'outil principal arrive')
+    expect(await shown($)).toBe('tokfit : aucun Python 3.9+ sur la machine : téléchargement de Python en cours, l\'outil principal arrive')
     tools.push(AGIR, COMPTE)
     await w.clock.advance(CHECK_FAST_MS)
     expect(await shown($)).toBeUndefined()
@@ -121,12 +130,31 @@ describe('bandeau, étape et commande', () => {
   test('paquet du noyau pas reçu (compte seul) : raison jointe à l’étape', async ($, on) => {
     const w = world(on, { messages: [user('x')], tools: [COMPTE], files: files(install('ready'), launch('managed')) })
     await started($, w)
-    expect(await shown($)).toBe('tokfit : outil principal en attente du service (paquet du noyau non reçu)')
+    expect(await shown($)).toBe('tokfit : outil principal en attente du service (pas encore de réponse) : /tokfit pour le détail')
     await step($, 0, { turnId: 't1' })
     await end($)
     await w.clock.settle()
     const steps = w.usages().flatMap(sent => sent.body.steps as Record<string, unknown>[])
     expect(steps.map(s => [s.kernel_reason, s.kernel_detail])).toEqual([['pack_unavailable', undefined]])
+  })
+
+  test('clé refusée par le service (401) : la ligne dit quoi faire, puis s’efface quand la clé est acceptée', async ($, on) => {
+    let status = 401
+    const refusal = { error: 'Clé absente, inconnue ou révoquée.' }
+    const w = world(on, { messages: [user('x')], tools: [COMPTE], files: files(install('ready'), launch('managed')),
+      content: () => (status === 200 ? { status, body: { version: 'v-test' } } : { status, body: refusal }),
+      route: () => (status === 200 ? { status, body: { model: null, effort: null } } : { status, body: refusal }),
+      levers: () => (status === 200 ? { status, body: { off: [] } } : { status, body: refusal }),
+      usage: () => (status === 200 ? { status, body: { recorded: 1 } } : { status, body: refusal }),
+      bilan: () => (status === 200 ? { status, body: {} } : { status, body: refusal }) })
+    await started($, w)
+    // Refus vu à la demande du plan de session ; la ligne suit au contrôle suivant.
+    await w.clock.advance(CHECK_FAST_MS)
+    expect(await shown($)).toMatch(/^tokfit : clé tokfit refusée par le service/)
+    status = 200
+    await step($, 0, { turnId: 't1' })
+    await w.clock.advance(CHECK_FAST_MS)
+    expect(await shown($)).toBe('tokfit : outil principal en attente du service (pas encore de réponse) : /tokfit pour le détail')
   })
 
   test('serveur arrêté : rien pendant le démarrage, la ligne ensuite', async ($, on) => {
@@ -166,6 +194,6 @@ describe('bandeau, étape et commande', () => {
     const w = world(on, { messages: [user('x')], tools: [], env: { TOKFIT_CACHE_DIR: own },
       files: { [`${own}/python/install.json`]: install('installing'), [`${own}/python/launch.json`]: launch('none', 'python_installing') } })
     await started($, w)
-    expect(await shown($)).toBe('tokfit : installation de Python en cours, l\'outil principal arrive')
+    expect(await shown($)).toBe('tokfit : aucun Python 3.9+ sur la machine : téléchargement de Python en cours, l\'outil principal arrive')
   })
 })

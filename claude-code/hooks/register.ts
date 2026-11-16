@@ -1155,7 +1155,8 @@ export const register: Register = (on, options) => {
   // Bandeau du gain au-dessus de la saisie (band.ts), et la santé de l'outil principal quand il manque.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     void refreshed($, s.health, s.to !== null)
-    const tree = band($, e, s.badge, await $.clock.now(), healthNotice(s.health.diagnosis))
+    // Santé de l'outil principal d'abord ; sinon, connecteur sous la version minimale du service (versions.ts).
+    const tree = band($, e, s.badge, await $.clock.now(), healthNotice(s.health.diagnosis) ?? s.holdout.answer?.outdated ?? null)
     return tree === null ? next(e) : tree
   }).catch(($, e, next) => next(e))
 

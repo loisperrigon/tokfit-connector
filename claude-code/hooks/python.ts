@@ -10,10 +10,11 @@
 // `agir` manque, et à chaque étape ; le bandeau disparaît dès que `agir` est là.
 import type { EngineInterface } from 'claude-code'
 import { isAccountTool, isKernelTool } from './kernel'
+import { keyRefused } from './service'
 
 // Raisons de l'absence de `agir` : KERNEL_REASONS de service/usage.py (vérifié par tests/test_connector.py).
 export const REASONS = ['python_installing', 'python_missing', 'install_failed', 'unsupported_platform',
-  'server_starting', 'server_down', 'pack_unavailable'] as const
+  'server_starting', 'server_down', 'pack_unavailable', 'key_refused'] as const
 export type Reason = (typeof REASONS)[number]
 // Détails : écrits par le lanceur, sauf `windows` et `no_launch` (lanceur jamais parti) ; KERNEL_DETAILS du service.
 export const DETAILS = ['disabled', 'unsupported_platform', 'no_downloader', 'no_hash_tool', 'no_tar', 'no_cache_dir',
@@ -92,11 +93,14 @@ export async function pythonFiles($: EngineInterface): Promise<PythonFiles> {
 }
 
 // Pourquoi `agir` manque ; null s'il est proposé, ou si rien ne permet d'en juger (connecteur non relié :
-// le serveur ne propose alors aucun outil, sans panne).
-export function diagnose(kernel: boolean, account: boolean, f: PythonFiles, linked: boolean, now: number, since: number): Diagnosis | null {
+// le serveur ne propose alors aucun outil, sans panne). `refused` : le service a refusé la clé à sa dernière
+// réponse ; le paquet du noyau, demandé avec la même clé, n'arrivera pas.
+export function diagnose(kernel: boolean, account: boolean, f: PythonFiles, linked: boolean, now: number, since: number,
+                         refused = false): Diagnosis | null {
   if (kernel) return null
   const source = text(f.launch?.source)
   if (source !== '' && source !== 'none' && text(f.launch?.target).includes('windows')) return { reason: 'unsupported_platform', detail: 'windows' }
+  if (refused && linked) return { reason: 'key_refused' }
   if (account) return { reason: 'pack_unavailable' }
   if (source === 'none') {
     const why = text(f.launch?.reason)
@@ -138,13 +142,14 @@ export function notice(d: Diagnosis | null | undefined): string | null {
   if (!d) return null
   const why = d.detail ? ` (${detailText(d.detail)})` : ''
   switch (d.reason) {
-    case 'python_installing': return 'installation de Python en cours, l\'outil principal arrive'
+    case 'python_installing': return 'aucun Python 3.9+ sur la machine : téléchargement de Python en cours, l\'outil principal arrive'
     case 'python_missing': return `outil principal indisponible${why}`
     case 'install_failed': return `installation de Python échouée${why}, nouvel essai à la prochaine session`
     case 'unsupported_platform': return `outil principal indisponible${why}`
     case 'server_starting': return null
     case 'server_down': return `outil principal arrêté${why} : /mcp pour relancer le serveur « outils »`
-    case 'pack_unavailable': return 'outil principal en attente du service (paquet du noyau non reçu)'
+    case 'pack_unavailable': return 'outil principal en attente du service (pas encore de réponse) : /tokfit pour le détail'
+    case 'key_refused': return 'clé tokfit refusée par le service (remplacée ou révoquée) : dans /plugin, options de tokfit, collez votre clé actuelle ou videz le champ pour l\'essai'
   }
 }
 
@@ -157,7 +162,7 @@ export async function check($: EngineInterface, h: Health, linked: boolean): Pro
   const account = tools.some(tool => tool.mcp && isAccountTool(tool.name))
   h.files = await pythonFiles($)
   const before = notice(h.diagnosis)
-  h.diagnosis = diagnose(kernel, account, h.files, linked, now, h.since)
+  h.diagnosis = diagnose(kernel, account, h.files, linked, now, h.since, keyRefused())
   h.at = now
   if (notice(h.diagnosis) !== before) $.ui.invalidate('ui.render')
   return h.diagnosis
@@ -202,7 +207,7 @@ export function watch($: EngineInterface, h: Health, linked: () => Promise<boole
   void tick().catch(() => undefined)
 }
 
-const SOURCE_TEXT: Record<string, string> = { managed: 'installé par tokfit', system: 'du système (secours)', forced: 'imposé par TOKFIT_PYTHON' }
+const SOURCE_TEXT: Record<string, string> = { managed: 'installé par tokfit', system: 'déjà présent sur la machine', forced: 'imposé par TOKFIT_PYTHON' }
 
 // Diagnostic complet pour `/<NAME>` : Python, installation, serveur, outils, service, version du connecteur.
 export function healthReport(d: Diagnosis | null | undefined, f: PythonFiles, tools: { kernel: boolean; account: boolean },
@@ -216,6 +221,7 @@ export function healthReport(d: Diagnosis | null | undefined, f: PythonFiles, to
   const install = state === 'ready' ? `prête (${text(f.install?.version)}, ${text(f.install?.target)})`
     : state === 'installing' ? 'en cours'
     : state === 'failed' ? `échouée (${detailText(detailOf(f.install?.detail)) || text(f.install?.detail)})`
+    : source === 'system' ? 'inutile (Python de la machine utilisé)'
     : 'jamais lancée'
   const server = tools.kernel || tools.account ? 'démarré'
     : d?.reason === 'server_starting' ? 'en démarrage'

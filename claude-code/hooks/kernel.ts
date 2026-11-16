@@ -10,7 +10,7 @@
 // `fini(resume)`, le tour s'arrête sur ce résumé sans nouvelle requête.
 //
 // Le levier ne touche à rien tant que `python` n'est pas connecté (python3 absent,
-// serveur arrêté, paquet du noyau non reçu) ; il le signale alors au service
+// serveur arrêté, paquet du noyau non reçu, clé refusée) ; il le signale alors au service
 // (`kernel_unavailable`). Seuls des nombres partent : jamais le code envoyé au noyau.
 import type { EngineInterface, McpToolName, PromptComposeSection, ToolDescribeInput, ToolDescribeResult, TurnStepChunk, TurnStepResult } from 'claude-code'
 import { section } from './plan'
