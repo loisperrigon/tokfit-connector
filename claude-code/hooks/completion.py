@@ -20,6 +20,10 @@ import urllib.request
 Json = dict[str, object]
 MAX_INPUT = 64 * 1024
 MAX_TRANSCRIPT = 4 * 1024 * 1024
+# Adresse officielle du service, posée par connector/publish.py dans la copie publique, comme DEFAULT_URL
+# de hooks/service.ts ; vide dans la copie de travail (rien ne part sans adresse configurée). Sans elle, une
+# clé configurée sans adresse (option api_key seule, ou config.json sans `url`) laissait le noyau sans outil.
+DEFAULT_URL = "https://tokfit.dodoia.re"
 LOG = logging.getLogger("tokfit.completion")
 
 
@@ -117,6 +121,8 @@ def link(env: dict[str, str]) -> tuple[str, str] | None:
         stored = stored_link(env)
         if stored is not None and (not isinstance(url, str) or not url or url.rstrip("/") == stored[0]):
             url, key = stored
+    if not isinstance(url, str) or not url:
+        url = DEFAULT_URL
     if not isinstance(url, str) or not isinstance(key, str) or not key:
         return None
     parsed = urlsplit(url)
