@@ -2,10 +2,12 @@
 # tokfit : lanceur du serveur MCP `outils` (kernel/server.py) et des hooks écrits en Python.
 #
 # Claude Code le lance par l'interpréteur (`sh …/launch.sh`), jamais comme exécutable : une copie du plugin qui
-# perd les droits (fichiers en 0600) marche quand même. Appelants : `mcpServers.outils` de plugin.json, hook Stop
-# de hooks.json. Sous Windows, `sh` est celui de Git for Windows (dans le PATH) ; le noyau étant POSIX, le serveur
-# y propose `compte` sans `agir`. Rien n'est écrit sur stdout sauf le protocole MCP ; le journal va sur stderr et
-# dans le cache.
+# perd les droits (fichiers en 0600) marche quand même. Appelants : `mcpServers.outils` de plugin.json (commande
+# `${ComSpec:-sh}` : sh partout sauf sous Windows, où ComSpec désigne cmd.exe, qui lance kernel/launch.ps1 ; les
+# arguments destinés à cmd.exe, `/d /c …`, arrivent ici après le chemin du lanceur et sont ignorés), hook Stop de
+# hooks.json (commande lue par sh, ou par PowerShell sous Windows sans Git Bash). Sous Windows avec Git Bash, le
+# hook passe par ici : même cache, même Python que launch.ps1. Rien n'est écrit sur stdout sauf le protocole MCP ;
+# le journal va sur stderr et dans le cache.
 #
 # Python : d'abord celui que tokfit a déjà installé dans son cache, sinon un Python déjà présent sur la machine
 # (python3, puis python, du PATH) s'il atteint MINIMUM et passe le test d'import des modules du noyau : rien
@@ -20,7 +22,8 @@
 # `notifications/tools/list_changed` ; la demande suivante passe au vrai serveur (exec : mêmes stdin et stdout),
 # qui reprend la session déjà ouverte (TOKFIT_MCP_REPRISE) et répond à cette demande (TOKFIT_MCP_ATTENTE).
 #
-# Modes : (aucun) serveur MCP ; `hook <script> [arguments…]` : script Python d'un hook, rien sans Python prêt ;
+# Modes : (aucun, ou `/d …` de plugin.json) serveur MCP ; `hook <script> [arguments…]` : script Python d'un hook,
+# rien sans Python prêt ;
 # `installer` : installation au premier plan (appel interne) ; `etat` : état en JSON (diagnostic, essais).
 # Réglages : TOKFIT_PYTHON (interpréteur imposé, gardé s'il passe le test), TOKFIT_PYTHON_INSTALL=0
 # (jamais d'installation), TOKFIT_CACHE_DIR (cache, ${XDG_CACHE_HOME:-~/.cache}/tokfit par défaut),
@@ -192,6 +195,7 @@ systeme() {
     chemin=$(command -v "$nom" 2>/dev/null) || continue
     case $chemin in /*|[A-Za-z]:*) ;; *) continue ;; esac
     relais_macos "$chemin" && continue
+    case $chemin in */WindowsApps/*) continue ;; esac  # alias du Microsoft Store (Git Bash) : ouvrirait le Store
     if python_valide "$chemin"; then PY=$chemin; SOURCE=system; return 0; fi
   done
   return 1
@@ -530,7 +534,7 @@ python_maintenant() {
     [ $(( $(maintenant) - ${LANCEE:-$DEPART} )) -lt 60 ] && return 1
   fi
   [ -e "$SESSION/sans-secours" ] && return 1
-  secours && return 0
+  systeme && return 0
   : > "$SESSION/sans-secours"
   return 1
 }
@@ -637,7 +641,7 @@ etat() {
 }
 
 case ${1:-} in
-  '') serveur ;;
+  ''|/d) serveur ;;
   hook) shift; hook "$@" ;;
   installer) installer ;;
   etat) etat ;;

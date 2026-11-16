@@ -1,6 +1,6 @@
 {
   "modules": ["./register.ts"],
   "hooks": {
-    "Stop": [{ "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/kernel/launch.sh\" hook \"${CLAUDE_PLUGIN_ROOT}/hooks/completion.py\" claude", "timeout": 4 }] }]
+    "Stop": [{ "hooks": [{ "type": "command", "command": "set -- `# <#`; sh \"${CLAUDE_PLUGIN_ROOT}/kernel/launch.sh\" hook \"${CLAUDE_PLUGIN_ROOT}/hooks/completion.py\" claude; exit $? #>; $env:TOKFIT_LAUNCH = 'hook hooks/completion.py claude'; iex([IO.File]::ReadAllText($env:CLAUDE_PLUGIN_ROOT + '/kernel/launch.ps1'))", "timeout": 4 }] }]
   }
 }

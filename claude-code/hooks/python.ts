@@ -1,4 +1,5 @@
-// Santé de l'outil `agir` (serveur MCP `outils`, kernel/server.py, lancé par kernel/launch.sh) : pourquoi il
+// Santé de l'outil `agir` (serveur MCP `outils`, kernel/server.py, lancé par kernel/launch.sh, ou kernel/launch.ps1
+// sous Windows) : pourquoi il
 // manque, dit à la personne dès qu'il manque (bandeau au-dessus de la saisie, band.ts), au service avec les
 // compteurs de l'étape (`kernel_reason`, `kernel_detail` : des codes fixes, jamais un chemin), et en entier
 // par `/<NAME>`.
@@ -16,7 +17,8 @@ import { keyRefused } from './service'
 export const REASONS = ['python_installing', 'python_missing', 'install_failed', 'unsupported_platform',
   'server_starting', 'server_down', 'pack_unavailable', 'key_refused'] as const
 export type Reason = (typeof REASONS)[number]
-// Détails : écrits par le lanceur, sauf `windows` et `no_launch` (lanceur jamais parti) ; KERNEL_DETAILS du service.
+// Détails : écrits par le lanceur, sauf `no_launch` (lanceur jamais parti) ; `windows` n'est plus produit (le noyau
+// tourne sous Windows depuis 0.7.13), gardé pour les anciens connecteurs ; KERNEL_DETAILS du service.
 export const DETAILS = ['disabled', 'unsupported_platform', 'no_downloader', 'no_hash_tool', 'no_tar', 'no_cache_dir',
   'download', 'checksum', 'extract', 'verify', 'disk', 'interrupted', 'windows', 'no_launch'] as const
 export type Detail = (typeof DETAILS)[number]
@@ -65,7 +67,7 @@ function failure(reason: 'python_missing' | 'install_failed', detail: unknown): 
 }
 
 // Cache du lanceur : TOKFIT_CACHE_DIR, sinon ${XDG_CACHE_HOME:-$HOME/.cache}/tokfit (même règle que
-// kernel/launch.sh ; sous Windows, HOME de Git Bash est USERPROFILE).
+// kernel/launch.sh et kernel/launch.ps1 ; sous Windows, HOME, s'il existe, sinon USERPROFILE, comme le lanceur).
 export async function cacheDir($: EngineInterface): Promise<string | null> {
   const own = await $.env.get('TOKFIT_CACHE_DIR')
   if (own) return own
@@ -99,7 +101,6 @@ export function diagnose(kernel: boolean, account: boolean, f: PythonFiles, link
                          refused = false): Diagnosis | null {
   if (kernel) return null
   const source = text(f.launch?.source)
-  if (source !== '' && source !== 'none' && text(f.launch?.target).includes('windows')) return { reason: 'unsupported_platform', detail: 'windows' }
   if (refused && linked) return { reason: 'key_refused' }
   if (account) return { reason: 'pack_unavailable' }
   if (source === 'none') {
@@ -129,8 +130,8 @@ const DETAIL_TEXT: Record<Detail, string> = {
   verify: 'Python installé mais inutilisable',
   disk: 'disque plein ou cache non inscriptible',
   interrupted: 'installation interrompue',
-  windows: 'Windows : le noyau demande un système POSIX',
-  no_launch: 'lanceur jamais parti : `sh` introuvable ?',
+  windows: 'Windows : connecteur antérieur à 0.7.13, à mettre à jour',
+  no_launch: 'lanceur jamais parti : sh (ou PowerShell sous Windows) introuvable ?',
 }
 
 export function detailText(detail: Detail | undefined): string {

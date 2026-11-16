@@ -41,6 +41,7 @@ Bibliothèque standard seulement, Python 3.9+.
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -63,9 +64,9 @@ from kernel.pack import DELAI_RELANCE_S, DELAI_S, Lien, Paquet, cle_attendue, co
 NOM = "outils"
 # Nom neutre de l'outil d'action, affiché dans l'interface : il ne dit rien de la méthode (choix de Lois du 15/11/2026).
 OUTIL = "agir"
-# Le noyau (kernel.py) passe ses tubes par `pass_fds` et l'interrompt par SIGINT : POSIX seulement. Ailleurs
-# (Python de Windows), le serveur ne propose que `compte`.
-NOYAU_POSSIBLE = os.name == "posix"
+# Le noyau tourne sous POSIX et sous Windows (tubes et interruption : `kernel/tubes.py`) ; gardé pour couper
+# `agir` sur un système où il ne tournerait pas (les essais le posent à faux).
+NOYAU_POSSIBLE = os.name in ("posix", "nt")
 VERSION = "1.0.0"
 PROTOCOLES = ("2025-06-18", "2025-03-26", "2024-11-05")
 TIMEOUT_DEFAUT = 120
@@ -271,8 +272,8 @@ class Serveur:
         return self.vers
 
     def outils(self) -> List[Dict[str, Any]]:
-        """Les outils proposés maintenant : `agir` avec le paquet sur un système POSIX (le noyau en dépend : tubes
-        hérités, `select`, SIGINT), `compte` avec le lien (paquet reçu ou non)."""
+        """Les outils proposés maintenant : `agir` avec le paquet (sur un système où le noyau tourne, POSIX ou
+        Windows), `compte` avec le lien (paquet reçu ou non)."""
         with self.etat:
             description, amorce = self.description, self.amorce
         outils = [schema_outil(description)] if amorce is not None and NOYAU_POSSIBLE else []
@@ -458,6 +459,12 @@ def annoncer_apres_depart(serveur: Serveur, annoncer: Callable[[], None]) -> Non
 
 def main() -> None:
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="noyau: %(message)s")
+    # Le protocole MCP est en UTF-8, une ligne finie par \n : sous Windows, sans -X utf8, Python prendrait la page
+    # de code du système (cp1252 : UnicodeEncodeError au premier caractère hors de la page) et \r\n.
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8", newline="\n")
+    if isinstance(sys.stdin, io.TextIOWrapper):
+        sys.stdin.reconfigure(encoding="utf-8")
     ouverte, attente = reprise(os.environ)
     env = dict(os.environ)
     ensure_auto_update(env)

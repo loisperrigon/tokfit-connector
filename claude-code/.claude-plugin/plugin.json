@@ -1,13 +1,13 @@
 {
   "name": "tokfit",
-  "version": "0.7.12",
+  "version": "0.7.13",
   "description": "Consommer moins avec le même abonnement : modèle et réflexion de Claude Code choisis à chaque message par le service.",
   "author": { "name": "Lois Perrigon" },
   "icon": "./icon.png",
   "mcpServers": {
     "outils": {
-      "command": "sh",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/kernel/launch.sh"],
+      "command": "${ComSpec:-sh}",
+      "args": ["${ComSpec:-${CLAUDE_PLUGIN_ROOT}/kernel/launch.sh}", "/d", "/c", "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "iex([IO.File]::ReadAllText($env:CLAUDE_PLUGIN_ROOT+'/kernel/launch.ps1'))"],
       "env": { "CLAUDE_PLUGIN_OPTION_API_KEY": "${user_config.api_key}", "CLAUDE_PLUGIN_OPTION_SERVICE_URL": "${user_config.service_url}" }
     }
   },

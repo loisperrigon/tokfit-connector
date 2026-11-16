@@ -1,6 +1,8 @@
 """Processus du noyau : exécute le code reçu dans un espace de noms qui dure.
 
-Lancé par `kernel.Noyau` : `python -I -B worker.py <fd requêtes> <fd réponses> <limite>` ; les paquets
+Lancé par `kernel.Noyau` : `python -I -B worker.py <requêtes> <réponses> <limite> [<interruptions>]` (tubes
+passés par `kernel/tubes.py` : descripteurs sous POSIX, poignées sous Windows, qui ajoute le tube des
+interruptions) ; les paquets
 des environnements du projet de même version s'ajoutent au démarrage (`kernel/projet.py`).
 Les requêtes arrivent sur un tube dédié (une ligne JSON `{"code": …}`), les
 réponses repartent sur un autre (`{"sortie": …, "ok": …, "fini": …}`) : stdin est fermé,
@@ -9,7 +11,8 @@ code vont dans une capture bornée, jamais dans le tube des réponses.
 
 Chaque cellule est inscrite dans `linecache` sous `<cell-N>` :
 `inspect.getsource` retrouve ainsi les fonctions définies dans le noyau
-(c'est ce que `sauve_outil` lit). SIGINT interrompt la cellule en cours
+(c'est ce que `sauve_outil` lit). SIGINT (sous Windows : un octet sur le tube des interruptions, qui lève
+SIGINT) interrompt la cellule en cours
 (`KeyboardInterrupt`) sans perdre l'état : le worker pose lui-même son
 gestionnaire au démarrage, car il hérite sinon de la disposition de son
 parent (SIG_IGN sous `nohup` ou un shell non interactif en arrière-plan), et
@@ -35,6 +38,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from kernel import tubes  # noqa: E402
 from kernel.output import COMPLET_MAX, DANS_SORTIE, Capture, resume_traceback, tronque  # noqa: E402
 from kernel.pack import prendre_lien  # noqa: E402
 from kernel.projet import ajouter as ajouter_projet  # noqa: E402
@@ -119,7 +123,7 @@ def images_valides(images: object) -> List[Dict[str, str]]:
 def boucle(fd_requetes: int, fd_reponses: int, limite: int) -> None:
     espace: Dict[str, Any] = {"__name__": "__main__", "__builtins__": __builtins__, IMAGES_OK: True}
     requetes = os.fdopen(fd_requetes, "r", encoding="utf-8")
-    reponses = os.fdopen(fd_reponses, "w", encoding="utf-8")
+    reponses = os.fdopen(fd_reponses, "w", encoding="utf-8", newline="\n")
     numero = 0
     while True:
         try:
@@ -140,6 +144,8 @@ def boucle(fd_requetes: int, fd_reponses: int, limite: int) -> None:
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal.default_int_handler)
+    if len(sys.argv) > 4:
+        tubes.ecouter_interruptions(tubes.ouvrir(sys.argv[4], ecriture=False))
     prendre_lien()
     ajouter_projet(os.getcwd(), os.environ)
-    boucle(int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]))
+    boucle(tubes.ouvrir(sys.argv[1], ecriture=False), tubes.ouvrir(sys.argv[2], ecriture=True), int(sys.argv[3]))

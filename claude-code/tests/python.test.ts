@@ -65,7 +65,8 @@ describe('raison de l’absence de agir', () => {
         { reason: 'install_failed', detail: 'download' }],
       [parsed(files(install('installing', '', '', NOW_S - INSTALL_STALE_S - 1), launch('none', 'python_installing'))), false, false,
         { reason: 'install_failed', detail: 'interrupted' }],
-      [parsed(files(install('ready'), launch('managed', '', '', 'x86_64-pc-windows-msvc'))), false, true, { reason: 'unsupported_platform', detail: 'windows' }],
+      // Windows : le noyau y tourne (0.7.12) ; un outil absent avec `compte` proposé est un paquet pas reçu.
+      [parsed(files(install('ready'), launch('managed', '', '', 'x86_64-pc-windows-msvc'))), false, true, { reason: 'pack_unavailable' }],
       [parsed(files(install('ready'), launch('managed'))), false, true, { reason: 'pack_unavailable' }],
       [parsed(files(install('ready'), launch('managed'))), false, false, { reason: 'server_down' }],
       [parsed(files()), false, false, { reason: 'server_down', detail: 'no_launch' }],

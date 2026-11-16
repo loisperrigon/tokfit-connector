@@ -1,6 +1,6 @@
 # Python autonome de tokfit : CPython de python-build-standalone (astral-sh), version et publication
-# épinglées, archive `install_only_stripped` et sa somme SHA-256 par cible. Lu par kernel/launch (sh),
-# kernel/launch.cmd et kernel/launch.ps1 (Windows) et tests/test_python_launcher.py. Une ligne CLE=valeur.
+# épinglées, archive `install_only_stripped` et sa somme SHA-256 par cible. Lu par kernel/launch.sh,
+# kernel/launch.ps1 (Windows) et tests/test_python_launcher.py. Une ligne CLE=valeur.
 # Sommes relevées le 16/11/2026 : SHA256SUMS de la publication, empreinte de GitHub et archive téléchargée.
 VERSION=3.13.18
 RELEASE=20261110

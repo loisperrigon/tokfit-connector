@@ -20,16 +20,18 @@ from __future__ import annotations
 import json
 import logging
 import os
-import select
+import queue
 import shlex
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional
 
+from kernel import tubes
 from kernel.output import MAX_SORTIE, tronque
 from kernel.pack import Lien, environnement_du_noyau
 
@@ -52,6 +54,21 @@ done
 unset PYTHONHOME
 exec {secours} "$@"
 """
+# Sous Windows (fichiers .cmd, trouvés par PATHEXT) : le .venv du dossier courant, sinon le premier python.exe
+# du PATH qui n'est pas l'alias du Microsoft Store (WindowsApps, qui ouvre le Store au lieu de Python), sinon le
+# Python de tokfit. `python3.exe` n'existe guère sous Windows : le shim `python3` suit la même règle.
+SHIM_CMD = """@echo off
+rem {nom} du noyau : .venv du dossier courant, sinon python.exe du PATH, sinon le Python de tokfit.
+if not exist ".venv\\Scripts\\python.exe" goto systeme
+"%CD%\\.venv\\Scripts\\python.exe" %*
+exit /b %errorlevel%
+:systeme
+set "TOKFIT_PY="
+for %%P in (python.exe) do set "TOKFIT_PY=%%~$PATH:P"
+if defined TOKFIT_PY echo "%TOKFIT_PY%" | find /i "\\WindowsApps\\" >nul && set "TOKFIT_PY="
+if not defined TOKFIT_PY set "PYTHONHOME=" & set "TOKFIT_PY={secours}"
+"%TOKFIT_PY%" %*
+"""
 SHIMS = ("python", "python3")
 
 
@@ -69,6 +86,9 @@ def creer_shims(dossier: Path, secours: str = sys.executable) -> Path:
     """Écrit les shims (`python`, `python3`) dans `dossier` et le rend ; `secours` : le Python de tokfit."""
     dossier.mkdir(parents=True, exist_ok=True)
     for nom in SHIMS:
+        if tubes.WINDOWS:
+            (dossier / f"{nom}.cmd").write_text(SHIM_CMD.format(nom=nom, secours=secours), encoding="utf-8")
+            continue
         shim = dossier / nom
         shim.write_text(SHIM_PYTHON.format(nom=nom, secours=shlex.quote(secours)), encoding="utf-8")
         shim.chmod(0o755)
@@ -80,6 +100,28 @@ def environnement(shims: Path, base: Optional[Dict[str, str]] = None, lien: Opti
     env["PATH"] = os.pathsep.join(p for p in (str(shims), env.get("PATH", "")) if p)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
+
+
+def lire_en_fond(fd: int) -> "queue.Queue[bytes]":
+    """Lit le tube `fd` dans un fil (le même code sous POSIX et Windows, où `select` ne prend pas de tube) ;
+    les morceaux arrivent dans la file rendue, b"" à la fermeture, et le fil ferme `fd`."""
+    file: "queue.Queue[bytes]" = queue.Queue()
+
+    def boucle() -> None:
+        try:
+            while True:
+                try:
+                    morceau = os.read(fd, 65536)
+                except OSError:
+                    morceau = b""  # Windows : tube cassé à la mort du noyau
+                file.put(morceau)
+                if not morceau:
+                    return
+        finally:
+            os.close(fd)
+
+    threading.Thread(target=boucle, name="reponses-du-noyau", daemon=True).start()
+    return file
 
 
 class NoyauMort(Exception):
@@ -95,7 +137,11 @@ class Noyau:
         self.cwd = cwd
         self.processus: Optional[subprocess.Popen[bytes]] = None
         self.requetes: Optional[int] = None
-        self.reponses: Optional[int] = None
+        # Morceaux lus sur le tube des réponses par un fil dédié (b"" : tube fermé), un fil et une file par
+        # démarrage : rien d'un noyau arrêté ne se mêle au suivant.
+        self.reponses: Optional["queue.Queue[bytes]"] = None
+        # Tube d'interruption (Windows, `kernel/tubes.py`) ; None : SIGINT.
+        self.interruption: Optional[int] = None
         self.tampon = b""
         self.shims: Optional[tempfile.TemporaryDirectory[str]] = None
         # Posé par `fermer()` : plus aucun redémarrage, l'arrêt du serveur est en cours.
@@ -106,26 +152,36 @@ class Noyau:
         self.arreter()
         lecture_enfant, ecriture_parent = os.pipe()
         lecture_parent, ecriture_enfant = os.pipe()
+        enfant = [lecture_enfant, ecriture_enfant]
+        if tubes.WINDOWS:
+            lecture_interruption, self.interruption = os.pipe()
+            enfant.append(lecture_interruption)
         if self.shims is None:
             self.shims = tempfile.TemporaryDirectory(prefix="noyau-shims-")
         env = environnement(creer_shims(Path(self.shims.name)), lien=self.lien)
-        self.processus = subprocess.Popen(
-            [sys.executable, "-I", "-B", str(WORKER), str(lecture_enfant), str(ecriture_enfant), str(self.max_sortie)],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            pass_fds=(lecture_enfant, ecriture_enfant), cwd=self.cwd, start_new_session=True, env=env,
-        )
-        os.close(lecture_enfant)
-        os.close(ecriture_enfant)
-        self.requetes, self.reponses, self.tampon = ecriture_parent, lecture_parent, b""
+        arguments, options = tubes.pour_enfant(enfant)
+        try:
+            self.processus = subprocess.Popen(
+                [sys.executable, "-I", "-B", *tubes.OPTIONS_PYTHON, str(WORKER), arguments[0], arguments[1],
+                 str(self.max_sortie), *arguments[2:]],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                cwd=self.cwd, env=env, **options,
+            )
+        finally:
+            for fd in enfant:
+                os.close(fd)
+        self.requetes, self.reponses, self.tampon = ecriture_parent, lire_en_fond(lecture_parent), b""
         if not self.amorce:
             return ""
         return self.executer(self.amorce, 120).sortie
 
     def arreter(self) -> None:
-        for fd in (self.requetes, self.reponses):
+        # Le tube des réponses appartient à son fil, qui le ferme quand le noyau s'arrête.
+        for fd in (self.requetes, self.interruption):
             if fd is not None:
                 os.close(fd)
-        self.requetes = self.reponses = None
+        self.requetes = self.interruption = None
+        self.reponses = None
         if self.processus is not None and self.processus.poll() is None:
             self.processus.kill()
             self.processus.wait()
@@ -152,8 +208,7 @@ class Noyau:
             reponse = self.lire(float(timeout_s))
             if reponse is not None:
                 return self.borne(reponse)
-            assert self.processus is not None
-            os.kill(self.processus.pid, signal.SIGINT)
+            self.interrompre()
             reponse = self.lire(GRACE_S)
             if reponse is not None:
                 return Execution(tronque(f"{reponse['sortie']}[interrupted after {timeout_s} s]", self.max_sortie), False)
@@ -180,6 +235,17 @@ class Noyau:
         return Execution(tronque(str(reponse["sortie"]), self.max_sortie), ok,
                          fini if ok and isinstance(fini, str) else None, appels or None, images or None)
 
+    def interrompre(self) -> None:
+        """Arrête la cellule en cours, l'état gardé : SIGINT, ou un octet sur le tube d'interruption."""
+        assert self.processus is not None
+        if self.interruption is None:
+            os.kill(self.processus.pid, signal.SIGINT)
+            return
+        try:
+            os.write(self.interruption, tubes.INTERRUPTION)
+        except OSError:
+            pass  # noyau mort : la lecture qui suit le dira
+
     def envoyer(self, code: str) -> None:
         assert self.requetes is not None
         donnees = (json.dumps({"code": code}, ensure_ascii=False) + "\n").encode("utf-8")
@@ -197,10 +263,10 @@ class Noyau:
             reste = fin - time.monotonic()
             if reste <= 0:
                 return None
-            pret, _, _ = select.select([self.reponses], [], [], reste)
-            if not pret:
+            try:
+                morceau = self.reponses.get(timeout=reste)
+            except queue.Empty:
                 return None
-            morceau = os.read(self.reponses, 65536)
             if not morceau:
                 raise NoyauMort()
             self.tampon += morceau
