@@ -89,6 +89,13 @@ Claude Code ou Codex, qui fait toute l'installation (la landing propose un bouto
 
 Depuis un clone : `sh install.sh` (Claude Code) ou `sh install.sh codex`.
 
+Mises à jour : automatiques. Au premier lancement, le plugin active la mise à jour
+automatique de sa marketplace (comme « Enable auto-update » dans `/plugin`) ; un
+choix déjà fait n'est pas touché. Les nouvelles versions s'installent en arrière-plan
+et s'appliquent à la session suivante (ou tout de suite avec `/reload-plugins`).
+Depuis une version antérieure à 0.7.8 : une seule mise à jour à la main
+(`claude plugin update tokfit`), ensuite plus rien à faire.
+
 La clé est écrite dans `~/.config/tokfit/config.json` (mode 600) ; la variable
 `TOKFIT_CONFIG` désigne un autre fichier.
 
