@@ -30,8 +30,9 @@ bord chiffre l'économie, chaque chiffre étant marqué `measured` ou `estimated
   sous-agent) a son propre noyau : dossier courant et variables ne se
   partagent jamais. Rien à installer : tokfit télécharge son propre Python
   (python-build-standalone, empreinte vérifiée) dans `~/.cache/tokfit/python`,
-  à part de tes environnements (venv, conda), qu'il ne touche pas. Linux et
-  macOS ; sous Windows, il faut le `sh` de Git for Windows. Si l'outil manque,
+  à part de tes environnements (venv, conda), qu'il ne touche pas. Linux, macOS
+  et Windows ; sous Windows, rien à installer non plus : le plugin passe par cmd
+  et PowerShell, livrés avec Windows. Si l'outil manque,
   la raison s'affiche au-dessus de la saisie et `/tokfit` la détaille.
 - **Début du prompt identique d'un projet à l'autre** (levier `prefix`) : la
   partie du prompt système propre au projet (chemin de la mémoire) passe dans
