@@ -21,14 +21,18 @@ bord chiffre l'économie, chaque chiffre étant marqué `measured` ou `estimated
 - **Réflexion en anglais**, moins chère ; la réponse reste dans ta langue.
 - **Fin de tour vérifiée** : si le plan de la tâche a encore des étapes
   ouvertes, Claude reprend une fois.
-- **Un seul outil, `python`** (levier `kernel`) : Claude n'agit plus par ses
+- **Un seul outil, `agir`** (levier `kernel`) : Claude n'agit plus par ses
   outils natifs (Read, Edit, Bash…), retirés de sa liste et refusés s'il les
   rappelle, mais par du code Python dans un noyau persistant sur ta machine.
   Lire, écrire, chercher et lancer des commandes s'y font en une cellule, avec
-  des outils déjà chargés ; la fin du tour (`fini`) rend la réponse et refuse
+  des outils déjà chargés ; la fin du tour (`finish`) rend la réponse et refuse
   de conclure si les tests échouent. Chaque agent (le fil principal, chaque
   sous-agent) a son propre noyau : dossier courant et variables ne se
-  partagent jamais. Il faut `python3` (3.9 ou plus) ; sans lui, rien ne change.
+  partagent jamais. Rien à installer : tokfit télécharge son propre Python
+  (python-build-standalone, empreinte vérifiée) dans `~/.cache/tokfit/python`,
+  à part de tes environnements (venv, conda), qu'il ne touche pas. Linux et
+  macOS ; sous Windows, il faut le `sh` de Git for Windows. Si l'outil manque,
+  la raison s'affiche au-dessus de la saisie et `/tokfit` la détaille.
 - **Début du prompt identique d'un projet à l'autre** (levier `prefix`) : la
   partie du prompt système propre au projet (chemin de la mémoire) passe dans
   le premier message, et le reste est relu en cache au lieu d'être réécrit.
