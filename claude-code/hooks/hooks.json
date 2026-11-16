@@ -1,6 +1,6 @@
 {
   "modules": ["./register.ts"],
   "hooks": {
-    "Stop": [{ "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/completion.py\" claude", "timeout": 4 }] }]
+    "Stop": [{ "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/kernel/launch.sh\" hook \"${CLAUDE_PLUGIN_ROOT}/hooks/completion.py\" claude", "timeout": 4 }] }]
   }
 }

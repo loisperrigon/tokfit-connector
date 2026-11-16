@@ -42,6 +42,8 @@ import { host, report, status } from './host'
 import type { Line, RouteReport, Seen } from './host'
 import { animate, badge, refresh } from './badge'
 import { band } from './band'
+import { health, notice as healthNotice, refreshed } from './python'
+import type { Health } from './python'
 import type { Badge } from './badge'
 import { awake, back, cancel, rest, waited, warm } from './warm'
 import { REFUSED, twin } from './single'
@@ -231,6 +233,8 @@ type State = {
   // Ligne d'état (host.ts) ; bilan relu pour le bandeau du gain (badge.ts).
   line: Line
   badge: Badge
+  // Santé de l'outil `agir` (python.ts) : raison de son absence, montrée au-dessus de la saisie.
+  health: Health
   // Étapes du fil principal depuis le dernier message de la personne (tours de
   // notification compris) : dit au service qu'un long travail est en cours.
   workSteps: number
@@ -737,12 +741,12 @@ export const register: Register = (on, options) => {
     compacted: false, warm: warm(), audited: false, fanout: fanout(), trimmed: new Map(), compactedFrom: undefined,
     compactTry: undefined, lean: false, prefix: prefix(),
     rereads: rereads(), holdout: holdout(), off: new Set(), seen: {}, line: {}, badge: badge(), workSteps: 0, workEdits: 0, sessionModel: undefined,
-    cut: false, kernel: kernel(), content: plans(), timing: timing(), noticed: notice(),
+    cut: false, kernel: kernel(), content: plans(), timing: timing(), noticed: notice(), health: health(),
   }
 
   // Essai sans inscription : clé anonyme dès le démarrage, commande du tableau de bord et de
   // l'état des leviers (access.ts, state.ts).
-  access(on, options, { holdout: s.holdout, content: s.content, kernel: s.kernel })
+  access(on, options, { holdout: s.holdout, content: s.content, kernel: s.kernel, health: s.health })
 
   // Une autre copie du connecteur sur le point de se charger : refusée (single.ts).
   // En cas d'échec du jugement, elle se charge : jamais de blocage par le connecteur.
@@ -803,8 +807,18 @@ export const register: Register = (on, options) => {
       // Ligne de la conversation refusée : le fait part quand même.
     }
     try {
-      // Levier voulu mais noyau absent : rien n'a été retiré, le service le sait par l'étape.
-      if (s.to && plan?.kernel && !s.off.has('kernel') && !(await kernelReady($, s.kernel))) before.kernel_unavailable = true
+      // Levier voulu mais noyau absent : rien n'a été retiré, le service le sait par l'étape, avec la raison
+      // (python.ts : Python en cours d'installation, absent, serveur arrêté…).
+      if (s.to && plan?.kernel && !s.off.has('kernel') && !(await kernelReady($, s.kernel))) {
+        before.kernel_unavailable = true
+        // Dernier diagnostic (relu au démarrage, puis à intervalles) : rien n'est attendu sur le chemin de l'étape.
+        const why = s.health.diagnosis
+        void refreshed($, s.health, true)
+        if (why) {
+          before.kernel_reason = why.reason
+          if (why.detail) before.kernel_detail = why.detail
+        }
+      }
     } catch {
       // Liste des outils illisible : le fait manque au levier, rien d'autre.
     }
@@ -1138,9 +1152,10 @@ export const register: Register = (on, options) => {
     return result
   }).catch(($, e, next) => next(e))
 
-  // Bandeau du gain au-dessus de la saisie (band.ts).
+  // Bandeau du gain au-dessus de la saisie (band.ts), et la santé de l'outil principal quand il manque.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const tree = band($, e, s.badge, await $.clock.now())
+    void refreshed($, s.health, s.to !== null)
+    const tree = band($, e, s.badge, await $.clock.now(), healthNotice(s.health.diagnosis))
     return tree === null ? next(e) : tree
   }).catch(($, e, next) => next(e))
 
@@ -1148,6 +1163,7 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     cancel(s.warm)
     s.badge.stop?.()
+    s.health.stop?.()
     await flush($, s.queue)
     return next(e)
   }).catch(($, e, next) => next(e))

@@ -1,0 +1,25 @@
+# Python autonome de tokfit : CPython de python-build-standalone (astral-sh), version et publication
+# épinglées, archive `install_only_stripped` et sa somme SHA-256 par cible. Lu par kernel/launch (sh),
+# kernel/launch.cmd et kernel/launch.ps1 (Windows) et tests/test_python_launcher.py. Une ligne CLE=valeur.
+# Sommes relevées le 16/11/2026 : SHA256SUMS de la publication, empreinte de GitHub et archive téléchargée.
+VERSION=3.13.18
+RELEASE=20261110
+MINIMUM=3.9
+FLAVOR=install_only_stripped
+BASE_URL=https://github.com/astral-sh/python-build-standalone/releases/download
+SHA256_x86_64_unknown_linux_gnu=f2d2199eb25880e07863b391cf7124e7ffa1338b0d65600dfcec117c4223a7fb
+SIZE_x86_64_unknown_linux_gnu=35596130
+SHA256_aarch64_unknown_linux_gnu=55c00325f7c1fddf325dfc621aabdfbbac4dc54adda224af88ec411dc12db239
+SIZE_aarch64_unknown_linux_gnu=29683231
+SHA256_x86_64_unknown_linux_musl=a75bf409606303deed964d4769544f98b74e7b53d4efb44f4a95cb38e86ff403
+SIZE_x86_64_unknown_linux_musl=27932517
+SHA256_aarch64_unknown_linux_musl=5616ed1d426cb12cc135e5998b42bfd665cf2f9e3f3f9f6c77c73f0ae26f7d03
+SIZE_aarch64_unknown_linux_musl=28163240
+SHA256_aarch64_apple_darwin=7a2384641584ab9984221fcb0fc9265df465922af71be71410529e2a9c3f0540
+SIZE_aarch64_apple_darwin=25479437
+SHA256_x86_64_apple_darwin=d27d59a722db9f69926eb6d9564071247221f45a04da920ea7f3001c97e32f9b
+SIZE_x86_64_apple_darwin=25250783
+SHA256_x86_64_pc_windows_msvc=2e0fed09d48989f64c9305da9ff2d37a41c0d13ab2aa6283405b2b620dfbf805
+SIZE_x86_64_pc_windows_msvc=22367730
+SHA256_aarch64_pc_windows_msvc=0a8840071810ddb8565256cd406b466d4e9dc6dc523395a5477880dbc4f67eb3
+SIZE_aarch64_pc_windows_msvc=21381816

@@ -26,15 +26,17 @@ describe('démarrage et tableau de bord', () => {
     const result = await $.command.run({ command: NAME, args: '', origin: { kind: 'composer' }, presentation: PRESENTATION })
     expect(result.text).toBeUndefined()
     expect(w.shown[0]).toBe(`ui.log ${text}`)
-    expect(w.shown).toHaveLength(2)
+    expect(w.shown).toHaveLength(3)
     expect(w.shown[1]).toMatch(/^ui\.log Leviers de cette session :/)
+    expect(w.shown[2]).toMatch(/^ui\.log Outil principal :\n.*\n- service : joignable, clé acceptée$/s)
     expect(w.sent.find(s => s.url.endsWith('/v1/dashboard/link'))?.headers).toMatchObject({ authorization: `Bearer ${ANONYMOUS_KEY}` })
   })
 
-  test('commande, tableau de bord en erreur : aucun lien, l’état des leviers seul', async ($, on) => {
+  test('commande, tableau de bord en erreur : aucun lien, l’état des leviers et de l’outil principal', async ($, on) => {
     const w = world(on, { config: ADDRESS_ONLY, dashboard: () => ({ status: 503, body: { error: 'Tableau de bord indisponible.' } }) })
     await $.command.run({ command: NAME, args: '', origin: { kind: 'composer' }, presentation: PRESENTATION })
-    expect(w.shown).toHaveLength(1)
+    expect(w.shown).toHaveLength(2)
     expect(w.shown[0]).toMatch(/^ui\.log Leviers de cette session :/)
+    expect(w.shown[1]).toMatch(/- service : joignable, réponse 503$/)
   })
 })

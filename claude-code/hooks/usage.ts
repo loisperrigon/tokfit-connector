@@ -5,6 +5,7 @@
 import type { EngineInterface, PluginOptions, SessionRateLimit, TurnUsage } from 'claude-code'
 import { EFFORTS, USAGE_TIMEOUT_MS, link, post } from './service'
 import type { TimeFacts } from './timing'
+import type { Detail, Reason } from './python'
 
 // Lot maximal accepté par le service (USAGE_BATCH_MAX de service/usage.py).
 export const BATCH_MAX = 50
@@ -58,6 +59,9 @@ export type LeverFacts = {
   kernel_denied?: number
   // Levier actif mais outil `python` absent au départ de l'étape : rien n'a changé.
   kernel_unavailable?: true
+  // Pourquoi (python.ts : codes fixes, KERNEL_REASONS et KERNEL_DETAILS du service).
+  kernel_reason?: Reason
+  kernel_detail?: Detail
   // Client relié mais plan de session absent (plan.ts) : statut HTTP de la réponse de
   // `/v1/content`, 0 sans réponse. Les leviers du plan sont restés inactifs sur cette étape.
   plan_missing?: number

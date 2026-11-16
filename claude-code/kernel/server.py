@@ -19,6 +19,10 @@ compteurs, après chaque cellule et à l'arrêt.
 L'outil `compte` (`kernel/compte.py`) rend le bilan d'économie du client et lit
 ou change les limites de son compte (modèles et niveaux de réflexion bloqués) ; il est proposé dès qu'un
 lien vers le service existe, paquet reçu ou non.
+Lancé par `kernel/launch.sh`, qui choisit l'interpréteur (Python de tokfit, sinon celui du système) et
+répond lui-même au protocole tant que Python s'installe : le serveur reprend alors une session déjà
+ouverte (`TOKFIT_MCP_REPRISE`, version négociée) et traite d'abord la demande que le lanceur a lue
+(`TOKFIT_MCP_ATTENTE`) ; les deux variables sont retirées avant que le noyau ne démarre.
 Une cellule qui appelle `fini(resume)` et se termine sans exception ajoute au
 résultat un second bloc texte : le marqueur du paquet suivi du résumé (lu par
 le connecteur).
@@ -46,7 +50,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, MutableMapping, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -59,6 +63,9 @@ from kernel.pack import DELAI_RELANCE_S, DELAI_S, Lien, Paquet, cle_attendue, co
 NOM = "outils"
 # Nom neutre de l'outil d'action, affiché dans l'interface : il ne dit rien de la méthode (choix de Lois du 15/11/2026).
 OUTIL = "agir"
+# Le noyau (kernel.py) passe ses tubes par `pass_fds` et l'interrompt par SIGINT : POSIX seulement. Ailleurs
+# (Python de Windows), le serveur ne propose que `compte`.
+NOYAU_POSSIBLE = os.name == "posix"
 VERSION = "1.0.0"
 PROTOCOLES = ("2025-06-18", "2025-03-26", "2024-11-05")
 TIMEOUT_DEFAUT = 120
@@ -76,6 +83,10 @@ RELANCES_S = (2.0, 4.0, 8.0, 15.0, 30.0, 60.0)
 PAS_LIEN_S = 0.5
 BORNE_S = 1800.0
 LISTE_CHANGEE = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
+# Posées par `kernel/launch.sh` quand il passe la main après avoir répondu lui-même (Python en cours d'installation) :
+# version du protocole déjà négociée (session ouverte), et la demande qu'il a lue sans y répondre.
+REPRISE = "TOKFIT_MCP_REPRISE"
+ATTENTE = "TOKFIT_MCP_ATTENTE"
 # Argument que le connecteur ajoute à chaque appel de `python` : l'identifiant de la boucle.
 AGENT = "agent"
 # Dossier de la boucle qui appelle (worktree d'un sous-agent isolé), posé par le connecteur :
@@ -260,10 +271,11 @@ class Serveur:
         return self.vers
 
     def outils(self) -> List[Dict[str, Any]]:
-        """Les outils proposés maintenant : `agir` avec le paquet, `compte` avec le lien (paquet reçu ou non)."""
+        """Les outils proposés maintenant : `agir` avec le paquet sur un système POSIX (le noyau en dépend : tubes
+        hérités, `select`, SIGINT), `compte` avec le lien (paquet reçu ou non)."""
         with self.etat:
             description, amorce = self.description, self.amorce
-        outils = [schema_outil(description)] if amorce is not None else []
+        outils = [schema_outil(description)] if amorce is not None and NOYAU_POSSIBLE else []
         if self.lien() is not None:
             outils.append(schema_compte())
         return outils
@@ -427,11 +439,31 @@ def rattraper(serveur: Serveur, arret: threading.Event, annoncer: Callable[[], N
         log.warning("paquet du noyau toujours indisponible après %.0f s : outil non proposé pour cette session", borne_s)
 
 
+def reprise(environ: MutableMapping[str, str]) -> Tuple[bool, str]:
+    """Session déjà ouverte par le lanceur, et la demande qu'il a lue ; retirées de l'environnement."""
+    ouverte = bool(environ.pop(REPRISE, ""))
+    return ouverte, environ.pop(ATTENTE, "")
+
+
+def annoncer_apres_depart(serveur: Serveur, annoncer: Callable[[], None]) -> None:
+    """Après la première tentative d'obtenir lien et paquet, annonce la liste si elle n'est plus vide (les
+    changements suivants sont annoncés par `rattraper`)."""
+    serveur.premier.wait(DEMARRAGE_S)
+    if serveur.noms():
+        try:
+            annoncer()
+        except (OSError, ValueError):
+            pass  # stdout fermé : le client est parti
+
+
 def main() -> None:
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="noyau: %(message)s")
+    ouverte, attente = reprise(os.environ)
     env = dict(os.environ)
     ensure_auto_update(env)
     serveur = Serveur(env, None, lien(env))
+    if ouverte:
+        serveur.initialise.set()
     sortie = Sortie()
     # Lien et paquet sont cherchés dans un fil : `initialize` les attend au plus `DEMARRAGE_S`, les outils
     # arrivés plus tard sont annoncés (`notifications/tools/list_changed`).
@@ -442,24 +474,35 @@ def main() -> None:
                                   name="lien-et-paquet", daemon=True)
     rattrapage.start()
     appels: List[threading.Thread] = []
+
+    def traiter(ligne: str) -> Optional[Dict[str, Any]]:
+        nonlocal appels
+        if not ligne.strip():
+            return None
+        try:
+            message = json.loads(ligne)
+        except ValueError:
+            sortie.ecrire({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "unreadable JSON"}})
+            return None
+        if not isinstance(message, dict):
+            return None
+        if serveur.en_parallele(message):
+            appel = threading.Thread(target=lambda m=message: sortie.ecrire(serveur.repondre(m)),
+                                     name="appel-python", daemon=True)
+            appels = [en_cours for en_cours in appels if en_cours.is_alive()] + [appel]
+            appel.start()
+        else:
+            sortie.ecrire(serveur.repondre(message))
+        return message
+
     try:
+        lue = traiter(attente) if attente else None
+        if ouverte and (lue is None or lue.get("method") != "tools/list"):
+            # Le client a vu la liste vide du lanceur : il relira la liste dès que des outils sont là.
+            threading.Thread(target=annoncer_apres_depart, args=(serveur, lambda: serveur.annoncer(sortie)),
+                             name="annonce-reprise", daemon=True).start()
         for ligne in sys.stdin:
-            if not ligne.strip():
-                continue
-            try:
-                message = json.loads(ligne)
-            except ValueError:
-                sortie.ecrire({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "unreadable JSON"}})
-                continue
-            if not isinstance(message, dict):
-                continue
-            if serveur.en_parallele(message):
-                appel = threading.Thread(target=lambda m=message: sortie.ecrire(serveur.repondre(m)),
-                                         name="appel-python", daemon=True)
-                appels = [en_cours for en_cours in appels if en_cours.is_alive()] + [appel]
-                appel.start()
-            else:
-                sortie.ecrire(serveur.repondre(message))
+            traiter(ligne)
     finally:
         arret.set()
         rattrapage.join(ARRET_S)

@@ -1,6 +1,7 @@
 """Processus du noyau : exécute le code reçu dans un espace de noms qui dure.
 
-Lancé par `kernel.Noyau` : `python3 worker.py <fd requêtes> <fd réponses> <limite>`.
+Lancé par `kernel.Noyau` : `python -I -B worker.py <fd requêtes> <fd réponses> <limite>` ; les paquets
+des environnements du projet de même version s'ajoutent au démarrage (`kernel/projet.py`).
 Les requêtes arrivent sur un tube dédié (une ligne JSON `{"code": …}`), les
 réponses repartent sur un autre (`{"sortie": …, "ok": …, "fini": …}`) : stdin est fermé,
 donc `input()` lève EOFError au lieu de lire le protocole, et les `print` du
@@ -36,6 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kernel.output import COMPLET_MAX, DANS_SORTIE, Capture, resume_traceback, tronque  # noqa: E402
 from kernel.pack import prendre_lien  # noqa: E402
+from kernel.projet import ajouter as ajouter_projet  # noqa: E402
 
 CELLULE = "<cell-{}>"
 FINI = "__fini__"
@@ -139,4 +141,5 @@ def boucle(fd_requetes: int, fd_reponses: int, limite: int) -> None:
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal.default_int_handler)
     prendre_lien()
+    ajouter_projet(os.getcwd(), os.environ)
     boucle(int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]))

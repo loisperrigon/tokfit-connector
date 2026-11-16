@@ -5,9 +5,13 @@ réponse après un court délai de grâce, arrêt forcé et redémarrage. Noyau
 mort (crash, `os._exit`) : redémarrage, l'amorce rejouée, et le modèle est
 prévenu que son état est perdu.
 
-Environnement du noyau (et donc des commandes qu'il lance) : un dossier de
-shims en tête du PATH, où `python` lance le `.venv` du dossier courant s'il
-existe, sinon `python3`, et `PYTHONDONTWRITEBYTECODE=1`.
+Le noyau tourne sur l'interpréteur du serveur (le Python de tokfit, choisi par
+`kernel/launch.sh`), avec -I (ni PYTHONPATH, ni PYTHONHOME, ni site de l'utilisateur)
+et -B ; le code du projet s'importe quand même (`kernel/projet.py`, au démarrage
+du worker). Environnement des commandes qu'il lance : un dossier de shims en tête
+du PATH, où `python` et `python3` lancent le `.venv` du dossier courant s'il
+existe, sinon le premier `python3` du PATH, sinon le Python de tokfit (machine
+sans Python), et `PYTHONDONTWRITEBYTECODE=1`.
 Les options du plugin n'y passent pas ; le lien au service arrive par une
 variable que le noyau retire à son démarrage (`kernel/pack.py`).
 """
@@ -17,6 +21,7 @@ import json
 import logging
 import os
 import select
+import shlex
 import signal
 import subprocess
 import sys
@@ -33,11 +38,21 @@ GRACE_S = 2.0
 REDEMARRE = "[kernel restarted: state lost]"
 ARRETE = "[kernel stopped: the session is closing]"
 log = logging.getLogger("tokfit.kernel")
+# Shim de `python` et `python3` : les dossiers de shims (celui-ci, ceux d'un noyau qui lance ce noyau) sont
+# sautés, sinon deux shims se relanceraient l'un l'autre. PYTHONHOME ne vaut jamais pour le Python de tokfit.
 SHIM_PYTHON = """#!/bin/sh
-# python du noyau : le .venv du dossier courant s'il existe, sinon python3.
+# {nom} du noyau : le .venv du dossier courant s'il existe, sinon le premier python3 du PATH, sinon le Python de tokfit.
 if [ -x .venv/bin/python ]; then exec "$(pwd)/.venv/bin/python" "$@"; fi
-exec python3 "$@"
+set -f
+IFS=:
+for d in $PATH; do
+  case $d in ''|*/noyau-shims-*) continue ;; esac
+  if [ -x "$d/python3" ] && [ ! -d "$d/python3" ]; then exec "$d/python3" "$@"; fi
+done
+unset PYTHONHOME
+exec {secours} "$@"
 """
+SHIMS = ("python", "python3")
 
 
 class Execution(NamedTuple):
@@ -50,12 +65,13 @@ class Execution(NamedTuple):
     images: Optional[List[Dict[str, str]]] = None
 
 
-def creer_shims(dossier: Path) -> Path:
-    """Écrit les shims (`python`) dans `dossier` et le rend."""
+def creer_shims(dossier: Path, secours: str = sys.executable) -> Path:
+    """Écrit les shims (`python`, `python3`) dans `dossier` et le rend ; `secours` : le Python de tokfit."""
     dossier.mkdir(parents=True, exist_ok=True)
-    python = dossier / "python"
-    python.write_text(SHIM_PYTHON, encoding="utf-8")
-    python.chmod(0o755)
+    for nom in SHIMS:
+        shim = dossier / nom
+        shim.write_text(SHIM_PYTHON.format(nom=nom, secours=shlex.quote(secours)), encoding="utf-8")
+        shim.chmod(0o755)
     return dossier
 
 
@@ -94,7 +110,7 @@ class Noyau:
             self.shims = tempfile.TemporaryDirectory(prefix="noyau-shims-")
         env = environnement(creer_shims(Path(self.shims.name)), lien=self.lien)
         self.processus = subprocess.Popen(
-            [sys.executable, str(WORKER), str(lecture_enfant), str(ecriture_enfant), str(self.max_sortie)],
+            [sys.executable, "-I", "-B", str(WORKER), str(lecture_enfant), str(ecriture_enfant), str(self.max_sortie)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             pass_fds=(lecture_enfant, ecriture_enfant), cwd=self.cwd, start_new_session=True, env=env,
         )

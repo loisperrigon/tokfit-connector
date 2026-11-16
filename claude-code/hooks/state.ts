@@ -8,6 +8,8 @@ import { sessionPlan } from './plan'
 import type { Plans, SessionPlan } from './plan'
 import { kernelReady } from './kernel'
 import type { Kernel } from './kernel'
+import { notice as healthNotice } from './python'
+import type { Health } from './python'
 import { NAME } from './service'
 import type { Link } from './service'
 
@@ -39,7 +41,7 @@ export function planNotice($: EngineInterface, n: Notice, code: number): void {
     + `La session continue sans les leviers qui en dépendent ; nouvel essai automatique. /${NAME} montre leur état.`)
 }
 
-export type Sources = { holdout: Holdout; content: Plans; kernel: Kernel }
+export type Sources = { holdout: Holdout; content: Plans; kernel: Kernel; health: Health }
 
 // Une ligne par levier : actif, coupé (et par qui) ou inactif (et pourquoi).
 export async function leverReport($: EngineInterface, src: Sources, to: Link | null): Promise<string> {
@@ -52,7 +54,10 @@ export async function leverReport($: EngineInterface, src: Sources, to: Link | n
     else if (mixed.has(lever)) state = 'coupé (session témoin du service)'
     else if (part !== null && plan === null) state = `inactif (plan du service absent, ${codeText(src.content.missing ?? 0)})`
     else if (part !== null && plan?.[part] === undefined) state = 'inactif (absent du plan du service)'
-    else if (lever === 'kernel' && !(await kernelReady($, src.kernel))) state = 'inactif (outil agir non connecté)'
+    else if (lever === 'kernel' && !(await kernelReady($, src.kernel))) {
+      const why = healthNotice(src.health.diagnosis)
+      state = why ? `inactif (outil agir non connecté : ${why})` : 'inactif (outil agir non connecté)'
+    }
     lines.push(`- ${lever} : ${state}`)
   }
   return ['Leviers de cette session :', ...lines].join('\n')

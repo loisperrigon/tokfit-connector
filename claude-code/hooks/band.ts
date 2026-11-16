@@ -1,4 +1,5 @@
-// Dessin du bandeau du gain (badge.ts) dans le composant `AbovePrompt`.
+// Dessin du bandeau du gain (badge.ts) dans le composant `AbovePrompt`, et sous lui la ligne de santé de
+// l'outil principal quand il manque (python.ts : installation de Python en cours, impossible…).
 // Rien à montrer, ou une enquête du moteur dans la bande : la main passe.
 import type { EngineInterface, RenderElement, RenderInput } from 'claude-code'
 import { badgeText, bar, current, money } from './badge'
@@ -6,9 +7,21 @@ import type { Badge } from './badge'
 
 const GOLD = '#f5b301'
 
-export function band($: EngineInterface, e: RenderInput<'AbovePrompt'>, b: Badge, now: number): RenderElement | null {
+export function band($: EngineInterface, e: RenderInput<'AbovePrompt'>, b: Badge, now: number, note: string | null = null): RenderElement | null {
+  if (e.props.hasSurvey || (!b.gain && !note)) return null
+  const { Box, Text } = $.ui.resolve(e)
+  const line = note
+    ? h(Box, { key: 'tokfit-health', flexDirection: 'row', paddingX: 1 },
+      h(Text, { color: 'warning' }, h(Text, { color: 'claude', weight: 'bold' }, 'tokfit'), ` : ${note}`)) as RenderElement
+    : null
+  const gain = gainRow($, e, b, now)
+  if (!line || !gain) return line ?? gain
+  return h(Box, { key: 'tokfit-bands', flexDirection: 'column' }, gain, line) as RenderElement
+}
+
+function gainRow($: EngineInterface, e: RenderInput<'AbovePrompt'>, b: Badge, now: number): RenderElement | null {
   const g = b.gain
-  if (!g || e.props.hasSurvey) return null
+  if (!g) return null
   const { Box, Text } = $.ui.resolve(e)
   const shown = current(b)
   const moving = b.frame !== undefined
