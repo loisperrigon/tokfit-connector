@@ -138,8 +138,13 @@ def boucle(fd_requetes: int, fd_reponses: int, limite: int) -> None:
             reponse = executer(code, numero, espace, limite)
         except KeyboardInterrupt:
             reponse = {"sortie": "KeyboardInterrupt\n", "ok": False}
-        reponses.write(json.dumps(reponse, ensure_ascii=False) + "\n")
-        reponses.flush()
+        # Cellule finie : une interruption encore renvoyée par le pilote ne coupe pas la réponse en cours d'écriture.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            reponses.write(json.dumps(reponse, ensure_ascii=False) + "\n")
+            reponses.flush()
+        finally:
+            signal.signal(signal.SIGINT, signal.default_int_handler)
 
 
 if __name__ == "__main__":

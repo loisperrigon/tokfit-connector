@@ -1,7 +1,9 @@
 """Pilote du noyau : démarre `worker.py`, lui passe le code, borne le temps et la sortie.
 
-Délai dépassé : SIGINT (la cellule s'arrête, l'état reste), puis, sans
-réponse après un court délai de grâce, arrêt forcé et redémarrage. Noyau
+Délai dépassé : SIGINT (la cellule s'arrête, l'état reste), renvoyé pendant
+un délai de grâce ; une cellule qui l'ignore encore (appel en C, interruption
+attrapée) continue, l'état gardé : l'appel suivant l'attend jusqu'à son propre
+délai, en renvoyant SIGINT, et ne redémarre le noyau qu'ensuite. Noyau
 mort (crash, `os._exit`) : redémarrage, l'amorce rejouée, et le modèle est
 prévenu que son état est perdu.
 
@@ -36,8 +38,15 @@ from kernel.output import MAX_SORTIE, tronque
 from kernel.pack import Lien, environnement_du_noyau
 
 WORKER = Path(__file__).with_name("worker.py")
-GRACE_S = 2.0
+TIMEOUT_MAX = 600  # délai le plus long d'une cellule (`timeout_s` de l'outil)
+GRACE_S = 5.0
+INTERRUPTION_TOUS_S = 0.5
 REDEMARRE = "[kernel restarted: state lost]"
+TOURNE_ENCORE = ("[cell still running after {} s: it ignores the interrupt (long call in C, or KeyboardInterrupt "
+                 "caught); state kept, the next call waits for it up to its timeout_s, then restarts the kernel]")
+FINIE_ENFIN = "[previous cell stopped; its output:]\n"
+TOUJOURS_SOURD = "[previous cell still running after {} more s]"
+PLUS_LONG = "\n[longer work: run it again with timeout_s={} ({} at most)]"
 ARRETE = "[kernel stopped: the session is closing]"
 log = logging.getLogger("tokfit.kernel")
 # Shim de `python` et `python3` : les dossiers de shims (celui-ci, ceux d'un noyau qui lance ce noyau) sont
@@ -124,6 +133,11 @@ def lire_en_fond(fd: int) -> "queue.Queue[bytes]":
     return file
 
 
+def plus_long(timeout_s: int) -> str:
+    """Après un délai dépassé : le délai à redemander (quatre fois plus, au plus TIMEOUT_MAX), rien au maximum."""
+    return PLUS_LONG.format(min(timeout_s * 4, TIMEOUT_MAX), TIMEOUT_MAX) if timeout_s < TIMEOUT_MAX else ""
+
+
 class NoyauMort(Exception):
     """Le processus du noyau a disparu pendant une cellule."""
 
@@ -146,6 +160,8 @@ class Noyau:
         self.shims: Optional[tempfile.TemporaryDirectory[str]] = None
         # Posé par `fermer()` : plus aucun redémarrage, l'arrêt du serveur est en cours.
         self.ferme = False
+        # Une cellule a dépassé son délai sans céder à l'interruption et tourne encore.
+        self.en_cours = False
 
     def demarrer(self) -> str:
         """Lance le noyau et rejoue l'amorce ; rend ce que l'amorce a écrit."""
@@ -171,6 +187,7 @@ class Noyau:
             for fd in enfant:
                 os.close(fd)
         self.requetes, self.reponses, self.tampon = ecriture_parent, lire_en_fond(lecture_parent), b""
+        self.en_cours = False
         if not self.amorce:
             return ""
         return self.executer(self.amorce, 120).sortie
@@ -203,17 +220,29 @@ class Noyau:
             return Execution(ARRETE, False)
         if self.processus is None:
             self.demarrer()
+        prefixe = ""
         try:
+            if self.en_cours:
+                precedente = self.interrompre_jusqu_a(float(timeout_s))
+                if precedente is None:
+                    log.warning("cellule toujours sourde à SIGINT après %s s de plus : redémarrage", timeout_s)
+                    sortie = f"{TOUJOURS_SOURD.format(timeout_s)}\n{REDEMARRE}"
+                    return Execution(tronque(f"{sortie}\n{self.demarrer()}".rstrip("\n"), self.max_sortie), False)
+                self.en_cours = False
+                prefixe = FINIE_ENFIN + str(precedente["sortie"]).rstrip("\n") + "\n\n"
             self.envoyer(code)
             reponse = self.lire(float(timeout_s))
             if reponse is not None:
-                return self.borne(reponse)
-            self.interrompre()
-            reponse = self.lire(GRACE_S)
+                execution = self.borne(reponse)
+                return execution._replace(sortie=tronque(prefixe + execution.sortie, self.max_sortie))
+            reponse = self.interrompre_jusqu_a(GRACE_S)
             if reponse is not None:
-                return Execution(tronque(f"{reponse['sortie']}[interrupted after {timeout_s} s]", self.max_sortie), False)
-            log.warning("noyau sourd à SIGINT après %s s : redémarrage", timeout_s)
-            sortie = f"[interrupted after {timeout_s} s]\n{REDEMARRE}"
+                return Execution(tronque(f"{prefixe}{reponse['sortie']}[interrupted after {timeout_s} s]"
+                                         f"{plus_long(timeout_s)}", self.max_sortie), False)
+            log.warning("cellule sourde à SIGINT après %s s : elle continue, état gardé", timeout_s)
+            self.en_cours = True
+            return Execution(tronque(prefixe + TOURNE_ENCORE.format(timeout_s) + plus_long(timeout_s), self.max_sortie),
+                             False)
         except NoyauMort:
             if self.ferme:
                 return Execution(ARRETE, False)
@@ -234,6 +263,16 @@ class Noyau:
                   and isinstance(image.get("mimeType"), str)] if isinstance(brutes, list) else []
         return Execution(tronque(str(reponse["sortie"]), self.max_sortie), ok,
                          fini if ok and isinstance(fini, str) else None, appels or None, images or None)
+
+    def interrompre_jusqu_a(self, delai_s: float) -> Optional[dict[str, object]]:
+        """Interrompt la cellule en cours, l'interruption renvoyée toutes les `INTERRUPTION_TOUS_S` ; sa
+        réponse, None si elle tourne encore au bout de `delai_s`."""
+        fin = time.monotonic() + delai_s
+        while True:
+            self.interrompre()
+            reponse = self.lire(min(INTERRUPTION_TOUS_S, max(fin - time.monotonic(), 0.0)))
+            if reponse is not None or time.monotonic() >= fin:
+                return reponse
 
     def interrompre(self) -> None:
         """Arrête la cellule en cours, l'état gardé : SIGINT, ou un octet sur le tube d'interruption."""

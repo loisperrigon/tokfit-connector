@@ -57,7 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kernel.autoupdate import ensure_auto_update  # noqa: E402
 from kernel.compte import compte, schema as schema_compte  # noqa: E402
-from kernel.kernel import Noyau  # noqa: E402
+from kernel.kernel import TIMEOUT_MAX, Noyau  # noqa: E402
 from kernel.output import MAX_SORTIE  # noqa: E402
 from kernel.pack import DELAI_RELANCE_S, DELAI_S, Lien, Paquet, cle_attendue, compter, lien, recevoir  # noqa: E402
 
@@ -70,7 +70,6 @@ NOYAU_POSSIBLE = os.name in ("posix", "nt")
 VERSION = "1.0.0"
 PROTOCOLES = ("2025-06-18", "2025-03-26", "2024-11-05")
 TIMEOUT_DEFAUT = 120
-TIMEOUT_MAX = 600
 ARRET_S = 2.0
 # Attente maximale de la réponse à `initialize` pour le lien et le paquet (cas ordinaire : service joignable,
 # clé déjà là, quelques centaines de ms, et le premier `tools/list` rend déjà l'outil) ; au-delà, le serveur répond
