@@ -9,7 +9,7 @@ tokfit choisit à chaque message le modèle et le niveau de réflexion de mon ou
    - Codex : télécharge le script dans un fichier, lis-le, puis lance-le. Il écrit la clé dans ~/.config/tokfit/config.json (lisible par moi seul) et installe la commande « tokfit ».
      curl -fsSL https://raw.githubusercontent.com/loisperrigon/tokfit-connector/main/install.sh -o /tmp/tokfit-install.sh
      TOKFIT_KEY={{CLE}} sh /tmp/tokfit-install.sh codex
-3. Vérifie que le service répond : curl -fsS https://tokfit.dodoia.re/health doit afficher "status":"ok".
+3. Vérifie que le service répond : curl -fsS https://api.tokfit.fr/health doit afficher "status":"ok".
 4. Dis-moi en deux phrases ce qui est fait et ce que je dois faire ensuite :
    - Claude Code : fermer cette session et en ouvrir une nouvelle ; tokfit agit dès le prochain message. Précise-moi que le sélecteur de modèle de l'application continue d'afficher mon modèle habituel : la ligne « tokfit » (par exemple « → Haiku · Élevé ») montre le modèle réellement utilisé pour chaque message.
    - Codex : lancer « tokfit codex "ma demande" » à la place de « codex "ma demande" ».
