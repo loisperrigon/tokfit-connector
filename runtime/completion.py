@@ -23,7 +23,7 @@ MAX_TRANSCRIPT = 4 * 1024 * 1024
 # Adresse officielle du service, posée par connector/publish.py dans la copie publique, comme DEFAULT_URL
 # de hooks/service.ts ; vide dans la copie de travail (rien ne part sans adresse configurée). Sans elle, une
 # clé configurée sans adresse (option api_key seule, ou config.json sans `url`) laissait le noyau sans outil.
-DEFAULT_URL = "https://tokfit.dodoia.re"
+DEFAULT_URL = "https://api.tokfit.fr"
 LOG = logging.getLogger("tokfit.completion")
 
 

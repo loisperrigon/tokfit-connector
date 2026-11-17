@@ -91,23 +91,80 @@ async function ultrathinkOff($: EngineInterface): Promise<boolean> {
   return ON.test((await $.env.get('CLAUDE_CODE_DISABLE_ULTRATHINK'))?.trim() ?? '')
 }
 
-// Effort que l'utilisateur a réglé lui-même : `CLAUDE_CODE_EFFORT_LEVEL` (qui passe devant les
-// réglages ; `auto` ou `unset` : aucun), sinon `effortLevel` des réglages. Le défaut du modèle n'en
-// est pas un. Un niveau fixé par `--effort` ou `/effort` en cours de session n'est lisible nulle
-// part dans l'API des hooks : il n'est pas un plancher, le moteur le garde seul tant que rien
-// ne l'a réécrit.
-async function effortFloor($: EngineInterface): Promise<Effort | undefined> {
-  const named = (await $.env.get('CLAUDE_CODE_EFFORT_LEVEL'))?.trim().toLowerCase() ?? ''
-  let level: unknown = named
-  if (named === '') {
-    try {
-      level = await $.settings.read({ key: 'effortLevel' })
-    } catch {
-      // Réglages illisibles : pas de plancher.
-      return undefined
-    }
+// Couches des réglages, de la plus forte à la plus faible (`$.settings.read({ source })`).
+const LAYERS = ['policy', 'flag', 'local', 'project', 'user'] as const
+type Layer = { source: (typeof LAYERS)[number]; settings: Record<string, unknown> }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function effortOf(level: unknown): Effort | undefined {
+  const name = typeof level === 'string' ? level.trim().toLowerCase() : ''
+  return EFFORTS.includes(name) ? (name as Effort) : undefined
+}
+
+// Nom de modèle comparé aux clés de `modelSettings` : sans casse ni suffixe de fenêtre (`[1m]`).
+function modelKey(model: string): string {
+  return model.trim().toLowerCase().replace(/\[\d+m\]$/, '')
+}
+
+// Effort de l'entrée de `model` dans les `modelSettings` d'une couche ; une clé écrite exactement
+// passe devant une clé qui n'en diffère que par la casse ou le suffixe de fenêtre.
+function modelEffort(settings: Record<string, unknown>, model: string): Effort | undefined {
+  const table = settings.modelSettings
+  if (!isRecord(table)) return undefined
+  const wanted = modelKey(model)
+  let found: Effort | undefined
+  for (const [key, entry] of Object.entries(table)) {
+    if (modelKey(key) !== wanted || !isRecord(entry)) continue
+    const level = effortOf(entry.effortLevel)
+    if (level === undefined) continue
+    if (key === wanted) return level
+    found ??= level
   }
-  return typeof level === 'string' && EFFORTS.includes(level.toLowerCase()) ? (level.toLowerCase() as Effort) : undefined
+  return found
+}
+
+// Réglages couche par couche ; un moteur qui refuse la lecture par couche rend sa fusion, lue
+// comme la couche de l'utilisateur.
+async function layers($: EngineInterface): Promise<Layer[]> {
+  let read: unknown[]
+  try {
+    read = await Promise.all(LAYERS.map(source => $.settings.read({ source })))
+  } catch {
+    const merged: unknown = await $.settings.read()
+    return isRecord(merged) ? [{ source: 'user', settings: merged }] : []
+  }
+  return LAYERS.flatMap((source, i) => {
+    const settings = read[i]
+    return isRecord(settings) ? [{ source, settings }] : []
+  })
+}
+
+// Effort que l'utilisateur a réglé lui-même pour `model`, le modèle de la session, résolu comme le
+// moteur : `CLAUDE_CODE_EFFORT_LEVEL` (qui passe devant les réglages ; `auto` ou `unset` : aucun),
+// sinon, de la couche la plus forte à la plus faible, l'entrée de ce modèle dans `modelSettings`
+// (où `/effort` range son choix) puis l'`effortLevel` d'une couche autre que celle de
+// l'utilisateur ; enfin l'`effortLevel` de l'utilisateur. Le défaut du modèle n'en est pas un.
+// `--effort` n'est lisible nulle part dans l'API des hooks : il n'est pas un plancher, le moteur
+// le garde seul tant que rien ne l'a réécrit.
+async function effortFloor($: EngineInterface, model: string | undefined): Promise<Effort | undefined> {
+  const named = (await $.env.get('CLAUDE_CODE_EFFORT_LEVEL'))?.trim().toLowerCase() ?? ''
+  if (named !== '') return effortOf(named)
+  let found: Layer[]
+  try {
+    found = await layers($)
+  } catch {
+    // Réglages illisibles : pas de plancher.
+    return undefined
+  }
+  for (const { source, settings } of found) {
+    const level = (model === undefined ? undefined : modelEffort(settings, model))
+      ?? (source === 'user' ? undefined : effortOf(settings.effortLevel))
+    if (level !== undefined) return level
+  }
+  return effortOf(found.find(layer => layer.source === 'user')?.settings.effortLevel)
 }
 
 function forced(text: string, ultrathinkWorks: boolean): Tags {
@@ -551,7 +608,7 @@ async function routed($: EngineInterface, s: State, to: Link, facts: AgentFacts,
   const tags = s.tags
   const own: Plan = { ...(tags.model ? { model: tags.model } : {}), ...(tags.effort ? { effort: tags.effort } : {}) }
   const usage = await $.session.usage()
-  const floor = await effortFloor($)
+  const floor = await effortFloor($, s.sessionModel)
   const answer = await ask($, to, {
     kind: 'subagent',
     ...facts,
@@ -605,7 +662,7 @@ async function decide($: EngineInterface, s: State, e: TurnStepInput): Promise<C
   const keepEffort = tags.effort !== undefined || tags.ultrathink
   const own: Choice = { ...(tags.model ? { model: tags.model } : {}), ...(tags.effort ? { effort: tags.effort } : {}) }
   const effort = typeof e.effort === 'string' ? e.effort : undefined
-  const floor = await effortFloor($)
+  const floor = await effortFloor($, e.model)
   const usage = await $.session.usage()
   // Choix entier de l'utilisateur : le voyant de l'application hôte ne bouge pas.
   const shown = !(keepModel && keepEffort)

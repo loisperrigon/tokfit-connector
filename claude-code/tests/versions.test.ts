@@ -11,7 +11,7 @@ const PROPS = { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows:
 const PRESENTATION = { isFullscreen: false, columns: 120 }
 const LAUNCH = `${HOME}/.cache/tokfit/python/launch.json`
 // Racine du plugin dans le moteur d'essai : ce dossier même.
-const MANIFEST = `${new URL('..', (import.meta as unknown as { url: string }).url).pathname.replace(/\/$/, '')}/.claude-plugin/plugin.json`
+const MANIFEST = `${decodeURIComponent(new URL('..', (import.meta as unknown as { url: string }).url).pathname).replace(/\/$/, '')}/.claude-plugin/plugin.json`
 
 function base(options: Options = {}): Options {
   return {

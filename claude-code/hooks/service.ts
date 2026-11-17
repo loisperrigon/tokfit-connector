@@ -36,7 +36,7 @@ export const EFFORTS: readonly string[] = ['low', 'medium', 'high', 'xhigh', 'ma
 // Adresse officielle du service : posée dans la copie publique par
 // connector/publish.py. Vide dans le dépôt de travail : l'adresse vient alors
 // de `service_url` ou du fichier.
-export const DEFAULT_URL = 'https://tokfit.dodoia.re'
+export const DEFAULT_URL = 'https://api.tokfit.fr'
 
 export type Link = { url: string; key: string }
 

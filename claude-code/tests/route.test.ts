@@ -3,7 +3,7 @@
 // clé refusée, sans rien montrer.
 import { describe, expect, test } from 'claude-code/testing'
 import { KEY, SESSION, URL, aborted, assistant, complete, config, messages, step, submit, unconfigured, user, world } from './support'
-import type { Reply } from './support'
+import type { Options, Reply } from './support'
 import { DEFAULT_URL } from '../hooks/service'
 
 const OTHER = 'ek_' + 'z'.repeat(43)
@@ -371,6 +371,33 @@ describe('faits envoyés', () => {
       expect(w.routes()[0]?.body).not.toHaveProperty('min_effort')
       expect(w.steps[0]).toMatchObject({ effort: 'low' })
     })
+
+    // Résolu comme le moteur : l'entrée du modèle de la session dans `modelSettings` (où `/effort`
+    // range son choix) d'abord, couche par couche ; l'`effortLevel` d'une couche plus forte que
+    // celle de l'utilisateur (choix de réflexion d'une application) passe devant son entrée.
+    const resolved: [string, Partial<Options>, string | undefined][] = [
+      ['entrée du modèle de la session : passe devant effortLevel', { settings: { effortLevel: 'xhigh',
+        modelSettings: { 'claude-opus-5-5': { effortLevel: 'high' }, 'claude-sonnet-5-5': { effortLevel: 'low' } } } }, 'high'],
+      ['clé sans suffixe de fenêtre ni casse', { settings: { modelSettings: { 'Claude-Opus-5-5': { effortLevel: 'Medium' } } } }, 'medium'],
+      ['entrée d’un autre modèle seulement : effortLevel', { settings: { effortLevel: 'medium',
+        modelSettings: { 'claude-sonnet-5-5': { effortLevel: 'low' } } } }, 'medium'],
+      ['entrée illisible : effortLevel', { settings: { effortLevel: 'medium', modelSettings: { 'claude-opus-5-5': { effortLevel: 42 } } } }, 'medium'],
+      ['effortLevel d’une couche plus forte : passe devant l’entrée de l’utilisateur', { layers: {
+        user: { modelSettings: { 'claude-opus-5-5': { effortLevel: 'medium' } } }, flag: { effortLevel: 'xhigh' } } }, 'xhigh'],
+      ['entrée d’une couche plus forte : passe devant', { layers: {
+        user: { modelSettings: { 'claude-opus-5-5': { effortLevel: 'high' } } }, local: { modelSettings: { 'claude-opus-5-5': { effortLevel: 'low' } } } } }, 'low'],
+      ['effortLevel de l’utilisateur après les entrées des autres couches', { layers: {
+        user: { effortLevel: 'xhigh' }, project: { modelSettings: { 'claude-opus-5-5': { effortLevel: 'medium' } } } } }, 'medium'],
+      ['moteur sans lecture par couche : sa fusion', { noLayers: true, settings: { effortLevel: 'xhigh',
+        modelSettings: { 'claude-opus-5-5': { effortLevel: 'high' } } } }, 'high'],
+    ]
+    for (const [name, options, floor] of resolved) {
+      test(name, async ($, on) => {
+        const w = world(on, { messages: [user('x')], ...options, route: () => ({ status: 200, body: { model: null, effort: null } }) })
+        await step($, 0, { model: 'claude-opus-5-5[1m]', effort: 'low' })
+        expect(w.routes()[0]?.body).toMatchObject({ min_effort: floor })
+      })
+    }
 
     const unusable: Record<string, string>[] = [{}, { CLAUDE_CODE_EFFORT_LEVEL: 'énorme' }]
     for (const env of unusable) {

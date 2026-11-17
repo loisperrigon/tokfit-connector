@@ -36,7 +36,7 @@ NAME=tokfit
 # Adresse officielle du service et dépôt public du connecteur : vides dans le
 # dépôt de travail, posés par connector/publish.py dans la copie publique.
 # Vides, TOKFIT_URL est obligatoire et le script se lance depuis un clone.
-DEFAULT_URL="https://tokfit.dodoia.re"
+DEFAULT_URL="https://api.tokfit.fr"
 REPO="loisperrigon/tokfit-connector"
 RUNTIME="__init__.py relay.py output.py process.py cursor.py completion.py"
 

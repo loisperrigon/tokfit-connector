@@ -93,6 +93,17 @@ describe('nouveau sous-agent : le service décide, quoi qu’il soit fixé', () 
     expect(w.steps[1]).toMatchObject({ effort: 'high' })
   })
 
+  test('plancher du sous-agent : l’entrée du modèle de la session dans modelSettings', async ($, on) => {
+    const w = world(on, {
+      messages: [user('x')],
+      settings: { effortLevel: 'xhigh', modelSettings: { 'claude-opus-5-5': { effortLevel: 'high' }, 'claude-sonnet-5-5': { effortLevel: 'low' } } },
+      route: () => ({ status: 200, body: { model: null, effort: null } }),
+    })
+    await step($, 0, { turnId: 't1' })
+    await agent($, 'cherche', { type: 'Explore' })
+    expect(w.routes().map(r => r.body.min_effort)).toEqual(['high', 'high'])
+  })
+
   test('première étape avant que le lancement ne rende l’identifiant : décision retrouvée par la consigne', async ($, on) => {
     const w = world(on, {
       messages: [user('x')], route: () => ROUTED, agentMessages: { 'agent-1': [user('compte les lignes')] },

@@ -83,8 +83,13 @@ export type Options = {
   counted?: boolean
   // Version du moteur (`$.session.version()`) ; par défaut une version sans compaction à l'inactivité.
   version?: string
-  // Réglages fusionnés (`$.settings.read()`) ; par défaut aucun.
+  // Réglages fusionnés (`$.settings.read()`), et couche de l'utilisateur quand `layers` ne la donne
+  // pas ; par défaut aucun.
   settings?: Record<string, unknown>
+  // Réglages d'une couche (`$.settings.read({ source })`) ; une couche absente est vide.
+  layers?: Partial<Record<'user' | 'project' | 'local' | 'flag' | 'policy', Record<string, unknown>>>
+  // Moteur qui refuse la lecture par couche : seule la fusion se lit.
+  noLayers?: boolean
   // Noms des outils que le modèle peut appeler (`$.tool.list()`) ; un nom `mcp__…` est celui d'un
   // serveur MCP. Par défaut, aucun : le noyau du connecteur n'est pas connecté.
   tools?: string[]
@@ -207,15 +212,24 @@ export function world(on: On, options: Options = {}): World {
     const version = options.version ?? '2.1.280'
     return { value: { version, base: version, builtAt: '2026-10-01T00:00:00Z' } }
   })
-  on('settings.read', async () => ({ value: options.settings ?? {} }))
+  on('settings.read', async ($, e) => {
+    if (e.source === undefined) return { value: options.settings ?? {} }
+    if (options.noLayers) throw new Error('settings.read: source inconnue')
+    return { value: options.layers?.[e.source] ?? (e.source === 'user' ? options.settings : undefined) ?? {} }
+  })
   on('session.root', async () => ({ value: '/projet' }))
   // Dossier de la boucle qui appelle (`$.session.cwd()` lu dans un hook) ; par défaut, la racine.
   on('session.cwd', async () => ({ value: options.cwd ?? '/projet' }))
   on('session.messages', async ($, e) => ({ value: e.agentId ? options.agentMessages?.[e.agentId] ?? [] : options.messages ?? [] }))
   const listed = [...options.listed ?? []]
+  const agentInfo = (agent: NonNullable<Options['roster']>[number]) => ({
+    description: 'sous-tâche', type: 'general-purpose', kind: 'local_agent' as const,
+    taskStatus: agent.status === 'pending' || agent.status === 'completed' ? agent.status : 'running' as const,
+    label: 'sous-tâche', startTime: 0, cwd: options.cwd ?? '/projet', tokenCount: 0, tokenSamples: [], hasRow: true,
+    ...agent,
+  })
   on('agent.list', async () => ({
-    value: options.roster?.map(agent => ({ description: 'sous-tâche', type: 'general-purpose', ...agent }))
-      ?? listed.map(id => ({ id, description: 'sous-tâche', type: 'general-purpose', status: 'running' as const })),
+    value: (options.roster ?? listed.map(id => ({ id, status: 'running' as const }))).map(agentInfo),
   }))
   on('session.usage', async ($, e) => ({
     value: {
