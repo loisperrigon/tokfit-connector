@@ -26,7 +26,13 @@ bord chiffre l'économie, chaque chiffre étant marqué `measured` ou `estimated
   rappelle, mais par du code Python dans un noyau persistant sur ta machine.
   Lire, écrire, chercher et lancer des commandes s'y font en une cellule, avec
   des outils déjà chargés ; la fin du tour (`finish`) rend la réponse et refuse
-  de conclure si les tests échouent. Chaque agent (le fil principal, chaque
+  de conclure si les tests échouent, ou une fois si la seule preuve donnée est de
+  pure forme (un fichier présent, une compilation). Une commande longue (build,
+  serveur, entraînement) tourne en arrière-plan (`job`) et se relit sans bloquer
+  Claude ; elle s'arrête avec la session. Un module Python manquant s'installe à
+  la demande (`need`), sans toucher un Python géré par ton système. La réponse
+  reste dans ta langue, même avec un ticket ou une trace en anglais collés dans
+  ta demande. Chaque agent (le fil principal, chaque
   sous-agent) a son propre noyau : dossier courant et variables ne se
   partagent jamais. Rien à installer : tokfit télécharge son propre Python
   (python-build-standalone, empreinte vérifiée) dans `~/.cache/tokfit/python`,
