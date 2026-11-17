@@ -94,11 +94,13 @@ export type Options = {
   // serveur MCP. Par défaut, aucun : le noyau du connecteur n'est pas connecté.
   tools?: string[]
   // Outil `python` du noyau : texte rendu pour le code reçu (arguments entiers à côté), ou ses blocs de texte dans l'ordre
-  // (le serveur ajoute un second bloc `[noyau:fini]` quand `fini()` est appelé) ; `error` : la
+  // (le serveur ajoute un second bloc `[finished]` quand `fini()` est appelé) ; `error` : la
   // cellule a échoué. Par défaut, aucun outil ne tourne.
   // Dossier de la session (`$.session.cwd()`) ; par défaut /projet.
   cwd?: string
   python?: (code: string, args: Readonly<Record<string, unknown>>) => string | readonly string[] | { error: readonly string[] }
+  // Rappels joints au résultat de `python` (ceux d'un crochet PostToolUse : `context` du moteur).
+  pythonContext?: readonly string[]
   // ToolSearch du moteur : noms trouvés pour la requête ; par défaut, il ne tourne pas.
   search?: (query: string) => string[]
   // Hooks Stop des réglages sous le connecteur (`hooks/completion.py`, ceux de l'utilisateur) : leur
@@ -275,7 +277,8 @@ export function world(on: On, options: Options = {}): World {
       const blocks = typeof out === 'string' ? [out] : 'error' in out ? out.error : out
       const text = blocks.join('\n')
       const result = { content: blocks.map(block => ({ type: 'text', text: block })), isError: failed }
-      return failed ? { isError: true as const, result, text } : { ref: 1, result, text }
+      const context = options.pythonContext ? { context: options.pythonContext } : {}
+      return failed ? { isError: true as const, result, text, ...context } : { ref: 1, result, text, ...context }
     }
     if (options.search && e.tool === 'ToolSearch') {
       const matches = options.search(e.query)

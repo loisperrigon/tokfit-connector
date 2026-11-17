@@ -19,6 +19,9 @@ export const OUTPUT = {
   readers: ['tail', 'grep'], important: ['error', 'fail'],
 }
 
+// Marqueur de fin du plan, celui du service (service/content.py) depuis le 17/11/2026.
+export const FINISHED = '[finished]\n'
+
 export const TEST_PLAN = {
   thinking: { section: THINKING_TEXT },
   persistence: { section: PERSISTENCE_TEXT },
@@ -28,7 +31,7 @@ export const TEST_PLAN = {
   warm: { prompt: PING_TEXT },
   kernel: {
     section: KERNEL_TEXT, replaces: 'tools', behind: [...DENIED, ...DEFERRED], denied: DENIED, refusal: REFUSAL,
-    attachment: { type: 'auto_mode', contains: 'Bash tool' }, finished: '[noyau:fini]\n', listings: [LISTING],
+    attachment: { type: 'auto_mode', contains: 'Bash tool' }, finished: FINISHED, listings: [LISTING],
   },
 }
 

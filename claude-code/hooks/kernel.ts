@@ -83,7 +83,8 @@ export function isBehind(plan: KernelPlan, name: string): boolean {
 // le premier passage actif de la session invalide le cache du prompt, une seule fois.
 // `summary` : résumé passé à `fini()` dans le fil principal, en attente de l'étape
 // suivante du tour (qui le rend sans interroger le modèle) ; `stopped` : le tour du
-// fil principal vient de s'arrêter ainsi, son hook Stop ne doit pas le relancer.
+// fil principal vient de s'arrêter ainsi, son hook Stop ne doit pas le relancer ;
+// `languageAsked` : un `finish` du tour a déjà été refusé pour sa langue (language.ts).
 export type Kernel = {
   session: string | undefined
   ready: boolean
@@ -92,10 +93,12 @@ export type Kernel = {
   pass: 'never' | 'now' | 'done'
   summary: string | undefined
   stopped: boolean
+  languageAsked: boolean
 }
 
 export function kernel(): Kernel {
-  return { session: undefined, ready: false, calls: new Map(), denied: new Map(), pass: 'never', summary: undefined, stopped: false }
+  return { session: undefined, ready: false, calls: new Map(), denied: new Map(), pass: 'never', summary: undefined, stopped: false,
+    languageAsked: false }
 }
 
 // Vrai quand l'outil `python` de ce plugin est parmi ceux que le modèle peut appeler.
@@ -191,20 +194,44 @@ export function shortened(plan: KernelPlan, type: string, text: string): string 
   return lines.join('\n')
 }
 
-// Résumé passé à `fini()`, lu dans les blocs du résultat de `python` (le résultat
-// MCP `{ content, isError }`, ou ses blocs seuls) : un bloc texte autre que le
-// premier (la sortie de la cellule, où le code peut imprimer n'importe quoi) qui
-// commence par le marqueur du plan. Absent sinon.
-export function summaryOf(result: unknown, marker: string): string | undefined {
-  const blocks = Array.isArray(result) ? result
+// Marqueur de fin d'avant le 17/11/2026 (français, relu par le modèle dans l'historique) : encore lu le temps
+// d'une version, pour un noyau dont le paquet a été reçu avant le changement et un plan reçu après.
+export const LEGACY_FINISHED = '[noyau:fini]\n'
+
+function blocksOf(result: unknown): readonly unknown[] {
+  return Array.isArray(result) ? result
     : typeof result === 'object' && result !== null && Array.isArray((result as { content?: unknown }).content)
       ? (result as { content: unknown[] }).content : []
-  for (const block of blocks.slice(1)) {
+}
+
+// Bloc du résumé passé à `finish()` dans les blocs du résultat de `python` (le résultat
+// MCP `{ content, isError }`, ou ses blocs seuls) : un bloc texte autre que le premier
+// (la sortie de la cellule, où le code peut imprimer n'importe quoi) qui commence par
+// le marqueur du plan ou l'ancien. Absent sinon.
+function finishedBlock(blocks: readonly unknown[], marker: string): { index: number; summary: string } | undefined {
+  for (let index = 1; index < blocks.length; index++) {
+    const block = blocks[index]
     if (typeof block !== 'object' || block === null) continue
     const { type, text } = block as { type?: unknown; text?: unknown }
-    if (type === 'text' && typeof text === 'string' && text.startsWith(marker)) return text.slice(marker.length)
+    if (type !== 'text' || typeof text !== 'string') continue
+    const found = [marker, LEGACY_FINISHED].find(known => text.startsWith(known))
+    if (found !== undefined) return { index, summary: text.slice(found.length) }
   }
   return undefined
+}
+
+export function summaryOf(result: unknown, marker: string): string | undefined {
+  return finishedBlock(blocksOf(result), marker)?.summary
+}
+
+// Le résultat de `python` dont le bloc du résumé laisse place au refus : le modèle lit
+// pourquoi `finish` n'a pas fini le tour et le rappelle. Inchangé sans ce bloc.
+export function refusedFinish(result: unknown, marker: string, refusal: string): unknown {
+  const blocks = blocksOf(result)
+  const found = finishedBlock(blocks, marker)
+  if (found === undefined) return result
+  const content = blocks.map((block, index) => (index === found.index ? { type: 'text', text: refusal } : block))
+  return Array.isArray(result) ? content : { ...(result as object), content }
 }
 
 // Réponse d'une étape rendue sans requête au modèle : le résumé, montré et

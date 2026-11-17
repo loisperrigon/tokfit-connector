@@ -52,7 +52,8 @@ import { carried, prefix, taken } from './prefix'
 import type { Prefix } from './prefix'
 import type { KernelPlan, Plans, PrefixPlan, SessionPlan } from './plan'
 import type { Warm } from './warm'
-import { called, composed, contradicts, finalAnswer, isAccountTool, isBehind, isDenied, isKernelTool, KERNEL_TOOL, kernel, kernelFacts, kernelReady, passed, placed, refused, searchable, shortened, summaryOf, unlisted, withAgent } from './kernel'
+import { called, composed, contradicts, finalAnswer, isAccountTool, isBehind, isDenied, isKernelTool, kernel, kernelFacts, kernelReady, passed, placed, refused, refusedFinish, searchable, shortened, summaryOf, unlisted, withAgent } from './kernel'
+import { languageRefusal } from './language'
 import type { Kernel } from './kernel'
 import { access } from './access'
 import { notice, planNotice } from './state'
@@ -351,6 +352,18 @@ const NOTIFICATION = /^\s*<task-notification>/
 
 function spoken(m: SessionMessage): boolean {
   return m.role === 'user' && m.text !== '' && !m.toolResults?.length && !NOTIFICATION.test(m.text)
+}
+
+// Refus de langue d'un résumé de `finish` (language.ts) : comparé au dernier message de la personne, langue admise
+// si elle figure dans un de ses messages précédents. Rien après une commande slash : le texte développé est celui de
+// la commande ou de la skill, pas celui de la personne (dont le CLAUDE.md peut demander une autre langue).
+const SLASH_COMMAND = /<command-name>/
+
+async function otherLanguage($: EngineInterface, summary: string): Promise<string | undefined> {
+  const said = (await $.session.messages()).filter(spoken)
+  const request = said.at(-1)
+  if (request === undefined || said.slice(-2).some(m => SLASH_COMMAND.test(m.text))) return undefined
+  return languageRefusal(request.text, summary, said.slice(0, -1).map(m => m.text))
 }
 
 async function notified($: EngineInterface): Promise<boolean> {
@@ -818,6 +831,7 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined) {
       const summary = s.kernel.summary
       s.kernel.summary = undefined
+      if (e.index === 0) s.kernel.languageAsked = false
       s.kernel.stopped = summary !== undefined && e.index > 0
       if (summary !== undefined && e.index > 0) {
         const answer = finalAnswer(e.turnId, e.index, summary)
@@ -933,18 +947,6 @@ export const register: Register = (on, options) => {
 
   // Ce que l'agent principal a fixé, et la source de chaque type d'agent : faits
   // pour le journal du service, jamais une raison de ne pas router.
-  // Un noyau par agent (kernel.ts, `withAgent`) : l'agent qui appelle `python` part avec
-  // l'appel, levier coupé ou non (l'outil reste le même, son noyau ne se partage jamais).
-  on('tool.call', { tool: KERNEL_TOOL }, async ($, e, next) => {
-    let cwd: string | undefined
-    try {
-      cwd = await $.session.cwd()
-    } catch {
-      // Dossier illisible : le noyau de l'agent démarre dans celui du serveur.
-    }
-    return next(withAgent(e, cwd))
-  })
-
   on('tool.call', { tool: 'Agent' }, ($, e, next) => {
     s.requested.set(e.tool_use_id, { ...(e.model ? { model: e.model } : {}), ...(e.effort ? { effort: e.effort } : {}) })
     return next(e)
@@ -995,9 +997,24 @@ export const register: Register = (on, options) => {
 
   // Fichiers lus et modifiés par le fil principal (rereads.ts) : chemins en mémoire seulement.
   // Appels de `python` comptés (kernel.ts), jamais lus : leur code ne quitte pas la machine.
-  // Seul le bloc du résumé de `fini()` est lu, dans le fil principal, pour arrêter le tour.
+  // Seul le bloc du résumé de `fini()` est lu, dans le fil principal, pour arrêter le tour ;
+  // un résumé clairement dans une autre langue que la demande est refusé une fois par tour
+  // (language.ts), comparé sur place au dernier message de la personne, qui ne part nulle part.
   // Pas de `.catch` qui rappellerait `next` : l'outil tournerait deux fois.
+  // Un noyau par agent (kernel.ts, `withAgent`) : l'agent qui appelle `python` part avec
+  // l'appel, levier coupé ou non (l'outil reste le même, son noyau ne se partage jamais).
+  // Test dans le corps plutôt qu'un filtre `{ tool: KERNEL_TOOL }` : typé `mcp__${string}__${string}`, ce
+  // filtre fait calculer au compilateur le résultat de chaque outil possible (tsc au-delà de 8 Go).
   on('tool.call', async ($, e, next) => {
+    if (isKernelTool(e.tool)) {
+      let cwd: string | undefined
+      try {
+        cwd = await $.session.cwd()
+      } catch {
+        // Dossier illisible : le noyau de l'agent démarre dans celui du serveur.
+      }
+      e = withAgent(e, cwd)
+    }
     let start: number | undefined
     try {
       start = await $.clock.now()
@@ -1005,6 +1022,7 @@ export const register: Register = (on, options) => {
       // Horloge illisible : la durée de l'outil manque, rien d'autre.
     }
     const result = await next(e)
+    let answer: typeof result = result
     try {
       if (start !== undefined) ran(s.timing, e.agentId ?? 'main', start, await $.clock.now())
     } catch {
@@ -1015,7 +1033,18 @@ export const register: Register = (on, options) => {
       if (plan) {
         called(s.kernel, e.agentId)
         const summary = e.agentId === undefined && !result.isError ? summaryOf(result.result, plan.finished) : undefined
-        if (summary !== undefined) s.kernel.summary = summary
+        const refusal = summary !== undefined && !s.kernel.languageAsked ? await otherLanguage($, summary) : undefined
+        if (refusal !== undefined) {
+          s.kernel.languageAsked = true
+          // Seul `context` (rappels d'un crochet PostToolUse) passe avec la réponse refaite : `ref` ferait reprendre
+          // tel quel le message d'origine (refus perdu), `text` et `isReadOnly` sont ceux du moteur.
+          answer = {
+            result: refusedFinish(result.result, plan.finished, refusal) as typeof result.result,
+            ...(result.context === undefined ? {} : { context: result.context }),
+          }
+        } else if (summary !== undefined) {
+          s.kernel.summary = summary
+        }
       }
     } catch {
       // Configuration ou liste des outils illisible : l'appel n'est pas compté, rien d'autre.
@@ -1029,7 +1058,7 @@ export const register: Register = (on, options) => {
     } catch {
       // Appel illisible : rien à suivre.
     }
-    return result
+    return answer
   })
 
   // Levier kernel (kernel.ts) : `python` et `compte` devant, outils intégrés d'action et outils

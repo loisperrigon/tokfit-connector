@@ -4,8 +4,9 @@ Lancé par `kernel.Noyau` : `python -I -B worker.py <requêtes> <réponses> <lim
 passés par `kernel/tubes.py` : descripteurs sous POSIX, poignées sous Windows, qui ajoute le tube des
 interruptions) ; les paquets
 des environnements du projet de même version s'ajoutent au démarrage (`kernel/projet.py`).
-Les requêtes arrivent sur un tube dédié (une ligne JSON `{"code": …}`), les
-réponses repartent sur un autre (`{"sortie": …, "ok": …, "fini": …}`) : stdin est fermé,
+Les requêtes arrivent sur un tube dédié (une ligne JSON `{"code": …, "timeout_s": …}`), les
+réponses repartent sur un autre (`{"sortie": …, "ok": …, "fini": …, "groupes": …}`, précédées des
+prolongations de la cellule, `kernel/cellule.py`) : stdin est fermé,
 donc `input()` lève EOFError au lieu de lire le protocole, et les `print` du
 code vont dans une capture bornée, jamais dans le tube des réponses.
 
@@ -38,7 +39,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from kernel import tubes  # noqa: E402
+from kernel import cellule, tubes  # noqa: E402
 from kernel.output import COMPLET_MAX, DANS_SORTIE, Capture, resume_traceback, tronque  # noqa: E402
 from kernel.pack import prendre_lien  # noqa: E402
 from kernel.projet import ajouter as ajouter_projet  # noqa: E402
@@ -52,6 +53,7 @@ IMAGES = "__images__"
 IMAGES_OK = "__images_ok__"
 TYPES_IMAGE = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 IMAGES_MAX = 4
+LIGNE_MAX = 200  # longueur gardée de la ligne interrompue citée après KeyboardInterrupt
 
 
 def compiler(code: str, nom: str) -> Tuple[Optional[CodeType], Optional[CodeType]]:
@@ -88,9 +90,9 @@ def executer(code: str, numero: int, espace: Dict[str, Any], limite: int) -> Dic
                 espace["_"] = valeur
                 # Une chaîne (lire, carte…) se lit telle quelle : son repr échapperait chaque saut de ligne.
                 capture.write((valeur if isinstance(valeur, str) else repr(valeur)) + "\n")
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as interruption:
         ok = False
-        capture.write("KeyboardInterrupt\n")
+        capture.write(f"KeyboardInterrupt{ligne_interrompue(interruption.__traceback__, nom, code)}\n")
     except BaseException as erreur:  # noqa: BLE001 - l'erreur du code est le résultat rendu au modèle
         ok = False
         if isinstance(erreur, SystemExit) and erreur.code in (None, 0):
@@ -111,6 +113,21 @@ def executer(code: str, numero: int, espace: Dict[str, Any], limite: int) -> Dic
             "images": images_valides(espace.pop(IMAGES, None))}
 
 
+def ligne_interrompue(tb: Optional[TracebackType], nom: str, code: str) -> str:
+    """« at line N: source » : la ligne de la cellule qui tournait quand l'interruption est arrivée (la plus
+    profonde : un appel d'outil compte pour la ligne qui l'appelle) ; rien si elle n'était pas dans la cellule."""
+    numero = None
+    while tb is not None:
+        if tb.tb_frame.f_code.co_filename == nom:
+            numero = tb.tb_lineno
+        tb = tb.tb_next
+    lignes = code.splitlines()
+    if numero is None or not 0 < numero <= len(lignes):
+        return ""
+    source = lignes[numero - 1].strip()
+    return f" at line {numero}: {source[:LIGNE_MAX] + '…' if len(source) > LIGNE_MAX else source}"
+
+
 def images_valides(images: object) -> List[Dict[str, str]]:
     """Les images bien formées posées pendant la cellule (IMAGES_MAX au plus), le reste ignoré."""
     if not isinstance(images, list):
@@ -124,6 +141,7 @@ def boucle(fd_requetes: int, fd_reponses: int, limite: int) -> None:
     espace: Dict[str, Any] = {"__name__": "__main__", "__builtins__": __builtins__, IMAGES_OK: True}
     requetes = os.fdopen(fd_requetes, "r", encoding="utf-8")
     reponses = os.fdopen(fd_reponses, "w", encoding="utf-8", newline="\n")
+    cellule.ouvrir(reponses)
     numero = 0
     while True:
         try:
@@ -134,13 +152,17 @@ def boucle(fd_requetes: int, fd_reponses: int, limite: int) -> None:
             return
         numero += 1
         try:
-            code = str(json.loads(ligne)["code"])
-            reponse = executer(code, numero, espace, limite)
+            requete = json.loads(ligne)
+            cellule.commencer(float(requete["timeout_s"]))
+            reponse = executer(str(requete["code"]), numero, espace, limite)
         except KeyboardInterrupt:
             reponse = {"sortie": "KeyboardInterrupt\n", "ok": False}
+        finally:
+            cellule.finir()
         # Cellule finie : une interruption encore renvoyée par le pilote ne coupe pas la réponse en cours d'écriture.
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
+            reponse[cellule.GROUPES] = cellule.groupes()
             reponses.write(json.dumps(reponse, ensure_ascii=False) + "\n")
             reponses.flush()
         finally:

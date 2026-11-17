@@ -5,8 +5,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { PromptComposeSection, ToolDescribeResult } from 'claude-code'
-import { KERNEL_TOOL } from '../hooks/kernel'
-import { DEFERRED, DENIED, EXECUTION_SECTION, KERNEL_SECTION, LISTING, REFUSAL, TEST_PLAN, THINKING_SECTION } from './plan'
+import { KERNEL_TOOL, LEGACY_FINISHED } from '../hooks/kernel'
+import { DEFERRED, DENIED, EXECUTION_SECTION, FINISHED, KERNEL_SECTION, LISTING, REFUSAL, TEST_PLAN, THINKING_SECTION } from './plan'
 import { DEFAULT_URL, end, step, streamed, unconfigured, user, world } from './support'
 import type { Options, Reply, World } from './support'
 import { PLAN_RETRY_MS, PLAN_TIMEOUT_MS } from '../hooks/plan'
@@ -74,8 +74,8 @@ const SKILLS_SHORT = [
 ].join('\n')
 
 // Résultat de `python` quand la cellule a appelé `fini(resume)` : le serveur ajoute ce second bloc.
-function finished(summary: string, output = 'ok'): readonly string[] {
-  return [output, `[noyau:fini]\n${summary}`]
+function finished(summary: string, output = 'ok', marker = FINISHED): readonly string[] {
+  return [output, `${marker}${summary}`]
 }
 
 async function sentSteps($: Engine, w: World): Promise<Sent[]> {
@@ -324,13 +324,13 @@ describe('arrêt par fini', () => {
   })
 
   test('résumé multiligne gardé tel quel', async ($, on) => {
-    world(on, connected({ python: () => finished('Ligne 1\nLigne 2\n[noyau:fini]\ndans le texte') }))
+    world(on, connected({ python: () => finished('Ligne 1\nLigne 2\n[finished]\ndans le texte') }))
     await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: 'finish(r)' })
-    expect((await step($, 1)).answer).toBe('Ligne 1\nLigne 2\n[noyau:fini]\ndans le texte')
+    expect((await step($, 1)).answer).toBe('Ligne 1\nLigne 2\n[finished]\ndans le texte')
   })
 
   test('le marqueur imprimé par le code dans la sortie (premier bloc) n’arrête rien', async ($, on) => {
-    const w = world(on, connected({ python: () => ['avant\n[noyau:fini]\nfaux'] }))
+    const w = world(on, connected({ python: () => ['avant\n[finished]\nfaux'] }))
     await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: 'print(x)' })
     await step($, 1)
     expect(w.steps.map(s => s.index)).toEqual([1])
@@ -377,6 +377,99 @@ describe('arrêt par fini', () => {
     await step($, 0, { turnId: 't2' })
     expect(await $.classic.Stop({ stop_hook_active: false })).toEqual({ block: 'Termine les étapes du plan.' })
   })
+  test('ancien marqueur (`[noyau:fini]`, avant le 17/11/2026) encore lu : le tour s’arrête aussi', async ($, on) => {
+    const w = world(on, connected({ python: () => finished('Corrigé.', 'ok', LEGACY_FINISHED) }))
+    await step($, 0, { turnId: 't1' })
+    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: "finish('Corrigé.')" })
+    expect((await step($, 1, { turnId: 't1' })).answer).toBe('Corrigé.')
+    expect(w.steps.map(s => s.index)).toEqual([0])
+  })
+})
+
+describe('langue de la réponse de fini', () => {
+  const ENGLISH = 'Fix the failing parser test so that the build passes again, and tell me what was wrong with it.'
+  const FRENCH = 'Le test du parseur échouait parce que la fin de ligne n’était pas gérée ; c’est corrigé et les tests passent.'
+  const ANSWER = 'The parser test failed because the line ending was not handled; it is fixed and all the tests pass now.'
+
+  function replies(...summaries: string[]): () => readonly string[] {
+    let call = 0
+    return () => finished(summaries[Math.min(call++, summaries.length - 1)] ?? '')
+  }
+
+  function text(result: unknown, index: number): unknown {
+    return (result as { result?: { content?: Array<{ text?: unknown }> } }).result?.content?.[index]?.text
+  }
+
+  test('demande en anglais, réponse en français : refusée une fois, le modèle lit pourquoi et rappelle finish', async ($, on) => {
+    const w = world(on, connected({ messages: [user(ENGLISH)], python: replies(FRENCH, ANSWER) }))
+    await step($, 0, { turnId: 't1' })
+    const refused = await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: 'finish(r)' })
+    expect(text(refused, 0)).toBe('ok')
+    expect(text(refused, 1)).toBe('[finish refused once: the reply looks written in French but the request is in English. ' +
+      'If the person writes in French or asked for it, call finish again unchanged; otherwise call finish again with ' +
+      'the reply in English.]')
+    // Pas d'arrêt : l'étape suivante part au modèle.
+    await step($, 1, { turnId: 't1' })
+    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-2', code: 'finish(r)' })
+    expect((await step($, 2, { turnId: 't1' })).answer).toBe(ANSWER)
+    expect(w.steps.map(s => s.index)).toEqual([0, 1])
+  })
+
+  test('réponse refaite par le refus : les rappels du moteur gardés, ni ref ni text', async ($, on) => {
+    world(on, connected({ messages: [user(ENGLISH)], python: replies(FRENCH, ANSWER), pythonContext: ['rappel'] }))
+    await step($, 0, { turnId: 't1' })
+    const refused = await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: 'finish(r)' })
+    expect(text(refused, 1)).toContain('[finish refused once')
+    expect((refused as { context?: unknown }).context).toEqual(['rappel'])
+    expect('ref' in (refused as object)).toBe(false)
+    expect('text' in (refused as object)).toBe(false)
+  })
+
+  test('un seul refus par tour : le second finish, même dans la même langue, finit ; le tour suivant revérifie', async ($, on) => {
+    const w = world(on, connected({ messages: [user(ENGLISH)], python: () => finished(FRENCH) }))
+    await step($, 0, { turnId: 't1' })
+    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: 'finish(r)' })
+    await step($, 1, { turnId: 't1' })
+    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-2', code: 'finish(r)' })
+    expect((await step($, 2, { turnId: 't1' })).answer).toBe(FRENCH)
+    await step($, 0, { turnId: 't2' })
+    const again = await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-3', code: 'finish(r)' })
+    expect(text(again, 1)).toContain('[finish refused once')
+    expect(w.steps.map(s => [s.turnId, s.index])).toEqual([['t1', 0], ['t1', 1], ['t2', 0]])
+  })
+
+  const TICKET = 'The parser crashes when the input file ends without a newline. To reproduce it, create a file with ' +
+    'two lines and no final newline, then run the parser on it. Both lines should be parsed, but the last one is ' +
+    'dropped and the exit code is 1.'
+  const TRACE = 'Traceback (most recent call last):\n  File "app.py", line 3, in <module>\n    main()\n' +
+    'ValueError: invalid literal for int() with base 10: the value is not a number and it was not checked'
+  const UNTOUCHED: Array<[string, string | string[], string]> = [
+    ['même langue', ENGLISH, ANSWER],
+    ['demande et réponse en français', 'Corrige le test du parseur qui échoue, puis dis-moi ce qui n’allait pas dans la fin de ligne.', FRENCH],
+    ['réponse mêlée', ENGLISH, 'Corrigé : the `--verbose` flag now works, c’est bon.'],
+    ['réponse en code', ENGLISH, '```python\ndef parse(ligne):\n    return ligne.rstrip("\\r\\n")\n```'],
+    ['réponse très courte', ENGLISH, 'Fait.'],
+    ['demande mêlée (consigne en français, texte anglais)',
+      'Voici le README, traduis-le en français pour le site :\nThis project is a tool that helps you do things with the files and it is fast.', FRENCH],
+    ['demande très courte', 'fix it', FRENCH],
+    // Relecture de 0.7.16 : un francophone qui colle un ticket ou une trace en anglais n'est pas refusé.
+    ['ticket anglais collé sous une question en français', `Peux-tu regarder ?\n\n${TICKET}`, FRENCH],
+    ['trace anglaise collée sous « corrige ça »', `corrige ça\n${TRACE}`, FRENCH],
+    ['citation anglaise', `> ${TICKET}\n\nTu en penses quoi ?`, FRENCH],
+    ['la personne a écrit en français plus tôt', ['On reprend le parseur aujourd’hui, il plante encore.', TICKET], FRENCH],
+    ['commande slash développée en anglais (CLAUDE.md en français)',
+      ['<command-message>review is running…</command-message>\n<command-name>/review</command-name>', ENGLISH], FRENCH],
+  ]
+  for (const [name, request, reply] of UNTOUCHED) {
+    test(`jamais de faux refus : ${name}`, async ($, on) => {
+      const said = (Array.isArray(request) ? request : [request]).map(user)
+      const w = world(on, connected({ messages: said, python: () => finished(reply) }))
+      await step($, 0, { turnId: 't1' })
+      await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: 'finish(r)' })
+      expect((await step($, 1, { turnId: 't1' })).answer).toBe(reply)
+      expect(w.steps.map(s => s.index)).toEqual([0])
+    })
+  }
 })
 
 describe('levier sans effet', () => {

@@ -57,6 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kernel.autoupdate import ensure_auto_update  # noqa: E402
 from kernel.compte import compte, schema as schema_compte  # noqa: E402
+from kernel.cellule import PROLONGEE_MAX  # noqa: E402
 from kernel.kernel import TIMEOUT_MAX, Noyau  # noqa: E402
 from kernel.output import MAX_SORTIE  # noqa: E402
 from kernel.pack import DELAI_RELANCE_S, DELAI_S, Lien, Paquet, cle_attendue, compter, lien, recevoir  # noqa: E402
@@ -70,6 +71,10 @@ NOYAU_POSSIBLE = os.name in ("posix", "nt")
 VERSION = "1.0.0"
 PROTOCOLES = ("2025-06-18", "2025-03-26", "2024-11-05")
 TIMEOUT_DEFAUT = 120
+# Le délai d'une cellule recule pour un outil qui attend plus longtemps (`kernel/cellule.py`) : dit au modèle, qui
+# demandait sinon 600 s par précaution, ou voyait sa commande coupée avant son propre délai.
+TIMEOUT_TEXTE = (f"Timeout in seconds ({TIMEOUT_DEFAUT} by default, {TIMEOUT_MAX} at most); a helper that waits longer "
+                 f"(its own timeout_s: shell, verify…) extends it, up to {PROLONGEE_MAX} s in all.")
 ARRET_S = 2.0
 # Attente maximale de la réponse à `initialize` pour le lien et le paquet (cas ordinaire : service joignable,
 # clé déjà là, quelques centaines de ms, et le premier `tools/list` rend déjà l'outil) ; au-delà, le serveur répond
@@ -166,7 +171,7 @@ def schema_outil(description: str) -> Dict[str, Any]:
             "type": "object",
             "properties": {
                 "code": {"type": "string", "description": "Python code; the value of the last expression is shown."},
-                "timeout_s": {"type": "integer", "description": "Timeout in seconds (120 by default, 600 at most).",
+                "timeout_s": {"type": "integer", "description": TIMEOUT_TEXTE,
                               "minimum": 1, "maximum": TIMEOUT_MAX},
                 AGENT: {"type": "string", "description": "Filled in by the connector: do not set it."},
                 DOSSIER: {"type": "string", "description": "Filled in by the connector: do not set it."},

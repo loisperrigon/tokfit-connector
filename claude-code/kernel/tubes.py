@@ -5,7 +5,8 @@ session et SIGINT l'interrompt. Windows (ni `pass_fds` ni SIGINT vers un autre p
 console ne reçoit pas CTRL_BREAK_EVENT) : les poignées des tubes passent par `handle_list` (seules héritées,
 leurs numéros en arguments), le noyau tourne dans son propre groupe, sans fenêtre, et un troisième tube porte
 les interruptions : chaque octet reçu lève SIGINT dans le noyau (`signal.raise_signal`, qui réveille aussi un
-`time.sleep`), comme le SIGINT de POSIX. Le reste du noyau ne connaît pas la différence.
+`time.sleep`), comme le SIGINT de POSIX. Travaux de fond (`kernel/cellule.py`) : leur groupe de processus sous
+POSIX, leur arbre sous Windows. Le reste du noyau ne connaît pas la différence.
 """
 from __future__ import annotations
 
@@ -62,3 +63,30 @@ def ecouter_interruptions(fd: int) -> None:
             pass  # serveur parti
 
     threading.Thread(target=boucle, name="interruptions", daemon=True).start()
+
+
+def groupe_vivant(processus: "subprocess.Popen[bytes]") -> bool:
+    """Le travail de fond lancé par `processus` (dans son propre groupe) a-t-il encore un processus vivant ?
+    POSIX : son groupe, qui survit au shell parti en laissant un serveur ; Windows : le processus lui-même."""
+    fini = processus.poll() is not None  # attend aussi le shell fini, sinon zombie compté vivant
+    if WINDOWS:
+        return not fini
+    try:
+        os.killpg(processus.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def tuer_groupe(pid: int) -> None:
+    """Arrête un travail de fond et tout ce qu'il a lancé : son groupe de processus (Windows : son arbre)."""
+    if WINDOWS:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass

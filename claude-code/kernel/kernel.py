@@ -7,6 +7,11 @@ délai, en renvoyant SIGINT, et ne redémarre le noyau qu'ensuite. Noyau
 mort (crash, `os._exit`) : redémarrage, l'amorce rejouée, et le modèle est
 prévenu que son état est perdu.
 
+Un outil qui attend plus longtemps que le reste du délai (`shell(timeout_s=…)`…) le fait reculer, jusqu'à
+PROLONGEE_MAX depuis le début de la cellule (`kernel/cellule.py`) ; le délai affiché est alors celui atteint.
+Une cellule coupée propose l'arrière-plan (`job`). Les travaux de fond s'arrêtent avec le noyau : redémarrage,
+fin de session.
+
 Le noyau tourne sur l'interpréteur du serveur (le Python de tokfit, choisi par
 `kernel/launch.sh`), avec -I (ni PYTHONPATH, ni PYTHONHOME, ni site de l'utilisateur)
 et -B ; le code du projet s'importe quand même (`kernel/projet.py`, au démarrage
@@ -34,6 +39,7 @@ from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional
 
 from kernel import tubes
+from kernel.cellule import GROUPES, PROLONGE, PROLONGEE_MAX
 from kernel.output import MAX_SORTIE, tronque
 from kernel.pack import Lien, environnement_du_noyau
 
@@ -46,7 +52,9 @@ TOURNE_ENCORE = ("[cell still running after {} s: it ignores the interrupt (long
                  "caught); state kept, the next call waits for it up to its timeout_s, then restarts the kernel]")
 FINIE_ENFIN = "[previous cell stopped; its output:]\n"
 TOUJOURS_SOURD = "[previous cell still running after {} more s]"
-PLUS_LONG = "\n[longer work: run it again with timeout_s={} ({} at most)]"
+PLUS_LONG = "\n[longer work: run it in the background with job(command) and check on it in later calls{}]"
+ENCORE = ", or run it again with timeout_s={} ({} at most)"
+TRAVAUX_ARRETES = "\n[background jobs stopped: {}]"
 ARRETE = "[kernel stopped: the session is closing]"
 log = logging.getLogger("tokfit.kernel")
 # Shim de `python` et `python3` : les dossiers de shims (celui-ci, ceux d'un noyau qui lance ce noyau) sont
@@ -133,9 +141,11 @@ def lire_en_fond(fd: int) -> "queue.Queue[bytes]":
     return file
 
 
-def plus_long(timeout_s: int) -> str:
-    """Après un délai dépassé : le délai à redemander (quatre fois plus, au plus TIMEOUT_MAX), rien au maximum."""
-    return PLUS_LONG.format(min(timeout_s * 4, TIMEOUT_MAX), TIMEOUT_MAX) if timeout_s < TIMEOUT_MAX else ""
+def plus_long(duree_s: int) -> str:
+    """Après un délai dépassé (cellule arrêtée après `duree_s`) : l'arrière-plan, et le délai à redemander (quatre
+    fois plus, au plus TIMEOUT_MAX) s'il reste de la marge."""
+    encore = ENCORE.format(min(duree_s * 4, TIMEOUT_MAX), TIMEOUT_MAX) if duree_s < TIMEOUT_MAX else ""
+    return PLUS_LONG.format(encore)
 
 
 class NoyauMort(Exception):
@@ -162,6 +172,11 @@ class Noyau:
         self.ferme = False
         # Une cellule a dépassé son délai sans céder à l'interruption et tourne encore.
         self.en_cours = False
+        # Cellule en cours de lecture : son début et son échéance, que ses outils font reculer (`kernel/cellule.py`).
+        self.debut: Optional[float] = None
+        self.echeance = 0.0
+        # Groupes de processus des travaux de fond du noyau (`job`), arrêtés avec lui.
+        self.groupes: List[int] = []
 
     def demarrer(self) -> str:
         """Lance le noyau et rejoue l'amorce ; rend ce que l'amorce a écrit."""
@@ -193,6 +208,7 @@ class Noyau:
         return self.executer(self.amorce, 120).sortie
 
     def arreter(self) -> None:
+        self.arreter_travaux()
         # Le tube des réponses appartient à son fil, qui le ferme quand le noyau s'arrête.
         for fd in (self.requetes, self.interruption):
             if fd is not None:
@@ -214,6 +230,14 @@ class Noyau:
         processus = self.processus
         if processus is not None and processus.poll() is None:
             processus.kill()
+        self.arreter_travaux()
+
+    def arreter_travaux(self) -> str:
+        """Arrête les travaux de fond du noyau ; rend la ligne qui le dit, vide s'il n'y en avait pas."""
+        groupes, self.groupes = self.groupes, []
+        for groupe in groupes:
+            tubes.tuer_groupe(groupe)
+        return TRAVAUX_ARRETES.format(len(groupes)) if groupes else ""
 
     def executer(self, code: str, timeout_s: int) -> Execution:
         if self.ferme:
@@ -226,28 +250,33 @@ class Noyau:
                 precedente = self.interrompre_jusqu_a(float(timeout_s))
                 if precedente is None:
                     log.warning("cellule toujours sourde à SIGINT après %s s de plus : redémarrage", timeout_s)
-                    sortie = f"{TOUJOURS_SOURD.format(timeout_s)}\n{REDEMARRE}"
+                    sortie = f"{TOUJOURS_SOURD.format(timeout_s)}\n{REDEMARRE}{self.arreter_travaux()}"
                     return Execution(tronque(f"{sortie}\n{self.demarrer()}".rstrip("\n"), self.max_sortie), False)
                 self.en_cours = False
                 prefixe = FINIE_ENFIN + str(precedente["sortie"]).rstrip("\n") + "\n\n"
-            self.envoyer(code)
-            reponse = self.lire(float(timeout_s))
+            debut = time.monotonic()
+            self.debut, self.echeance = debut, debut + timeout_s
+            try:
+                self.envoyer(code, timeout_s)
+                reponse = self.lire(float(timeout_s))
+            finally:
+                self.debut = None
             if reponse is not None:
                 execution = self.borne(reponse)
                 return execution._replace(sortie=tronque(prefixe + execution.sortie, self.max_sortie))
+            duree = round(self.echeance - debut)
             reponse = self.interrompre_jusqu_a(GRACE_S)
             if reponse is not None:
-                return Execution(tronque(f"{prefixe}{reponse['sortie']}[interrupted after {timeout_s} s]"
-                                         f"{plus_long(timeout_s)}", self.max_sortie), False)
-            log.warning("cellule sourde à SIGINT après %s s : elle continue, état gardé", timeout_s)
+                return Execution(tronque(f"{prefixe}{reponse['sortie']}[interrupted after {duree} s]"
+                                         f"{plus_long(duree)}", self.max_sortie), False)
+            log.warning("cellule sourde à SIGINT après %s s : elle continue, état gardé", duree)
             self.en_cours = True
-            return Execution(tronque(prefixe + TOURNE_ENCORE.format(timeout_s) + plus_long(timeout_s), self.max_sortie),
-                             False)
+            return Execution(tronque(prefixe + TOURNE_ENCORE.format(duree) + plus_long(duree), self.max_sortie), False)
         except NoyauMort:
             if self.ferme:
                 return Execution(ARRETE, False)
             log.warning("noyau mort pendant une cellule : redémarrage")
-            sortie = REDEMARRE
+            sortie = REDEMARRE + self.arreter_travaux()
         amorce = self.demarrer()
         return Execution(tronque(f"{sortie}\n{amorce}".rstrip("\n"), self.max_sortie), False)
 
@@ -285,9 +314,9 @@ class Noyau:
         except OSError:
             pass  # noyau mort : la lecture qui suit le dira
 
-    def envoyer(self, code: str) -> None:
+    def envoyer(self, code: str, timeout_s: int) -> None:
         assert self.requetes is not None
-        donnees = (json.dumps({"code": code}, ensure_ascii=False) + "\n").encode("utf-8")
+        donnees = (json.dumps({"code": code, "timeout_s": timeout_s}, ensure_ascii=False) + "\n").encode("utf-8")
         try:
             while donnees:
                 donnees = donnees[os.write(self.requetes, donnees):]
@@ -295,9 +324,29 @@ class Noyau:
             raise NoyauMort() from erreur
 
     def lire(self, delai_s: float) -> Optional[dict[str, object]]:
-        """Une réponse, None si le délai passe ; NoyauMort si le tube se ferme."""
-        assert self.reponses is not None
+        """Une réponse, None si le délai passe ; NoyauMort si le tube se ferme. Une prolongation de la cellule en
+        cours (`kernel/cellule.py`) déplace son échéance, et ce délai avec elle ; hors cellule (interruption, cellule
+        sourde attendue), elle est ignorée. Chaque réponse dit les travaux de fond encore vivants."""
         fin = time.monotonic() + delai_s
+        while True:
+            reponse = self.ligne(fin)
+            if reponse is None or PROLONGE not in reponse:
+                break
+            duree = reponse[PROLONGE]
+            if self.debut is not None and isinstance(duree, (int, float)):
+                # L'échéance peut baisser : après l'attente d'un outil, elle revient au délai de la cellule plus le
+                # temps excusé (`cellule.relacher`).
+                self.echeance = self.debut + min(float(duree), PROLONGEE_MAX)
+                fin = self.echeance
+        if reponse is not None:
+            groupes = reponse.get(GROUPES)
+            self.groupes = [groupe for groupe in groupes if type(groupe) is int and groupe > 0] \
+                if isinstance(groupes, list) else []
+        return reponse
+
+    def ligne(self, fin: float) -> Optional[dict[str, object]]:
+        """Le message suivant du noyau, None si `fin` (horloge monotone) passe ; NoyauMort si le tube se ferme."""
+        assert self.reponses is not None
         while b"\n" not in self.tampon:
             reste = fin - time.monotonic()
             if reste <= 0:
