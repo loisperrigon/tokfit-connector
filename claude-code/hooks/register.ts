@@ -21,6 +21,8 @@
 // noyau Python du plugin quand il est connecté (kernel.ts). Le texte des messages ne part que vers /v1/route : ni
 // stocké, ni journalisé, ni affiché (tests/witness.test.ts).
 import type { AgentSpawnInput, EngineInterface, PluginOptions, Register, SessionMessage, TurnStepInput, TurnStepResult } from 'claude-code'
+import { answered, degradedNote, failed, holding, outage } from './outage'
+import type { Outage } from './outage'
 import { EFFORTS, TIMEOUT_MS, field, link, post } from './service'
 import type { Link } from './service'
 import { showNotice } from './trial'
@@ -293,6 +295,8 @@ type State = {
   badge: Badge
   // Santé de l'outil `agir` (python.ts) : raison de son absence, montrée au-dessus de la saisie.
   health: Health
+  // Panne du service vue par le routage (outage.ts) : demandes suspendues, bandeau « tokfit dégradé ».
+  outage: Outage
   // Étapes du fil principal depuis le dernier message de la personne (tours de
   // notification compris) : dit au service qu'un long travail est en cours.
   workSteps: number
@@ -530,8 +534,8 @@ async function loopCache($: EngineInterface, loop: Loop): Promise<Record<string,
   return { [family(loop.model)]: { idle_s: idle(await $.clock.now(), loop.at), tokens: loop.tokens } }
 }
 
-async function ask($: EngineInterface, to: Link, facts: Facts): Promise<{ choice: Choice; enforced: boolean } | null> {
-  const answer = await asked($, to, facts)
+async function ask($: EngineInterface, to: Link, facts: Facts, o: Outage): Promise<{ choice: Choice; enforced: boolean } | null> {
+  const answer = await asked($, to, facts, o)
   return answer.state === 'ok' ? { choice: answer.choice, enforced: answer.enforced === true } : null
 }
 
@@ -543,13 +547,19 @@ async function ask($: EngineInterface, to: Link, facts: Facts): Promise<{ choice
 type Asked = { state: 'ok'; choice: Choice; reason: string; lean?: boolean; enforced?: true }
   | { state: 'failing' | 'not_configured'; reason: string }
 
-async function asked($: EngineInterface, to: Link, facts: Facts): Promise<Asked> {
+async function asked($: EngineInterface, to: Link, facts: Facts, o: Outage): Promise<Asked> {
   const started = await $.clock.now()
+  // Service muet tout à l'heure : le message part sans attendre (outage.ts).
+  if (holding(o, started)) return { state: 'failing', reason: 'service injoignable (demande suspendue)' }
   const reply = await post($, to, '/v1/route', facts, TIMEOUT_MS)
   if (reply === null) {
     const late = (await $.clock.now()) - started >= TIMEOUT_MS
+    failed(o, await $.clock.now(), late)
     return { state: 'failing', reason: late ? `délai dépassé (${TIMEOUT_MS / 1000} s)` : 'service injoignable' }
   }
+  // 502 à 504 sans corps du service (relais frontal, service arrêté derrière) : panne ; sinon le service a répondu.
+  if (reply.status >= 502 && reply.status <= 504 && field(reply.text, 'error') === undefined) failed(o, await $.clock.now(), false)
+  else answered(o)
   const error = field(reply.text, 'error')
   const detail = typeof error === 'string' && error !== '' ? ` : ${error.slice(0, 160)}` : ''
   if (reply.status === 503) return { state: 'not_configured', reason: `service ${reply.status}${detail}` }
@@ -637,7 +647,7 @@ async function routed($: EngineInterface, s: State, to: Link, facts: AgentFacts,
     ...(floor ? { min_effort: floor } : {}),
     keep_model: tags.model !== undefined || facts.keep_model === true,
     keep_effort: tags.effort !== undefined || tags.ultrathink,
-  })
+  }, s.outage)
   return answer === null ? { ...fallback, ...own }
     : { model: facts.model, ...underUser(answer.choice, own, tags.effort !== undefined || tags.ultrathink, answer.enforced, floor) }
 }
@@ -702,7 +712,7 @@ async function decide($: EngineInterface, s: State, e: TurnStepInput): Promise<C
     ...(floor ? { min_effort: floor } : {}),
     keep_model: keepModel,
     keep_effort: keepEffort,
-  })
+  }, s.outage)
   if (answer.state !== 'ok') {
     // Échec : rien à dire à l'utilisateur ; la ligne d'une décision précédente s'efface.
     // Une application hôte, elle, montre la cause dans son voyant.
@@ -811,7 +821,7 @@ export const register: Register = (on, options) => {
     compacted: false, warm: warm(), audited: false, fanout: fanout(), trimmed: new Map(), compactedFrom: undefined,
     compactTry: undefined, lean: false, prefix: prefix(),
     rereads: rereads(), holdout: holdout(), off: new Set(), seen: {}, line: {}, badge: badge(), workSteps: 0, workEdits: 0, sessionModel: undefined,
-    cut: false, kernel: kernel(), content: plans(), timing: timing(), noticed: notice(), health: health(),
+    cut: false, kernel: kernel(), content: plans(), timing: timing(), noticed: notice(), health: health(), outage: outage(),
   }
 
   // Essai sans inscription : clé anonyme dès le démarrage, commande du tableau de bord et de
@@ -1242,7 +1252,8 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     void refreshed($, s.health, s.to !== null)
     // Santé de l'outil principal d'abord ; sinon, connecteur sous la version minimale du service (versions.ts).
-    const tree = band($, e, s.badge, await $.clock.now(), healthNotice(s.health.diagnosis) ?? s.holdout.answer?.outdated ?? null)
+    const tree = band($, e, s.badge, await $.clock.now(),
+      degradedNote(s.outage) ?? healthNotice(s.health.diagnosis) ?? s.holdout.answer?.outdated ?? null)
     return tree === null ? next(e) : tree
   }).catch(($, e, next) => next(e))
 

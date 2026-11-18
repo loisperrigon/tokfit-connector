@@ -5,7 +5,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { PromptComposeSection, ToolDescribeResult } from 'claude-code'
-import { KERNEL_TOOL, LEGACY_FINISHED } from '../hooks/kernel'
+import { KERNEL_TOOL, LEGACY_FINISHED, READY_MS } from '../hooks/kernel'
 import { DEFERRED, DENIED, EXECUTION_SECTION, FINISHED, KERNEL_SECTION, LISTING, REFUSAL, TEST_PLAN, THINKING_SECTION } from './plan'
 import { DEFAULT_URL, end, step, streamed, unconfigured, user, world } from './support'
 import type { Options, Reply, World } from './support'
@@ -567,6 +567,17 @@ describe('levier sans effet', () => {
     await pending
     expect(w.steps).toHaveLength(1)
     await untouched($)
+  })
+
+  test('agir disparu en cours de session (serveur d’outils relancé, service coupé) : les outils natifs reviennent', async ($, on) => {
+    const tools = [...TOOLS]
+    const w = world(on, connected({ tools }))
+    expect((await placement($, 'Read')).isDeferred).toBe(true)
+    expect((await check($, 'Bash')).decision).toBe('deny')
+    tools.splice(tools.indexOf(PYTHON), 1)
+    await w.clock.advance(READY_MS)
+    expect(await placement($, 'Read')).toEqual({ description: 'outil Read' })
+    expect((await check($, 'Bash')).decision).toBe('allow')
   })
 
   test('plan redemandé après un échec, au plus tôt après le délai de reprise', async ($, on) => {

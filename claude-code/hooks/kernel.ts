@@ -88,6 +88,8 @@ export function isBehind(plan: KernelPlan, name: string): boolean {
 export type Kernel = {
   session: string | undefined
   ready: boolean
+  // Dernière lecture de la liste des outils (horloge du moteur, ms) : `ready` relu au plus toutes les READY_MS.
+  checkedAt: number
   calls: Map<string, number>
   denied: Map<string, number>
   pass: 'never' | 'now' | 'done'
@@ -97,15 +99,24 @@ export type Kernel = {
 }
 
 export function kernel(): Kernel {
-  return { session: undefined, ready: false, calls: new Map(), denied: new Map(), pass: 'never', summary: undefined, stopped: false,
+  return { session: undefined, ready: false, checkedAt: Number.NEGATIVE_INFINITY, calls: new Map(), denied: new Map(), pass: 'never', summary: undefined, stopped: false,
     languageAsked: false }
 }
 
-// Vrai quand l'outil `python` de ce plugin est parmi ceux que le modèle peut appeler.
+// Vrai quand l'outil `agir` de ce plugin est parmi ceux que le modèle peut appeler, relu au plus toutes
+// les READY_MS : si `agir` disparaît (serveur d'outils relancé pendant une panne du service, sans paquet du
+// noyau), les outils retirés reviennent aussitôt au lieu de rester refusés sans remplaçant.
+export const READY_MS = 2000
+
 export async function kernelReady($: EngineInterface, k: Kernel): Promise<boolean> {
   const session = await $.session.id()
   if (k.session !== session) Object.assign(k, kernel(), { session })
-  if (!k.ready) k.ready = (await $.tool.list()).some(tool => tool.mcp && isKernelTool(tool.name))
+  // Absent : relu à chaque fois (il prend dès qu'il apparaît) ; présent : relu au plus toutes les READY_MS.
+  const now = await $.clock.now()
+  if (!k.ready || now - k.checkedAt >= READY_MS) {
+    k.ready = (await $.tool.list()).some(tool => tool.mcp && isKernelTool(tool.name))
+    k.checkedAt = now
+  }
   return k.ready
 }
 
