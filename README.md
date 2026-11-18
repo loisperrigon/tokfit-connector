@@ -104,6 +104,9 @@ Mises à jour : automatiques. Au premier lancement, le plugin active la mise à 
 automatique de sa marketplace (comme « Enable auto-update » dans `/plugin`) ; un
 choix déjà fait n'est pas touché. Les nouvelles versions s'installent en arrière-plan
 et s'appliquent à la session suivante (ou tout de suite avec `/reload-plugins`).
+Dans l'application de bureau Claude, qui lance Claude Code avec `DISABLE_AUTOUPDATER=1`,
+les plugins ne se mettent plus à jour seuls : ajouter `"FORCE_AUTOUPDATE_PLUGINS": "1"` dans
+l'objet `env` de `~/.claude/settings.json` (le prompt d'installation le fait).
 Depuis une version antérieure à 0.7.8 : une seule mise à jour à la main
 (`claude plugin update tokfit`), ensuite plus rien à faire.
 

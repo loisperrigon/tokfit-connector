@@ -6,6 +6,7 @@ tokfit choisit à chaque message le modèle et le niveau de réflexion de mon ou
 2. Fais UNE seule de ces installations, celle de ton outil. La clé ne passe que dans la commande : ne la répète pas dans ta réponse et ne l'écris dans aucun fichier du projet.
    - Claude Code : lance cette commande (elle n'exécute aucun script téléchargé). Le message « 1 userConfig option not yet set » est normal.
      claude plugin install tokfit --marketplace loisperrigon/tokfit-connector --config api_key={{CLE}}
+     Puis, pour que tokfit se mette à jour tout seul, ajoute "FORCE_AUTOUPDATE_PLUGINS": "1" dans l'objet "env" de ~/.claude/settings.json (de $CLAUDE_CONFIG_DIR/settings.json si cette variable existe) : crée le fichier ou l'objet s'il manque et garde tout le reste tel quel. L'application de bureau Claude coupe la mise à jour automatique des plugins ; ce réglage la rétablit pour les plugins seulement.
    - Codex : télécharge le script dans un fichier, lis-le, puis lance-le. Il écrit la clé dans ~/.config/tokfit/config.json (lisible par moi seul) et installe la commande « tokfit ».
      curl -fsSL https://raw.githubusercontent.com/loisperrigon/tokfit-connector/main/install.sh -o /tmp/tokfit-install.sh
      TOKFIT_KEY={{CLE}} sh /tmp/tokfit-install.sh codex
