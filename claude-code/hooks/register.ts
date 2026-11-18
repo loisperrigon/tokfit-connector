@@ -54,7 +54,7 @@ import { carried, prefix, taken } from './prefix'
 import type { Prefix } from './prefix'
 import type { KernelPlan, Plans, PrefixPlan, SessionPlan } from './plan'
 import type { Warm } from './warm'
-import { called, composed, contradicts, finalAnswer, isAccountTool, isBehind, isDenied, isKernelTool, kernel, kernelFacts, kernelReady, passed, placed, refused, refusedFinish, searchable, shortened, summaryOf, unlisted, withAgent } from './kernel'
+import { attachmentCut, called, composed, composedCut, contradicts, finalAnswer, isAccountTool, isBehind, isDenied, isKernelTool, kernel, kernelFacts, kernelReady, passed, placed, refused, refusedFinish, searchable, shortened, summaryOf, unlisted, withAgent } from './kernel'
 import { languageRefusal } from './language'
 import type { Kernel } from './kernel'
 import { access } from './access'
@@ -994,6 +994,7 @@ export const register: Register = (on, options) => {
       const [off, plan] = await Promise.all([levers($, s.holdout, to), sessionPlan($, s.content, to)])
       if (!plan) return result
       const kernelPlan = !off.has('kernel') && plan.kernel && (await kernelReady($, s.kernel)) ? plan.kernel : undefined
+      if (kernelPlan) composedCut(s.kernel, result.sections, kernelPlan)
       const sections = kernelPlan ? composed(result.sections, kernelPlan) : result.sections
       return { sections: [...sections,
         ...(plan.thinking !== undefined && !off.has('thinking') ? [section('thinking', plan.thinking)] : []),
@@ -1154,9 +1155,15 @@ export const register: Register = (on, options) => {
     try {
       const plan = result.text !== null ? await kernelOn($, s) : null
       if (plan && result.text !== null) {
-        if (contradicts(plan, e.type, result.text)) return { text: null }
+        if (contradicts(plan, e.type, result.text)) {
+          attachmentCut(s.kernel, e.agentId, result.text, null)
+          return { text: null }
+        }
         const short = unlisted(plan, e.type, shortened(plan, e.type, result.text))
-        if (short !== result.text) return { ...result, text: short }
+        if (short !== result.text) {
+          attachmentCut(s.kernel, e.agentId, result.text, short)
+          return { ...result, text: short }
+        }
       }
     } catch {
       // Configuration ou liste des outils illisible : pièce jointe gardée.

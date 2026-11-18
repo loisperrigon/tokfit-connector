@@ -257,6 +257,61 @@ describe('levier actif, noyau connecté', () => {
   })
 })
 
+describe('ce que le levier retire des requêtes (part mécanique, service/levers.py)', () => {
+  test('fil principal : descriptions déplacées et section remplacée, sur chaque étape ; rien sur un sous-agent', async ($, on) => {
+    const w = world(on, connected())
+    await placement($, 'Read')
+    await placement($, 'Bash')
+    await placement($, PYTHON, OURS, true)
+    // Redemandé : le même outil n'est pas compté deux fois.
+    await placement($, 'Read')
+    await $.prompt.compose(COMPOSE)
+    await step($, 0, { turnId: 't1' })
+    await step($, 1, { turnId: 't1' })
+    await step($, 0, { turnId: 'a1', agentId: 'agent-1' })
+    const steps = await sentSteps($, w)
+    // Derrière ToolSearch : la description part, le nom rejoint la liste des outils différés ; devant : l'inverse.
+    const tools = ('outil Read'.length - 'Read\n'.length) + ('outil Bash'.length - 'Bash\n'.length)
+      + (`${PYTHON}\n`.length - `outil ${PYTHON}`.length)
+    const section = PROMPT[1]!.text.length - KERNEL_SECTION.text.length
+    expect(steps.map(s => s.prompt_cut_chars)).toEqual([tools + section, tools + section, undefined])
+  })
+
+  test('une composition sans la section remplacée (sous-agent) ne change pas le chiffre', async ($, on) => {
+    const options = connected()
+    const w = world(on, options)
+    await $.prompt.compose(COMPOSE)
+    options.prompt = PROMPT.filter(found => found.id !== 'tools')
+    await $.prompt.compose(COMPOSE)
+    await step($, 0, { turnId: 't1' })
+    const steps = await sentSteps($, w)
+    expect(steps.map(s => s.prompt_cut_chars)).toEqual([PROMPT[1]!.text.length - KERNEL_SECTION.text.length])
+  })
+
+  test('pièces jointes retirées ou raccourcies : comptées une fois, sur l’étape suivante de la boucle qui les porte', async ($, on) => {
+    const w = world(on, connected())
+    await step($, 0, { turnId: 't1' })
+    await attachment($, 'auto_mode', AUTO_MODE)
+    await attachment($, 'skill_listing', SKILLS, 'agent-1')
+    await attachment($, 'skill_listing', SKILLS_SHORT)
+    await step($, 1, { turnId: 't1' })
+    await step($, 2, { turnId: 't1' })
+    await step($, 0, { turnId: 'a1', agentId: 'agent-1' })
+    const steps = await sentSteps($, w)
+    expect(steps.map(s => s.prompt_trim_chars)).toEqual([undefined, AUTO_MODE.length, undefined, SKILLS.length - SKILLS_SHORT.length])
+  })
+
+  test('levier coupé ou agir absent : aucun caractère compté', async ($, on) => {
+    const w = world(on, connected({ env: { TOKFIT_OFF: 'kernel' } }))
+    await placement($, 'Read')
+    await $.prompt.compose(COMPOSE)
+    await attachment($, 'auto_mode', AUTO_MODE)
+    await step($, 0, { turnId: 't1' })
+    const steps = await sentSteps($, w)
+    expect(steps.map(s => [s.prompt_cut_chars, s.prompt_trim_chars])).toEqual([[undefined, undefined]])
+  })
+})
+
 describe('un noyau par agent', () => {
   function recorded(env?: Record<string, string>): { agents: unknown[]; options: Options } {
     const agents: unknown[] = []

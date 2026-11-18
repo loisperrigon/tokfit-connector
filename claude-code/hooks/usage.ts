@@ -57,6 +57,11 @@ export type LeverFacts = {
   // l'outil `python` et appels refusés d'outils intégrés. Jamais le code, seulement leur nombre.
   kernel_calls?: number
   kernel_denied?: number
+  // Levier kernel, fil principal : caractères que le plan retire de chaque requête (descriptions des outils
+  // déplacés derrière ToolSearch, section remplacée ; négatif si la requête s'allonge). Toute boucle :
+  // caractères retirés des pièces jointes que la requête porte pour la première fois.
+  prompt_cut_chars?: number
+  prompt_trim_chars?: number
   // Levier actif mais outil `python` absent au départ de l'étape : rien n'a changé.
   kernel_unavailable?: true
   // Pourquoi (python.ts : codes fixes, KERNEL_REASONS et KERNEL_DETAILS du service).

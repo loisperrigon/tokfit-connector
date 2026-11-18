@@ -18,7 +18,7 @@ import type { KernelPlan } from './plan'
 import { NAME } from './service'
 import type { LeverFacts } from './usage'
 
-export type KernelFacts = Pick<LeverFacts, 'kernel_calls' | 'kernel_denied' | 'kernel_unavailable'>
+export type KernelFacts = Pick<LeverFacts, 'kernel_calls' | 'kernel_denied' | 'kernel_unavailable' | 'prompt_cut_chars' | 'prompt_trim_chars'>
 
 // Serveur déclaré dans .claude-plugin/plugin.json (`mcpServers`) et son unique outil.
 export const SERVER = 'outils'
@@ -85,6 +85,9 @@ export function isBehind(plan: KernelPlan, name: string): boolean {
 // suivante du tour (qui le rend sans interroger le modèle) ; `stopped` : le tour du
 // fil principal vient de s'arrêter ainsi, son hook Stop ne doit pas le relancer ;
 // `languageAsked` : un `finish` du tour a déjà été refusé pour sa langue (language.ts).
+// Caractères que le levier retire des requêtes : `moved`, par outil déplacé (description et nom dans la liste
+// des outils différés ; négatif pour un outil passé devant) ; `sectionCut`, section remplacée moins la consigne ;
+// `trimmed`, par boucle, pièces jointes retirées ou raccourcies, en attente de l'étape suivante de cette boucle.
 export type Kernel = {
   session: string | undefined
   ready: boolean
@@ -96,11 +99,14 @@ export type Kernel = {
   summary: string | undefined
   stopped: boolean
   languageAsked: boolean
+  moved: Map<string, number>
+  sectionCut: number
+  trimmed: Map<string, number>
 }
 
 export function kernel(): Kernel {
   return { session: undefined, ready: false, checkedAt: Number.NEGATIVE_INFINITY, calls: new Map(), denied: new Map(), pass: 'never', summary: undefined, stopped: false,
-    languageAsked: false }
+    languageAsked: false, moved: new Map(), sectionCut: 0, trimmed: new Map() }
 }
 
 // Vrai quand l'outil `agir` de ce plugin est parmi ceux que le modèle peut appeler, relu au plus toutes
@@ -131,6 +137,9 @@ export function placed(k: Kernel, plan: KernelPlan, e: ToolDescribeInput, result
   if ((result.isDeferred ?? e.isDeferred ?? false) === deferred) return result
   const breaking = k.pass !== 'done'
   if (breaking) k.pass = 'now'
+  // Derrière ToolSearch, la description quitte la requête et le nom rejoint la liste des outils différés.
+  const listed = e.tool.length + 1
+  k.moved.set(e.tool, deferred ? result.description.length - listed : listed - result.description.length)
   return { ...result, isDeferred: deferred, ...(breaking ? { breakPromptCache: true } : {}) }
 }
 
@@ -144,6 +153,21 @@ export function passed(k: Kernel): void {
 // sections `shared` du moteur, ordre exigé par le moteur), qu'elle ait été trouvée ou non.
 export function composed(sections: readonly PromptComposeSection[], plan: KernelPlan): PromptComposeSection[] {
   return [...sections.filter(found => found.id !== plan.replaces), section('kernel', plan.section)]
+}
+
+// Caractères retirés du prompt système par `composed` (section remplacée moins la consigne), retenus quand la
+// section remplacée est là : une composition sans elle (celle d'un sous-agent) ne change pas le chiffre.
+export function composedCut(k: Kernel, sections: readonly PromptComposeSection[], plan: KernelPlan): void {
+  const replaced = sections.find(found => found.id === plan.replaces)
+  if (replaced) k.sectionCut = replaced.text.length - plan.section.length
+}
+
+// Pièce jointe retirée ou raccourcie par le levier : caractères retirés, comptés pour la boucle qui la porte.
+export function attachmentCut(k: Kernel, agentId: string | undefined, before: string, after: string | null): void {
+  const removed = before.length - (after?.length ?? 0)
+  if (removed <= 0) return
+  const loop = agentId ?? 'main'
+  k.trimmed.set(loop, (k.trimmed.get(loop) ?? 0) + removed)
 }
 
 // Liste des outils derrière ToolSearch que le moteur joint aux messages (un nom par ligne).
@@ -266,12 +290,21 @@ export function refused(k: Kernel, agentId: string | undefined): void {
   bump(k.denied, agentId ?? 'main')
 }
 
-// Compteurs pris depuis l'étape précédente de la boucle, remis à zéro.
+// Compteurs pris depuis l'étape précédente de la boucle, remis à zéro. Fil principal, `agir` connecté :
+// caractères que le levier retire de chaque requête (outils déplacés, section remplacée).
 export function kernelFacts(k: Kernel, agentId: string | undefined): KernelFacts {
   const loop = agentId ?? 'main'
   const calls = k.calls.get(loop)
   const denied = k.denied.get(loop)
+  const trimmed = k.trimmed.get(loop)
   k.calls.delete(loop)
   k.denied.delete(loop)
-  return { ...(calls ? { kernel_calls: calls } : {}), ...(denied ? { kernel_denied: denied } : {}) }
+  k.trimmed.delete(loop)
+  let cut = 0
+  if (agentId === undefined && k.ready) {
+    for (const chars of k.moved.values()) cut += chars
+    cut += k.sectionCut
+  }
+  return { ...(calls ? { kernel_calls: calls } : {}), ...(denied ? { kernel_denied: denied } : {}),
+    ...(cut ? { prompt_cut_chars: cut } : {}), ...(trimmed ? { prompt_trim_chars: trimmed } : {}) }
 }

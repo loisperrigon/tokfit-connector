@@ -20,7 +20,7 @@ const BREAKDOWN: SessionContextBreakdown = {
     { name: 'mcp__brain__search', serverName: 'brain', tokens: 2_000, isLoaded: true },
     { name: 'mcp__web__fetch', serverName: 'web', tokens: 5_000, isLoaded: false },
   ],
-  agents: [], isAutoCompactEnabled: true, apiUsage: null,
+  agents: [], isAutoCompactEnabled: true, autoCompactThreshold: 187_000.6, apiUsage: null,
 }
 
 describe('audit du contexte de départ', () => {
@@ -38,8 +38,18 @@ describe('audit du contexte de départ', () => {
       session_id: SESSION, used_tokens: 15_100,
       categories: [{ name: 'System prompt', tokens: 3_100 }, { name: 'MCP tools', tokens: 12_000 }],
       mcp_servers: [{ server: 'oc-ads', tokens: 10_000 }, { server: 'brain', tokens: 2_000 }],
+      auto_compact_at: 187_001,
     })
     expect(JSON.stringify(w.sent)).not.toContain('secret-projet')
+  })
+
+  test('compaction automatique coupée : pas de seuil', async ($, on) => {
+    const w = world(on, { messages: [user('x')], breakdown: { ...BREAKDOWN, isAutoCompactEnabled: false } })
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    const [sent] = w.sent.filter(s => s.url === `${URL}/v1/context`)
+    expect(sent?.body).not.toHaveProperty('auto_compact_at')
   })
 
   test('sans répartition : rien ne part', async ($, on) => {
