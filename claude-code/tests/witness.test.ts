@@ -4,6 +4,7 @@
 import { expect, test } from 'claude-code/testing'
 import { SESSION, agent, assistant, complete, end, step, user, world } from './support'
 import type { Reply } from './support'
+import { STORE_ENTRY } from '../hooks/key'
 
 const WITNESS = 'TEMOIN-connecteur-7f3a-texte-libre'
 
@@ -40,8 +41,11 @@ for (const [name, reply] of cases) {
     expect(elsewhere.length).toBeGreaterThan(0)
     expect(JSON.stringify(elsewhere)).not.toContain(WITNESS)
     expect(JSON.stringify(w.usages().map(u => u.body))).toContain(SESSION)
-    // Rien d'écrit sur la machine (ni fichier, ni magasin du plugin, ni journal, ni commande).
-    expect(w.written).toEqual([])
+    // Rien d'écrit sur la machine (ni fichier, ni journal, ni commande) ; une clé refusée laisse place à la clé
+    // anonyme, seule entrée permise du magasin du plugin.
+    const anonymous = (line: string): boolean =>
+      line.startsWith('store.set ') && (JSON.parse(line.slice('store.set '.length)) as { key?: unknown }).key === STORE_ENTRY
+    expect(w.written.filter(line => !anonymous(line))).toEqual([])
     expect(JSON.stringify(w.shown)).not.toContain(WITNESS)
   })
 }

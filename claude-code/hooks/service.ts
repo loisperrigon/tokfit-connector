@@ -6,8 +6,11 @@
 // `claude plugin install … --config api_key=ek_…`, gardée dans le trousseau),
 // sinon d'un fichier hors dépôt (~/.config/tokfit/config.json, écrit par
 // install.sh, ou TOKFIT_CONFIG). Champ par champ, la configuration du
-// plugin passe avant le fichier. Sans clé configurée : clé anonyme (key.ts).
-// Réponse 402 : message de fin d'essai (trial.ts).
+// plugin passe avant le fichier, sauf si le service a refusé sa clé dans ce
+// chargement (401, 403) : celle du fichier sert alors. Une valeur mal formée
+// laisse le connecteur inerte. Sans clé configurée, ou quand chaque clé
+// configurée a été refusée : clé anonyme (key.ts), et dans ce second cas la
+// personne en est prévenue une fois (trial.ts). Réponse 402 : message de fin d'essai (trial.ts).
 //
 // Exception : une application qui lance Claude Code et relaie le service avec
 // son propre jeton (Open Codex, host.ts) pose ses deux variables de relais
@@ -17,7 +20,7 @@
 import type { EngineInterface, HttpResponse, PluginOptions } from 'claude-code'
 import { bounded } from './bounded'
 import { anonymousKey } from './key'
-import { trialNotice } from './trial'
+import { refusedKeyNotice, trialNotice } from './trial'
 
 // Nom du connecteur : ligne d'état et dossier de configuration. La copie
 // publique porte le nom de production (connector/publish.py renomme cette
@@ -54,8 +57,26 @@ export async function link($: EngineInterface, options: PluginOptions): Promise<
   const file = await configFile($)
   const url = (text(options.service_url) || text(file.url) || DEFAULT_URL).replace(/\/+$/, '')
   if (!ADDRESS.test(url)) return null
-  const key = text(options.api_key) || text(file.key) || (await anonymousKey($, url, options)) || ''
-  return KEY.test(key) ? { url, key } : null
+  const refusedHere = refusedFor(options)
+  const configured = [text(options.api_key), text(file.key)].filter(key => key)
+  const usable = configured.find(key => !refusedHere.has(`${url} ${key}`))
+  const key = usable || (await anonymousKey($, url, options)) || ''
+  if (!KEY.test(key)) return null
+  if (!usable && configured.length > 0) refusedKeyNotice($, NAME)
+  const to = { url, key }
+  owners.set(to, refusedHere)
+  return to
+}
+
+// Clés refusées par le service (« adresse clé »), par chargement du connecteur (clé : ses options) ;
+// chaque lien rendu par `link` pointe sur l'ensemble de son chargement.
+const refusals = new WeakMap<object, Set<string>>()
+const owners = new WeakMap<Link, Set<string>>()
+
+function refusedFor(options: object): Set<string> {
+  let found = refusals.get(options)
+  if (!found) refusals.set(options, found = new Set())
+  return found
 }
 
 // Relais d'une application hôte : adresse http(s) sans identifiants, jeton sans espace.
@@ -111,16 +132,30 @@ export function keyRefused(): boolean {
   return refused
 }
 
-function noteStatus(status: number): void {
-  if (status === 401 || status === 403) refused = true
-  else if (status >= 200 && status < 300) refused = false
+function noteStatus(to: Link, status: number): void {
+  if (status === 401 || status === 403) {
+    refused = true
+    owners.get(to)?.add(`${to.url} ${to.key}`)
+  } else if (status >= 200 && status < 300) {
+    refused = false
+  }
 }
 
 // Au démarrage de la session : la clé est-elle acceptée ? Lecture seule (`/v1/bilan`), pour que le bandeau
 // dise une clé refusée avant le premier message, au lieu d'attendre un paquet du noyau qui n'arrivera pas.
-export async function probeKey($: EngineInterface, to: Link, timeoutMs: number): Promise<void> {
+// Une clé configurée refusée laisse place à la suivante (celle du fichier, puis la clé anonyme), sondée à son tour.
+export async function probeKey($: EngineInterface, options: PluginOptions, timeoutMs: number): Promise<void> {
+  let tried = ''
+  for (let to = await link($, options); to && to.key !== tried; to = refused ? await link($, options) : null) {
+    tried = to.key
+    if (!(await probed($, to, timeoutMs))) return
+  }
+}
+
+async function probed($: EngineInterface, to: Link, timeoutMs: number): Promise<boolean> {
   const reply = await bounded($, `${to.url}/v1/bilan`, { method: 'GET', headers: { authorization: `Bearer ${to.key}` } }, timeoutMs)
-  if (reply) noteStatus(reply.status)
+  if (reply) noteStatus(to, reply.status)
+  return reply !== null
 }
 
 // POST JSON vers le service ; null s'il est injoignable ou plus lent que `timeoutMs`.
@@ -133,7 +168,7 @@ export async function post($: EngineInterface, to: Link, path: string, body: unk
     body: JSON.stringify(body),
   }, timeoutMs)
   if (reply) {
-    noteStatus(reply.status)
+    noteStatus(to, reply.status)
     trialNotice($, reply.status, reply.text)
   }
   return reply

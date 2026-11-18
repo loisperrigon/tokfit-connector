@@ -20,7 +20,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, MutableMapping, NamedTuple, Optional, Tuple
+from typing import Any, Collection, Dict, List, MutableMapping, NamedTuple, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
@@ -29,6 +29,8 @@ from completion import link, store_folder  # noqa: E402
 DELAI_S = 5.0
 # Délai d'une demande de paquet après la première : en arrière-plan, rien n'attend dessus.
 DELAI_RELANCE_S = 10.0
+# Raison rendue par `recevoir` quand le service refuse la clé (401, 403).
+REFUS = "clé refusée"
 # Attente maximale de la clé anonyme au démarrage du noyau (premier démarrage sans clé configurée).
 ATTENTE_CLE_S = 8.0
 TAILLE_MAX = 4 * 1024 * 1024
@@ -56,9 +58,10 @@ class Paquet(NamedTuple):
     version: str
 
 
-def lien(env: Dict[str, str]) -> Optional[Lien]:
-    """(adresse, clé) ; une option du plugin non posée (`${user_config.…}` laissé tel quel) compte comme absente."""
-    return link({nom: valeur for nom, valeur in env.items() if not valeur.startswith("${")})
+def lien(env: Dict[str, str], refusees: Collection[str] = ()) -> Optional[Lien]:
+    """(adresse, clé) ; une option du plugin non posée (`${user_config.…}` laissé tel quel) compte comme absente,
+    une clé de `refusees` (refusée par le service) laisse place à la suivante (`link` de completion.py)."""
+    return link({nom: valeur for nom, valeur in env.items() if not valeur.startswith("${")}, refusees)
 
 
 def cle_attendue(env: Dict[str, str]) -> bool:
@@ -125,6 +128,9 @@ def recevoir(vers: Optional[Lien], delai_s: float = DELAI_S) -> Tuple[Optional[P
         return None, "service non configuré"
     try:
         paquet = lire(poster(vers, "/v1/content", {"parts": ["kernel"]}, delai_s))
+    except urllib.error.HTTPError as erreur:
+        erreur.close()
+        return None, REFUS if erreur.code in (401, 403) else f"service en erreur ({erreur.code})"
     except (OSError, ValueError) as erreur:
         return None, f"service injoignable ou refus ({type(erreur).__name__})"
     return (paquet, "") if paquet is not None else (None, "réponse illisible")

@@ -61,7 +61,7 @@ from kernel.cellule import PROLONGEE_MAX  # noqa: E402
 from kernel.kernel import TIMEOUT_MAX, Noyau  # noqa: E402
 from kernel.output import MAX_SORTIE  # noqa: E402
 from kernel.pack import (  # noqa: E402
-    DELAI_RELANCE_S, DELAI_S, PREFIXE_DANS_LE_NOYAU, Lien, Paquet, cle_attendue, compter, lien, recevoir,
+    DELAI_RELANCE_S, DELAI_S, PREFIXE_DANS_LE_NOYAU, REFUS, Lien, Paquet, cle_attendue, compter, lien, recevoir,
 )
 
 NOM = "outils"
@@ -215,6 +215,8 @@ class Serveur:
         self.noyaux_max = entier(env, "TOKFIT_KERNEL_MAX_AGENTS", NOYAUX_MAX)
         self.env = env
         self.vers = vers
+        # Clés que le service a refusées (401, 403) : `lien` passe à la suivante.
+        self.refusees: set[str] = set()
         self.paquet = paquet
         self.compteur = Compteur(vers)
         self.description = paquet.description if paquet is not None else ""
@@ -272,10 +274,21 @@ class Serveur:
     def lien(self) -> Optional[Lien]:
         """Le lien vers le service ; cherché de nouveau tant qu'il manque (clé anonyme arrivée après le démarrage)."""
         if self.vers is None:
-            self.vers = lien(self.env)
+            self.vers = lien(self.env, self.refusees)
             if self.vers is not None:
                 self.compteur.vers = self.vers
         return self.vers
+
+    def ecarter(self, vers: Lien) -> bool:
+        """Le service a refusé la clé de `vers` : vrai si une autre clé la remplace (celle du fichier de
+        configuration, ou la clé anonyme, attendue tant que le connecteur ne l'a pas rangée) ; le jeton du relais
+        n'a pas de remplaçante."""
+        if lien(self.env, self.refusees | {vers[1]}) == vers:
+            return False
+        self.refusees.add(vers[1])
+        self.vers = None
+        log.warning("clé refusée par le service : la clé suivante prend le relais")
+        return True
 
     def outils(self) -> List[Dict[str, Any]]:
         """Les outils proposés maintenant : `agir` avec le paquet (sur un système où le noyau tourne, POSIX ou
@@ -427,6 +440,8 @@ def rattraper(serveur: Serveur, arret: threading.Event, annoncer: Callable[[], N
                     paquet, raison = None, f"erreur inattendue ({type(erreur).__name__})"
                 if paquet is not None:
                     serveur.installer(paquet)
+                elif raison == REFUS and serveur.ecarter(vers):
+                    prochain = 0.0
                 else:
                     if echecs == 0:
                         log.warning("paquet du noyau indisponible (%s) : redemandé en arrière-plan", raison)

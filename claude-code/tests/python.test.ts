@@ -98,7 +98,7 @@ describe('raison de l’absence de agir', () => {
       .toBe('outil principal indisponible (aucun outil de téléchargement : installez curl ou wget)')
     expect(notice({ reason: 'install_failed', detail: 'checksum' })).toMatch(/^installation de Python échouée \(archive altérée/)
     expect(notice({ reason: 'pack_unavailable' })).toBe('outil principal en attente du service (pas encore de réponse) : /tokfit pour le détail')
-    expect(notice({ reason: 'key_refused' })).toMatch(/^clé tokfit refusée par le service \(remplacée ou révoquée\) : dans \/plugin/)
+    expect(notice({ reason: 'key_refused' })).toMatch(/^clé tokfit refusée par le service \(remplacée ou révoquée\), clé d'essai comprise : \/tokfit/)
     expect(notice(null)).toBeNull()
   })
 })

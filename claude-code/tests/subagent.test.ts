@@ -7,6 +7,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { agent, assistant, spawn, step, unconfigured, user, world } from './support'
 import type { Reply } from './support'
+import { refusedKeyText } from '../hooks/trial'
+import { NAME } from '../hooks/service'
 
 const ROUTED: Reply = { status: 200, body: { model: 'haiku', effort: 'low' } }
 // Tokens laissés dans le cache par une étape du monde simulé (usageOf).
@@ -305,7 +307,8 @@ describe('repli silencieux', () => {
       expect(await agent($, 'x', { model: 'sonnet' })).toBe('sonnet')
       await step($, 0, { turnId: 'a-t1', agentId: 'agent-1', model: 'claude-sonnet-5-5' })
       expect(w.steps[0]).toMatchObject({ model: 'claude-sonnet-5-5', effort: 'high' })
-      expect(w.shown).toEqual([])
+      // Une clé refusée laisse place à la clé anonyme, et seul cet avis est montré (anonymous.test.ts).
+      expect(w.shown).toEqual(name.startsWith('clé refusée') ? [`ui.log ${refusedKeyText(NAME)}`] : [])
     })
   }
 

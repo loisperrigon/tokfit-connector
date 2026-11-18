@@ -64,6 +64,8 @@ export type Options = {
   content?: (body: Record<string, unknown>) => Reply
   // Bilan du client (`/v1/bilan`, GET) ; par défaut 404 : pas de marque.
   bilan?: () => Reply
+  // Clés que le service refuse (401) sur toutes ses routes ; par défaut, aucune.
+  refusedKeys?: string[]
   // Réponse de `$.model.fork` (relance du cache) ; par défaut, « ok » sur le cache du fil.
   fork?: () => ModelForkResult
   // Contexte rendu par `$.session.usage()` (tokens) ; par défaut 42 000.
@@ -201,7 +203,9 @@ export function world(on: On, options: Options = {}): World {
       : e.url.endsWith('/v1/content') ? options.content ?? (() => ({ status: 200, body: { version: 'v-test', claude: TEST_PLAN } }))
       : e.url.endsWith('/v1/bilan') ? options.bilan ?? (() => ({ status: 404 }))
       : () => ({ status: 404 })
-    const reply = answer(body)
+    const authorization = (e.init?.headers as Record<string, string> | undefined)?.authorization ?? ''
+    const refusedKey = (options.refusedKeys ?? []).some(key => authorization === `Bearer ${key}`)
+    const reply = refusedKey ? { status: 401, body: { error: 'clé inconnue ou révoquée' } } : answer(body)
     if (reply === 'down') throw new Error('connexion refusée')
     if (reply === 'silent') return new Promise(() => { /* jamais de réponse */ })
     const out = reply.text ?? JSON.stringify(reply.body ?? {})

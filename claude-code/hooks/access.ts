@@ -18,7 +18,7 @@ export const LINK_TIMEOUT_MS = 6000
 export function access(on: On, options: PluginOptions, sources: Sources): void {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    void link($, options).then(to => (to ? probeKey($, to, LINK_TIMEOUT_MS) : undefined)).catch(() => {
+    void probeKey($, options, LINK_TIMEOUT_MS).catch(() => {
       // Service injoignable : rien n'est su de la clé, le bandeau garde ses autres raisons.
     })
     void $.command.register({ name: NAME, description: 'Lien vers ton tableau de bord (bilan, abonnement), état des leviers et de l\'outil principal.' })

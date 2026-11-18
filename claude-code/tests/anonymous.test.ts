@@ -3,6 +3,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { ANONYMOUS_KEY, KEY, URL, complete, config, step, unconfigured, user, world } from './support'
 import { KEY_TIMEOUT_MS, RETRY_MS, STORE_ENTRY } from '../hooks/key'
+import { refusedKeyText } from '../hooks/trial'
+import { NAME } from '../hooks/service'
 
 const ADDRESS_ONLY = JSON.stringify({ url: URL })
 
@@ -55,6 +57,39 @@ describe('clé anonyme', () => {
     await step($, 0)
     expect(w.anonymousCalls()).toEqual([])
     expect(w.routes()[0]?.headers).toMatchObject({ authorization: `Bearer ${KEY}` })
+  })
+
+  test('clé configurée refusée (401) : clé anonyme à la place, dite une fois, rien d\'autre d\'écrit',
+       { options: { api_key: KEY, service_url: URL } }, async ($, on) => {
+    const w = world(on, { config: null, messages: [user('x')], refusedKeys: [KEY] })
+    await $.session.start({ cwd: '/projet', surface: null, isInteractive: false })
+    await w.clock.settle()
+    await step($, 0, { turnId: 't1' })
+    await step($, 0, { turnId: 't2' })
+    expect(w.sent.filter(s => s.url.endsWith('/v1/bilan')).map(s => s.headers)).toEqual([
+      expect.objectContaining({ authorization: `Bearer ${KEY}` }),
+      expect.objectContaining({ authorization: `Bearer ${ANONYMOUS_KEY}` }),
+    ])
+    expect(w.anonymousCalls()).toHaveLength(1)
+    expect(w.routes().map(r => r.headers)).toEqual([
+      expect.objectContaining({ authorization: `Bearer ${ANONYMOUS_KEY}` }),
+      expect.objectContaining({ authorization: `Bearer ${ANONYMOUS_KEY}` }),
+    ])
+    expect(w.store[STORE_ENTRY]).toEqual({ url: URL, key: ANONYMOUS_KEY })
+    expect(w.shown.filter(line => line.includes('refusée'))).toEqual([`ui.log ${refusedKeyText(NAME)}`])
+    expect(JSON.stringify(w.shown)).not.toContain(KEY)
+  })
+
+  test('clé configurée refusée dans le fichier aussi : la clé anonyme passe après les deux',
+       { options: { api_key: KEY, service_url: URL } }, async ($, on) => {
+    const second = 'ek_' + 's'.repeat(43)
+    const w = world(on, { config: config(URL, second), messages: [user('x')], refusedKeys: [KEY, second] })
+    await $.session.start({ cwd: '/projet', surface: null, isInteractive: false })
+    await w.clock.settle()
+    await step($, 0)
+    expect(w.sent.filter(s => s.url.endsWith('/v1/bilan')).map(s => s.headers.authorization))
+      .toEqual([`Bearer ${KEY}`, `Bearer ${second}`, `Bearer ${ANONYMOUS_KEY}`])
+    expect(w.routes()[0]?.headers).toMatchObject({ authorization: `Bearer ${ANONYMOUS_KEY}` })
   })
 
   test('sans adresse configurée : connecteur inerte, ou adresse officielle seule (copie publique)', async ($, on) => {

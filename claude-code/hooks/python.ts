@@ -150,7 +150,7 @@ export function notice(d: Diagnosis | null | undefined): string | null {
     case 'server_starting': return null
     case 'server_down': return `outil principal arrêté${why} : /mcp pour relancer le serveur « outils »`
     case 'pack_unavailable': return 'outil principal en attente du service (pas encore de réponse) : /tokfit pour le détail'
-    case 'key_refused': return 'clé tokfit refusée par le service (remplacée ou révoquée) : dans /plugin, options de tokfit, collez votre clé actuelle ou videz le champ pour l\'essai'
+    case 'key_refused': return 'clé tokfit refusée par le service (remplacée ou révoquée), clé d\'essai comprise : /tokfit pour rattacher cet appareil à votre compte'
   }
 }
 

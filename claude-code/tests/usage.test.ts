@@ -3,6 +3,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { SESSION, URL, complete, end, messages, step, turn, unconfigured, user, world } from './support'
 import type { Reply } from './support'
+import { refusedKeyText } from '../hooks/trial'
+import { NAME } from '../hooks/service'
 
 type Sent = Record<string, unknown>
 
@@ -187,7 +189,8 @@ describe('renvoi et idempotence', () => {
       await w.clock.settle()
       await end($)
       expect(w.usages()).toHaveLength(1)
-      expect(messages(w)).toEqual([])
+      // Une clé refusée laisse place à la clé anonyme, et seul cet avis est montré (anonymous.test.ts).
+      expect(messages(w)).toEqual(status === 401 ? [`ui.log ${refusedKeyText(NAME)}`] : [])
     })
   }
 

@@ -13,8 +13,9 @@ from pathlib import Path
 import re
 import shlex
 import sys
-from typing import Iterable, TextIO
+from typing import Collection, Iterable, TextIO
 from urllib.parse import urlsplit
+import urllib.error
 import urllib.request
 
 Json = dict[str, object]
@@ -102,7 +103,10 @@ def stored_link(env: dict[str, str]) -> tuple[str, str] | None:
     return None
 
 
-def link(env: dict[str, str]) -> tuple[str, str] | None:
+def link(env: dict[str, str], refused: Collection[str] = ()) -> tuple[str, str] | None:
+    """(url, key): the host's relay, else the configured key (plugin option, then config file), else the anonymous
+    key of the plugin store; a configured or anonymous key in `refused` (401 or 403 from the service) is skipped,
+    as in hooks/service.ts. The relay token is never skipped: nothing replaces it."""
     url, key = env.get("TOKFIT_RELAY_URL"), env.get("TOKFIT_RELAY_TOKEN")
     relay = bool(url and key)
     if not url or not key:
@@ -116,10 +120,12 @@ def link(env: dict[str, str]) -> tuple[str, str] | None:
             config = {}
         # Claude passes plugin options in the hook environment, never in argv.
         url = env.get("CLAUDE_PLUGIN_OPTION_SERVICE_URL") or config.get("url")
-        key = env.get("CLAUDE_PLUGIN_OPTION_API_KEY") or config.get("key")
+        key = next((value for value in (env.get("CLAUDE_PLUGIN_OPTION_API_KEY"), config.get("key"))
+                    if value and value not in refused), None)
     if not relay and not key:
         stored = stored_link(env)
-        if stored is not None and (not isinstance(url, str) or not url or url.rstrip("/") == stored[0]):
+        if stored is not None and stored[1] not in refused and (
+                not isinstance(url, str) or not url or url.rstrip("/") == stored[0]):
             url, key = stored
     if not isinstance(url, str) or not url:
         url = DEFAULT_URL
@@ -133,6 +139,10 @@ def link(env: dict[str, str]) -> tuple[str, str] | None:
     return url.rstrip("/"), key
 
 
+class KeyRefused(Exception):
+    """The service refused the key (401, 403)."""
+
+
 def request(url: str, key: str, facts: Json) -> Json | None:
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req: urllib.request.Request, fp: object, code: int, msg: str,
@@ -144,9 +154,30 @@ def request(url: str, key: str, facts: Json) -> Json | None:
         with urllib.request.build_opener(NoRedirect()).open(req, timeout=2) as response:
             value = json.loads(response.read(MAX_INPUT))
         return value if isinstance(value, dict) else None
+    except urllib.error.HTTPError as error:
+        error.close()
+        if error.code in (401, 403):
+            raise KeyRefused() from error
+        LOG.debug("Completion policy unavailable (%s); keeping native stop", error.code)
+        return None
     except (OSError, ValueError):
         LOG.debug("Completion policy unavailable; keeping native stop")
         return None
+
+
+def ask(env: dict[str, str], facts: Json, to: tuple[str, str] | None = None) -> Json | None:
+    """The service's answer to `facts`; a refused key gives way to the next one (see `link`)."""
+    refused: set[str] = set()
+    to = to or link(env)
+    while to is not None:
+        try:
+            return request(*to, facts)
+        except KeyRefused:
+            refused.add(to[1])
+            following = link(env, refused)
+            to = following if following != to else None
+    LOG.debug("Every key refused; keeping native stop")
+    return None
 
 
 def decide(event: Json, env: dict[str, str], engine: str) -> Json:
@@ -179,9 +210,9 @@ def decide(event: Json, env: dict[str, str], engine: str) -> Json:
         return {}
     if not remaining:
         return {}
-    plan = request(*to, {"engine": engine, "model": "unknown", "session_id": session, "event": "stop",
+    plan = ask(env, {"engine": engine, "model": "unknown", "session_id": session, "event": "stop",
         "capabilities": ["completion_guard"], "off": off, "context_tokens": 0, "idle_s": 0, "pings": 0,
-        "pending_steps": remaining, "stop_hook_active": False})
+        "pending_steps": remaining, "stop_hook_active": False}, to)
     instruction = plan.get("completion_instruction") if plan and plan.get("version") == 1 else None
     return {"decision": "block", "reason": instruction} if isinstance(instruction, str) and 0 < len(instruction) <= 4096 else {}
 
