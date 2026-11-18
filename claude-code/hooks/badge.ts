@@ -1,7 +1,7 @@
 // Bandeau du gain au-dessus de la saisie (composant `AbovePrompt`, terminal et
 // Claude Desktop en mode code) : l'argent économisé, sur ce que la période
 // aurait coûté sans tokfit, la part gagnée en barre, et le temps d'attente en
-// moins. Les chiffres viennent du bilan du service (`GET /v1/bilan`,
+// moins, précédés de « ≈ » tant que le service les dit estimés (`saved_kind`). Les chiffres viennent du bilan du service (`GET /v1/bilan`,
 // service/bilan.py), relu après un tour au plus une fois toutes les
 // BADGE_EVERY_MS. À chaque hausse, le montant monte jusqu'au nouveau chiffre,
 // la barre se remplit, l'étincelle scintille et le gain du dernier tour
@@ -20,7 +20,7 @@ export const DELTA_MS = 5000
 const BAR = 10
 const SPARKS = ['✦', '✧', '✶', '✷', '✸', '✹', '✺', '✹', '✸', '✷', '✶', '✧']
 
-export type Gain = { saved: number; reference: number | undefined; percent: number | undefined; seconds: number | undefined }
+export type Gain = { saved: number; reference: number | undefined; percent: number | undefined; seconds: number | undefined; estimated: boolean }
 
 export type Badge = {
   at?: number
@@ -49,6 +49,11 @@ export function duration(seconds: number): string {
   return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')}`
 }
 
+// Marque d'un chiffre estimé, devant le montant.
+export function approx(g: Gain): string {
+  return g.estimated ? '≈ ' : ''
+}
+
 // Gain tiré de la réponse du bilan ; undefined sans gain positif.
 export function gainOf(text: string): Gain | undefined {
   let parsed: unknown
@@ -58,16 +63,17 @@ export function gainOf(text: string): Gain | undefined {
     return undefined
   }
   if (typeof parsed !== 'object' || parsed === null) return undefined
-  const { saved_usd: saved, reference_cost: reference, seconds_saved: seconds, saved_percent: percent } = parsed as Record<string, unknown>
+  const { saved_usd: saved, reference_cost: reference, seconds_saved: seconds, saved_percent: percent, saved_kind: kind } = parsed as Record<string, unknown>
   if (typeof saved !== 'number' || !(saved >= 0.01)) return undefined
   const ref = typeof reference === 'number' && reference > saved ? reference : undefined
   const pct = typeof percent === 'number' && percent > 0 ? percent : ref !== undefined ? (saved / ref) * 100 : undefined
-  return { saved, reference: ref, percent: pct === undefined ? undefined : Math.min(100, pct), seconds: typeof seconds === 'number' && seconds >= 60 ? seconds : undefined }
+  return { saved, reference: ref, percent: pct === undefined ? undefined : Math.min(100, pct), seconds: typeof seconds === 'number' && seconds >= 60 ? seconds : undefined, estimated: kind !== 'measured' }
 }
 
 // Le bandeau en une ligne de texte, celle que lit un lecteur d'écran.
 export function badgeText(g: Gain, shown: number = g.saved): string {
-  const parts = [g.reference !== undefined ? `${money(shown)} économisés sur ${money(g.reference)}` : `${money(shown)} économisés`]
+  const amount = `${approx(g)}${money(shown)}`
+  const parts = [g.reference !== undefined ? `${amount} économisés sur ${money(g.reference)}` : `${amount} économisés`]
   if (g.percent !== undefined) parts.push(`−${Math.round(g.percent)} %`)
   if (g.seconds !== undefined) parts.push(`${duration(g.seconds)} d'attente en moins`)
   return parts.join(' · ')

@@ -2,7 +2,7 @@
 // l'outil principal quand il manque (python.ts : installation de Python en cours, impossible…).
 // Rien à montrer, ou une enquête du moteur dans la bande : la main passe.
 import type { EngineInterface, RenderElement, RenderInput } from 'claude-code'
-import { badgeText, bar, current, money } from './badge'
+import { approx, badgeText, bar, current, money } from './badge'
 import type { Badge } from './badge'
 
 const GOLD = '#f5b301'
@@ -28,6 +28,7 @@ function gainRow($: EngineInterface, e: RenderInput<'AbovePrompt'>, b: Badge, no
   const pieces: unknown[] = [
     h(Text, { key: 'tokfit-spark', color: GOLD, weight: 'bold' }, `${shown.spark} `),
     h(Text, { key: 'tokfit-name', color: 'claude', weight: 'bold' }, 'tokfit  '),
+    ...(g.estimated ? [h(Text, { key: 'tokfit-approx', color: 'success' }, approx(g))] : []),
     h(Text, { key: 'tokfit-saved', color: 'success', weight: 'bold', tabular: true, size: 'heading' }, money(shown.saved)),
     h(Text, { key: 'tokfit-of', color: 'subtle' }, g.reference !== undefined ? ` économisés sur ${money(g.reference)}` : ' économisés'),
   ]
