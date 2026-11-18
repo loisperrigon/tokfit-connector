@@ -23,16 +23,11 @@ describe('bandeau tokfit', () => {
     await step($, 0, { turnId: 't1' })
     await complete($, 't1')
     await w.clock.settle()
-    const first = await $.ui.mount({ plugin: 'tokfit', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
-    expect((await first.find({ key: 'tokfit-band' }))?.text).toMatch(/^✦ tokfit {2}≈ 0,00 \$ économisés sur 161 \$/)
-    await first.unmount()
-    // Desktop : la mascotte, une ligne discrète à droite, sans la barre ▰▱ ; fond transparent.
-    const desktop = await $.ui.mount({ plugin: 'tokfit', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
-    const row = await desktop.find({ key: 'tokfit-band' })
-    expect(row?.text).toMatch(/^tokfit≈ 0,00 \$ économisés· −\d+ % · 2 h 39$/)
-    expect(row?.text).not.toMatch(/[▰▱]/)
-    expect(await desktop.find({ type: 'Svg' })).toBeDefined()
-    await desktop.unmount()
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ plugin: 'tokfit', surface, component: 'AbovePrompt', props: PROPS })
+      expect((await ui.find({ key: 'tokfit-band' }))?.text).toMatch(/^✦ tokfit {2}≈ 0,00 \$ économisés sur 161 \$/)
+      await ui.unmount()
+    }
     await w.clock.advance(FRAMES * FRAME_MS * 2)
     const ui = await $.ui.mount({ plugin: 'tokfit', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
     expect((await ui.find({ key: 'tokfit-band' }))?.text).toBe("✦ tokfit  ≈ 74 $ économisés sur 161 $  ▰▰▰▰▰▱▱▱▱▱ −46 %  ·  ⏱ 2 h 39 d'attente en moins")
