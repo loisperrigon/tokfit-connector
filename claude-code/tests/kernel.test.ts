@@ -578,6 +578,26 @@ describe('levier sans effet', () => {
     expect(await placement($, 'Read')).toEqual({ description: 'outil Read', isDeferred: true, breakPromptCache: true })
   })
 
+  test('Code Mode actif (outil REPL du moteur) : rien retiré ni refusé, prompt intact, fait avec la raison code_mode', async ($, on) => {
+    const w = world(on, connected({ tools: [...TOOLS, 'REPL'] }))
+    await $.session.start({ cwd: '/projet', surface: null, isInteractive: true })
+    await untouched($)
+    for (const tool of DENIED) expect((await check($, tool)).decision).toBe('allow')
+    await w.clock.settle()
+    await step($, 0, { turnId: 't1' })
+    const steps = await sentSteps($, w)
+    expect(steps.map(s => [s.kernel_unavailable, s.kernel_reason])).toEqual([[true, 'code_mode']])
+  })
+
+  test('Code Mode quitté en cours de session (outil REPL disparu) : le levier reprend', async ($, on) => {
+    const tools = [...TOOLS, 'REPL']
+    const w = world(on, connected({ tools }))
+    expect((await check($, 'Bash')).decision).toBe('allow')
+    tools.splice(tools.indexOf('REPL'), 1)
+    await w.clock.advance(READY_MS)
+    expect((await check($, 'Bash')).decision).toBe('deny')
+  })
+
   test('TOKFIT_OFF=kernel : aucun effet, aucun fait', async ($, on) => {
     const w = world(on, connected({ env: { TOKFIT_OFF: 'kernel' } }))
     await untouched($)

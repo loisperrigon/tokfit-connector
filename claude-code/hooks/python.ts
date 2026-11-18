@@ -10,12 +10,12 @@
 // puis à intervalles (plus serrés au début : l'installation dure de quelques secondes à une minute) tant que
 // `agir` manque, et à chaque étape ; le bandeau disparaît dès que `agir` est là.
 import type { EngineInterface } from 'claude-code'
-import { isAccountTool, isKernelTool } from './kernel'
+import { inCodeMode, isAccountTool, isKernelTool } from './kernel'
 import { keyRefused } from './service'
 
 // Raisons de l'absence de `agir` : KERNEL_REASONS de service/usage.py (vérifié par tests/test_connector.py).
 export const REASONS = ['python_installing', 'python_missing', 'install_failed', 'unsupported_platform',
-  'server_starting', 'server_down', 'pack_unavailable', 'key_refused'] as const
+  'server_starting', 'server_down', 'pack_unavailable', 'key_refused', 'code_mode'] as const
 export type Reason = (typeof REASONS)[number]
 // Détails : écrits par le lanceur, sauf `no_launch` (lanceur jamais parti) ; `windows` n'est plus produit (le noyau
 // tourne sous Windows depuis 0.7.13), gardé pour les anciens connecteurs ; KERNEL_DETAILS du service.
@@ -96,9 +96,11 @@ export async function pythonFiles($: EngineInterface): Promise<PythonFiles> {
 
 // Pourquoi `agir` manque ; null s'il est proposé, ou si rien ne permet d'en juger (connecteur non relié :
 // le serveur ne propose alors aucun outil, sans panne). `refused` : le service a refusé la clé à sa dernière
-// réponse ; le paquet du noyau, demandé avec la même clé, n'arrivera pas.
+// réponse ; le paquet du noyau, demandé avec la même clé, n'arrivera pas. `codeMode` : l'outil `REPL` de Code Mode
+// est proposé (kernel.ts), le levier ne retire rien, `agir` proposé ou non.
 export function diagnose(kernel: boolean, account: boolean, f: PythonFiles, linked: boolean, now: number, since: number,
-                         refused = false): Diagnosis | null {
+                         refused = false, codeMode = false): Diagnosis | null {
+  if (codeMode) return { reason: 'code_mode' }
   if (kernel) return null
   const source = text(f.launch?.source)
   if (refused && linked) return { reason: 'key_refused' }
@@ -138,6 +140,13 @@ export function detailText(detail: Detail | undefined): string {
   return detail ? DETAIL_TEXT[detail] : ''
 }
 
+// Code Mode actif : ce que tokfit perd, pourquoi, et quoi faire (`/<NAME>`).
+export const CODE_MODE_TEXT = 'Code Mode (mode expérimental de Claude Code) est actif dans cette session. Ses scripts appellent '
+  + 'Bash, Read et Edit, les outils que tokfit remplace par son outil principal agir : pour ne pas casser Code Mode, tokfit '
+  + 'les laisse en place et coupe son outil principal, son plus gros levier d\'économie. Le routage, la compaction et le '
+  + 'cache gardé au chaud restent actifs. Nous déconseillons Code Mode avec tokfit : retirez '
+  + 'CLAUDE_CODE_EXPERIMENTAL_CODE_MODE de votre shell et de ~/.claude/settings.json, puis relancez Claude Code.'
+
 // Ligne du bandeau, courte ; null quand rien n'est à dire (outil là, ou serveur qui démarre).
 export function notice(d: Diagnosis | null | undefined): string | null {
   if (!d) return null
@@ -150,6 +159,8 @@ export function notice(d: Diagnosis | null | undefined): string | null {
     case 'server_starting': return null
     case 'server_down': return `outil principal arrêté${why} : /mcp pour relancer le serveur « outils »`
     case 'pack_unavailable': return 'outil principal en attente du service (pas encore de réponse) : /tokfit pour le détail'
+    case 'code_mode': return 'bridé par Code Mode, outil principal coupé (Code Mode passe par Bash, Read et Edit, que cet outil remplace). '
+      + 'Déconseillé : retirez CLAUDE_CODE_EXPERIMENTAL_CODE_MODE puis relancez Claude Code ; /tokfit pour le détail'
     case 'key_refused': return 'clé tokfit refusée par le service (remplacée ou révoquée), clé d\'essai comprise : /tokfit pour rattacher cet appareil à votre compte'
   }
 }
@@ -163,7 +174,7 @@ export async function check($: EngineInterface, h: Health, linked: boolean): Pro
   const account = tools.some(tool => tool.mcp && isAccountTool(tool.name))
   h.files = await pythonFiles($)
   const before = notice(h.diagnosis)
-  h.diagnosis = diagnose(kernel, account, h.files, linked, now, h.since, keyRefused())
+  h.diagnosis = diagnose(kernel, account, h.files, linked, now, h.since, keyRefused(), inCodeMode(tools))
   h.at = now
   if (notice(h.diagnosis) !== before) $.ui.invalidate('ui.render')
   return h.diagnosis
@@ -227,7 +238,8 @@ export function healthReport(d: Diagnosis | null | undefined, f: PythonFiles, to
   const server = tools.kernel || tools.account ? 'démarré'
     : d?.reason === 'server_starting' ? 'en démarrage'
     : d?.reason === 'server_down' ? `arrêté${d.detail ? ` (${detailText(d.detail)})` : ''}` : 'en attente de Python'
-  const kernel = tools.kernel ? 'proposé' : `absent${d ? ` (${notice(d) ?? 'serveur en démarrage'})` : ''}`
+  const kernel = d?.reason === 'code_mode' ? `${tools.kernel ? 'proposé' : 'absent'}, levier coupé (Code Mode actif)`
+    : tools.kernel ? 'proposé' : `absent${d ? ` (${notice(d) ?? 'serveur en démarrage'})` : ''}`
   return ['Outil principal :',
     `- connecteur : ${version ?? 'version inconnue'}`,
     `- Python : ${python}`,
@@ -235,5 +247,6 @@ export function healthReport(d: Diagnosis | null | undefined, f: PythonFiles, to
     `- serveur MCP « outils » : ${server}`,
     `- outil agir : ${kernel}`,
     `- outil compte : ${tools.account ? 'proposé' : 'absent'}`,
-    `- service : ${service}`].join('\n')
+    `- service : ${service}`,
+    ...(d?.reason === 'code_mode' ? ['', CODE_MODE_TEXT] : [])].join('\n')
 }

@@ -109,10 +109,18 @@ export function kernel(): Kernel {
     languageAsked: false, moved: new Map(), sectionCut: 0, trimmed: new Map() }
 }
 
-// Vrai quand l'outil `agir` de ce plugin est parmi ceux que le modèle peut appeler, relu au plus toutes
+// Vrai quand l'outil `agir` de ce plugin est parmi ceux que le modèle peut appeler, hors Code Mode, relu au plus toutes
 // les READY_MS : si `agir` disparaît (serveur d'outils relancé pendant une panne du service, sans paquet du
 // noyau), les outils retirés reviennent aussitôt au lieu de rester refusés sans remplaçant.
 export const READY_MS = 2000
+
+// Outil du moteur qui exécute le JavaScript du modèle en Code Mode (CLAUDE_CODE_EXPERIMENTAL_CODE_MODE) ; ses
+// scripts appellent Bash, Read, Edit… sous leur nom, au travers de `tool.check` : présent, le levier ne retire rien.
+export const CODE_MODE_TOOL = 'REPL'
+
+export function inCodeMode(tools: readonly { name: string; mcp?: boolean }[]): boolean {
+  return tools.some(tool => !tool.mcp && tool.name === CODE_MODE_TOOL)
+}
 
 export async function kernelReady($: EngineInterface, k: Kernel): Promise<boolean> {
   const session = await $.session.id()
@@ -120,7 +128,8 @@ export async function kernelReady($: EngineInterface, k: Kernel): Promise<boolea
   // Absent : relu à chaque fois (il prend dès qu'il apparaît) ; présent : relu au plus toutes les READY_MS.
   const now = await $.clock.now()
   if (!k.ready || now - k.checkedAt >= READY_MS) {
-    k.ready = (await $.tool.list()).some(tool => tool.mcp && isKernelTool(tool.name))
+    const tools = await $.tool.list()
+    k.ready = tools.some(tool => tool.mcp && isKernelTool(tool.name)) && !inCodeMode(tools)
     k.checkedAt = now
   }
   return k.ready

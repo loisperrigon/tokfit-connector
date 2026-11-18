@@ -3,7 +3,7 @@
 // `/<NAME>`. Rien n'est écrit sur la machine.
 import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import { CHECK_FAST_MS, INSTALL_STALE_S, START_GRACE_MS, diagnose, notice } from '../hooks/python'
+import { CHECK_FAST_MS, CODE_MODE_TEXT, INSTALL_STALE_S, START_GRACE_MS, diagnose, notice } from '../hooks/python'
 import type { PythonFiles } from '../hooks/python'
 import { NAME } from '../hooks/service'
 import { HOME, end, step, user, world } from './support'
@@ -85,6 +85,13 @@ describe('raison de l’absence de agir', () => {
     expect(diagnose(false, false, f, false, at, at - START_GRACE_MS, true)).toBeNull()
   })
 
+  test('Code Mode actif (outil REPL du moteur) : raison code_mode, agir proposé ou non, avant toute autre', () => {
+    const f = parsed(files(install('ready'), launch('managed')))
+    expect(diagnose(true, true, f, true, at, at - START_GRACE_MS, false, true)).toEqual({ reason: 'code_mode' })
+    expect(diagnose(false, false, f, true, at, at - START_GRACE_MS, true, true)).toEqual({ reason: 'code_mode' })
+    expect(diagnose(true, true, f, true, at, at - START_GRACE_MS, false, false)).toBeNull()
+  })
+
   test('serveur lancé depuis moins que le délai de démarrage : pas une panne ; non relié : rien à juger', () => {
     const f = parsed(files(install('ready'), launch('managed')))
     expect(diagnose(false, false, f, true, at, at - 1000)).toEqual({ reason: 'server_starting' })
@@ -99,6 +106,8 @@ describe('raison de l’absence de agir', () => {
     expect(notice({ reason: 'install_failed', detail: 'checksum' })).toMatch(/^installation de Python échouée \(archive altérée/)
     expect(notice({ reason: 'pack_unavailable' })).toBe('outil principal en attente du service (pas encore de réponse) : /tokfit pour le détail')
     expect(notice({ reason: 'key_refused' })).toMatch(/^clé tokfit refusée par le service \(remplacée ou révoquée\), clé d'essai comprise : \/tokfit/)
+    expect(notice({ reason: 'code_mode' })).toBe('bridé par Code Mode, outil principal coupé (Code Mode passe par Bash, Read et Edit, '
+      + 'que cet outil remplace). Déconseillé : retirez CLAUDE_CODE_EXPERIMENTAL_CODE_MODE puis relancez Claude Code ; /tokfit pour le détail')
     expect(notice(null)).toBeNull()
   })
 })
@@ -175,6 +184,28 @@ describe('bandeau, étape et commande', () => {
     await w.clock.settle()
     const steps = w.usages().flatMap(sent => sent.body.steps as Record<string, unknown>[])
     expect(steps.map(s => [s.kernel_unavailable, s.kernel_reason])).toEqual([[undefined, undefined]])
+  })
+
+  test('Code Mode actif : la ligne le dit et le déconseille, l’étape porte la raison, /<NAME> explique pourquoi', async ($, on) => {
+    const w = world(on, { messages: [user('x')], tools: [AGIR, COMPTE, 'REPL'], files: files(install('ready'), launch('managed')) })
+    await started($, w)
+    expect(await shown($)).toBe(`tokfit : ${notice({ reason: 'code_mode' })}`)
+    await step($, 0, { turnId: 't1' })
+    await end($)
+    await w.clock.settle()
+    const steps = w.usages().flatMap(sent => sent.body.steps as Record<string, unknown>[])
+    expect(steps.map(s => [s.kernel_unavailable, s.kernel_reason])).toEqual([[true, 'code_mode']])
+    await $.command.run({ command: NAME, args: '', origin: { kind: 'composer' }, presentation: PRESENTATION })
+    const report = w.shown.find(line => line.startsWith('ui.log Outil principal :'))
+    expect(report).toContain('- outil agir : proposé, levier coupé (Code Mode actif)')
+    expect(report).toContain(CODE_MODE_TEXT)
+    expect(w.shown.join('\n')).toContain(`- kernel : coupé (${notice({ reason: 'code_mode' })})`)
+  })
+
+  test('un outil REPL d’un serveur MCP n’est pas Code Mode', async ($, on) => {
+    const w = world(on, { messages: [user('x')], tools: [AGIR, COMPTE, 'mcp__labo__REPL'], files: files(install('ready'), launch('managed')) })
+    await started($, w)
+    expect(await shown($)).toBeUndefined()
   })
 
   test('/<NAME> : diagnostic complet (Python, installation, serveur, outils, service, version)', async ($, on) => {
