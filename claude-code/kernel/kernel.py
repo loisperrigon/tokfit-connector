@@ -12,13 +12,17 @@ PROLONGEE_MAX depuis le début de la cellule (`kernel/cellule.py`) ; le délai a
 Une cellule coupée propose l'arrière-plan (`job`). Les travaux de fond s'arrêtent avec le noyau : redémarrage,
 fin de session.
 
-Le noyau tourne sur l'interpréteur du serveur (le Python de tokfit, choisi par
-`kernel/launch.sh`), avec -I (ni PYTHONPATH, ni PYTHONHOME, ni site de l'utilisateur)
-et -B ; le code du projet s'importe quand même (`kernel/projet.py`, au démarrage
-du worker). Environnement des commandes qu'il lance : un dossier de shims en tête
-du PATH, où `python` et `python3` lancent le `.venv` du dossier courant s'il
-existe, sinon le premier `python3` du PATH, sinon le Python de tokfit (machine
-sans Python), et `PYTHONDONTWRITEBYTECODE=1`.
+Le noyau tourne sur le Python du projet, celui que lance `python3` dans `shell()` depuis
+son dossier (`python_du_projet`) : le `.venv` du dossier s'il existe, sinon le premier
+`python3` du PATH, avec -B ; ses paquets, son site de l'utilisateur et sa version sont
+donc ceux du projet. Sans Python du projet utilisable (absent, avant 3.9, sonde en échec,
+noyau mort à son démarrage, `TOKFIT_PYTHON` posé), il tourne sur l'interpréteur du
+serveur (le Python de tokfit, choisi par `kernel/launch.sh`), avec -I (ni PYTHONPATH, ni
+PYTHONHOME, ni site de l'utilisateur) et -B ; les paquets d'un venv du projet de même
+version s'y ajoutent (`kernel/projet.py`, au démarrage du worker). Environnement des
+commandes qu'il lance : un dossier de shims en tête du PATH, où `python` et `python3`
+lancent le `.venv` du dossier courant s'il existe, sinon le premier `python3` du PATH,
+sinon le Python de tokfit (machine sans Python), et `PYTHONDONTWRITEBYTECODE=1`.
 Les options du plugin n'y passent pas ; le lien au service arrive par une
 variable que le noyau retire à son démarrage (`kernel/pack.py`).
 """
@@ -40,7 +44,7 @@ from typing import Dict, List, NamedTuple, Optional
 
 from kernel import tubes
 from kernel.cellule import GROUPES, PROLONGE, PROLONGEE_MAX
-from kernel.output import MAX_SORTIE, tronque
+from kernel.output import MAX_SORTIE, marge_valide, tronque
 from kernel.pack import Lien, environnement_du_noyau
 
 WORKER = Path(__file__).with_name("worker.py")
@@ -87,6 +91,14 @@ if not defined TOKFIT_PY set "PYTHONHOME=" & set "TOKFIT_PY={secours}"
 "%TOKFIT_PY%" %*
 """
 SHIMS = ("python", "python3")
+# Python du projet pour le noyau (17/11/2026, retours d'un client : Pillow absent du Python de tokfit, paquets
+# d'un .venv 3.14 invisibles d'un noyau 3.13) : la règle des shims, appliquée au dossier du noyau. La sonde
+# vérifie la version et les modules dont le worker a besoin, sans rien importer du projet.
+SONDE_NOYAU = ("import sys; sys.version_info >= (3, 9) or sys.exit(1); "
+               "import ast, base64, json, linecache, queue, signal, site, subprocess, threading, traceback; "
+               "print('noyau-ok')")
+SONDE_NOYAU_S = 10.0
+RELAIS_MACOS = "/usr/bin/python3"  # sans outils de développement, il ouvre la fenêtre d'installation
 
 
 class Execution(NamedTuple):
@@ -110,6 +122,51 @@ def creer_shims(dossier: Path, secours: str = sys.executable) -> Path:
         shim.write_text(SHIM_PYTHON.format(nom=nom, secours=shlex.quote(secours)), encoding="utf-8")
         shim.chmod(0o755)
     return dossier
+
+
+def relais_macos(chemin: str) -> bool:
+    if sys.platform != "darwin" or chemin != RELAIS_MACOS:
+        return False
+    try:
+        return subprocess.run(["xcode-select", "-p"], capture_output=True, timeout=SONDE_NOYAU_S).returncode != 0
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+
+
+def candidat_du_projet(dossier: str, env: Dict[str, str]) -> Optional[str]:
+    """Ce que lance `python3` dans `shell()` depuis `dossier` (règle des shims), None sans rien."""
+    venv = Path(dossier, ".venv", "Scripts", "python.exe") if tubes.WINDOWS else Path(dossier, ".venv", "bin", "python")
+    if venv.is_file():
+        return str(venv)
+    nom = "python.exe" if tubes.WINDOWS else "python3"
+    for entree in env.get("PATH", "").split(os.pathsep):
+        if not entree or "noyau-shims-" in entree or (tubes.WINDOWS and "\\windowsapps" in entree.lower()):
+            continue
+        chemin = os.path.join(entree, nom)
+        if os.path.isfile(chemin) and os.access(chemin, os.X_OK):
+            return None if relais_macos(chemin) else chemin
+    return None
+
+
+def python_du_projet(dossier: str, env: Dict[str, str]) -> Optional[str]:
+    """Le Python du projet s'il peut porter le noyau (3.9 ou plus, sonde réussie), None sinon : le noyau prend
+    alors l'interpréteur du serveur. `TOKFIT_PYTHON` (interpréteur imposé par l'utilisateur) vaut aussi
+    pour le noyau."""
+    if env.get("TOKFIT_PYTHON"):
+        return None
+    chemin = candidat_du_projet(dossier, env)
+    if chemin is None:
+        return None
+    try:
+        sonde = subprocess.run([chemin, "-B", *tubes.OPTIONS_PYTHON, "-c", SONDE_NOYAU], cwd=dossier, env=env,
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=SONDE_NOYAU_S)
+    except (OSError, subprocess.TimeoutExpired) as erreur:
+        log.warning("Python du projet %s écarté (%s)", chemin, type(erreur).__name__)
+        return None
+    if sonde.returncode != 0 or sonde.stdout.strip() != b"noyau-ok":
+        log.warning("Python du projet %s écarté (sonde : code %s)", chemin, sonde.returncode)
+        return None
+    return chemin
 
 
 def environnement(shims: Path, base: Optional[Dict[str, str]] = None, lien: Optional[Lien] = None) -> Dict[str, str]:
@@ -177,6 +234,11 @@ class Noyau:
         self.echeance = 0.0
         # Groupes de processus des travaux de fond du noyau (`job`), arrêtés avec lui.
         self.groupes: List[int] = []
+        # Interpréteur du noyau, choisi au premier démarrage (`python_du_projet`) ; sys.executable : celui du serveur.
+        self.python: Optional[str] = None
+        # Faux tant que le noyau lancé n'a rendu aucune réponse : mort avant, sur le Python du projet, il repasse sur
+        # celui du serveur.
+        self.eprouve = False
 
     def demarrer(self) -> str:
         """Lance le noyau et rejoue l'amorce ; rend ce que l'amorce a écrit."""
@@ -190,19 +252,34 @@ class Noyau:
         if self.shims is None:
             self.shims = tempfile.TemporaryDirectory(prefix="noyau-shims-")
         env = environnement(creer_shims(Path(self.shims.name)), lien=self.lien)
+        if self.python is None:
+            self.python = python_du_projet(self.cwd or os.getcwd(), env) or sys.executable
+            log.info("noyau sur %s", self.python)
         arguments, options = tubes.pour_enfant(enfant)
-        try:
-            self.processus = subprocess.Popen(
-                [sys.executable, "-I", "-B", *tubes.OPTIONS_PYTHON, str(WORKER), arguments[0], arguments[1],
+
+        def lancer(python: str) -> "subprocess.Popen[bytes]":
+            isolement = ["-I"] if python == sys.executable else []
+            return subprocess.Popen(
+                [python, *isolement, "-B", *tubes.OPTIONS_PYTHON, str(WORKER), arguments[0], arguments[1],
                  str(self.max_sortie), *arguments[2:]],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 cwd=self.cwd, env=env, **options,
             )
+
+        try:
+            try:
+                self.processus = lancer(self.python)
+            except OSError as erreur:
+                if self.python == sys.executable:
+                    raise
+                log.warning("noyau non lancé sur %s (%s) : Python du serveur", self.python, type(erreur).__name__)
+                self.python = sys.executable
+                self.processus = lancer(self.python)
         finally:
             for fd in enfant:
                 os.close(fd)
         self.requetes, self.reponses, self.tampon = ecriture_parent, lire_en_fond(lecture_parent), b""
-        self.en_cours = False
+        self.en_cours = self.eprouve = False
         if not self.amorce:
             return ""
         return self.executer(self.amorce, 120).sortie
@@ -262,8 +339,9 @@ class Noyau:
             finally:
                 self.debut = None
             if reponse is not None:
-                execution = self.borne(reponse)
-                return execution._replace(sortie=tronque(prefixe + execution.sortie, self.max_sortie))
+                limite = self.max_sortie + marge_valide(reponse.get("marge"))
+                execution = self.borne(reponse, limite)
+                return execution._replace(sortie=tronque(prefixe + execution.sortie, limite))
             duree = round(self.echeance - debut)
             reponse = self.interrompre_jusqu_a(GRACE_S)
             if reponse is not None:
@@ -277,10 +355,14 @@ class Noyau:
                 return Execution(ARRETE, False)
             log.warning("noyau mort pendant une cellule : redémarrage")
             sortie = REDEMARRE + self.arreter_travaux()
+            if not self.eprouve and self.python != sys.executable:
+                log.warning("noyau mort avant sa première réponse sur %s : Python du serveur", self.python)
+                self.python = sys.executable
         amorce = self.demarrer()
         return Execution(tronque(f"{sortie}\n{amorce}".rstrip("\n"), self.max_sortie), False)
 
-    def borne(self, reponse: dict[str, object]) -> Execution:
+    def borne(self, reponse: dict[str, object], limite: int) -> Execution:
+        """Réponse du worker vérifiée, sortie coupée à `limite` (la limite plus la marge des textes lus)."""
         ok = bool(reponse["ok"])
         fini = reponse.get("fini")
         usage = reponse.get("usage")
@@ -290,7 +372,7 @@ class Noyau:
         images = [{"data": str(image["data"]), "mimeType": str(image["mimeType"])} for image in brutes
                   if isinstance(image, dict) and isinstance(image.get("data"), str)
                   and isinstance(image.get("mimeType"), str)] if isinstance(brutes, list) else []
-        return Execution(tronque(str(reponse["sortie"]), self.max_sortie), ok,
+        return Execution(tronque(str(reponse["sortie"]), limite), ok,
                          fini if ok and isinstance(fini, str) else None, appels or None, images or None)
 
     def interrompre_jusqu_a(self, delai_s: float) -> Optional[dict[str, object]]:
@@ -362,4 +444,5 @@ class Noyau:
         reponse = json.loads(ligne.decode("utf-8"))
         if not isinstance(reponse, dict):
             raise NoyauMort()
+        self.eprouve = True
         return reponse

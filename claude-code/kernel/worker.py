@@ -1,9 +1,10 @@
 """Processus du noyau : exécute le code reçu dans un espace de noms qui dure.
 
-Lancé par `kernel.Noyau` : `python -I -B worker.py <requêtes> <réponses> <limite> [<interruptions>]` (tubes
+Lancé par `kernel.Noyau` : `python [-I] -B worker.py <requêtes> <réponses> <limite> [<interruptions>]` (tubes
 passés par `kernel/tubes.py` : descripteurs sous POSIX, poignées sous Windows, qui ajoute le tube des
 interruptions) ; les paquets
-des environnements du projet de même version s'ajoutent au démarrage (`kernel/projet.py`).
+des environnements du projet de même version s'ajoutent au démarrage (`kernel/projet.py`), puis le plugin
+s'efface de `sys.path` et de `sys.modules` (`cacher_le_plugin`).
 Les requêtes arrivent sur un tube dédié (une ligne JSON `{"code": …, "timeout_s": …}`), les
 réponses repartent sur un autre (`{"sortie": …, "ok": …, "fini": …, "groupes": …}`, précédées des
 prolongations de la cellule, `kernel/cellule.py`) : stdin est fermé,
@@ -19,7 +20,8 @@ gestionnaire au démarrage, car il hérite sinon de la disposition de son
 parent (SIG_IGN sous `nohup` ou un shell non interactif en arrière-plan), et
 un délai dépassé finirait en arrêt forcé, l'état perdu.
 
-La sortie rendue est coupée à `<limite>` ; la sortie entière de la dernière
+La sortie rendue est coupée à `<limite>`, plus les textes des outils de lecture qu'elle affiche (`__room__`,
+`kernel/output.py`) ; la sortie entière de la dernière
 cellule reste dans `_output`, à découper sans relancer. `fini()` (défini par
 l'amorce) écrit son résumé dans `__fini__` : il ne remonte que si la cellule
 s'est terminée sans exception, le dernier appel l'emporte. Les appels d'outils
@@ -37,14 +39,33 @@ import traceback
 from types import CodeType, TracebackType
 from typing import Any, Dict, List, Optional, Tuple
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+RACINE = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, RACINE)
 
 from kernel import cellule, tubes  # noqa: E402
-from kernel.output import COMPLET_MAX, DANS_SORTIE, Capture, resume_traceback, tronque  # noqa: E402
-from kernel.pack import prendre_lien  # noqa: E402
+from kernel.output import (  # noqa: E402
+    COMPLET_MAX, DANS_SORTIE, PLACE, PLACE_OK, Capture, borne, resume_traceback,
+)
+from kernel.pack import PREFIXE_DANS_LE_NOYAU, prendre_lien  # noqa: E402
 from kernel.projet import ajouter as ajouter_projet  # noqa: E402
 
 CELLULE = "<cell-{}>"
+
+
+def du_plugin(chemin: str) -> bool:
+    """Vrai si `chemin` est la racine du plugin ou un fichier, un dossier sous elle."""
+    reel = os.path.realpath(chemin)
+    return reel == RACINE or reel.startswith(RACINE + os.sep)
+
+
+def cacher_le_plugin() -> None:
+    """Retire les dossiers du plugin de `sys.path` et renomme ses modules chargés (`kernel.output` devient
+    `_tokfit_kernel.output`) : le projet importe ses propres `kernel`, `output`, `server`… comme avec `python3`."""
+    sys.path[:] = [chemin for chemin in sys.path if not chemin or not du_plugin(chemin)]
+    for nom, module in list(sys.modules.items()):
+        fichier = getattr(module, "__file__", None)
+        if nom != "__main__" and isinstance(fichier, str) and du_plugin(fichier):
+            sys.modules[PREFIXE_DANS_LE_NOYAU + nom] = sys.modules.pop(nom)
 FINI = "__fini__"
 USAGE = "__usage__"
 # Images posées par `look` de l'amorce (`{"data": base64, "mimeType": …}`), rendues en blocs image par le
@@ -79,6 +100,7 @@ def executer(code: str, numero: int, espace: Dict[str, Any], limite: int) -> Dic
     capture = Capture(COMPLET_MAX)
     sys.stdout = sys.stderr = capture
     espace[FINI] = None
+    espace.pop(PLACE, None)
     ok = True
     try:
         corps, derniere = compiler(code, nom)
@@ -106,7 +128,8 @@ def executer(code: str, numero: int, espace: Dict[str, Any], limite: int) -> Dic
     espace["_output"] = espace["_sortie"] = complete  # `_sortie` : ancien nom, gardé en alias
     fini = espace.pop(FINI, None)
     usage = espace.pop(USAGE, None)
-    return {"sortie": tronque(complete, limite, DANS_SORTIE), "ok": ok,
+    sortie, marge = borne(complete, limite, espace.pop(PLACE, None), DANS_SORTIE)
+    return {"sortie": sortie, "ok": ok, "marge": marge,
             "fini": str(fini) if ok and fini is not None else None,
             "usage": {cle: n for cle, n in usage.items() if isinstance(cle, str) and type(n) is int}
             if isinstance(usage, dict) else {},
@@ -138,7 +161,7 @@ def images_valides(images: object) -> List[Dict[str, str]]:
 
 
 def boucle(fd_requetes: int, fd_reponses: int, limite: int) -> None:
-    espace: Dict[str, Any] = {"__name__": "__main__", "__builtins__": __builtins__, IMAGES_OK: True}
+    espace: Dict[str, Any] = {"__name__": "__main__", "__builtins__": __builtins__, IMAGES_OK: True, PLACE_OK: True}
     requetes = os.fdopen(fd_requetes, "r", encoding="utf-8")
     reponses = os.fdopen(fd_reponses, "w", encoding="utf-8", newline="\n")
     cellule.ouvrir(reponses)
@@ -175,4 +198,5 @@ if __name__ == "__main__":
         tubes.ecouter_interruptions(tubes.ouvrir(sys.argv[4], ecriture=False))
     prendre_lien()
     ajouter_projet(os.getcwd(), os.environ)
+    cacher_le_plugin()
     boucle(tubes.ouvrir(sys.argv[1], ecriture=False), tubes.ouvrir(sys.argv[2], ecriture=True), int(sys.argv[3]))

@@ -60,7 +60,9 @@ from kernel.compte import compte, schema as schema_compte  # noqa: E402
 from kernel.cellule import PROLONGEE_MAX  # noqa: E402
 from kernel.kernel import TIMEOUT_MAX, Noyau  # noqa: E402
 from kernel.output import MAX_SORTIE  # noqa: E402
-from kernel.pack import DELAI_RELANCE_S, DELAI_S, Lien, Paquet, cle_attendue, compter, lien, recevoir  # noqa: E402
+from kernel.pack import (  # noqa: E402
+    DELAI_RELANCE_S, DELAI_S, PREFIXE_DANS_LE_NOYAU, Lien, Paquet, cle_attendue, compter, lien, recevoir,
+)
 
 NOM = "outils"
 # Nom neutre de l'outil d'action, affiché dans l'interface : il ne dit rien de la méthode (choix de Lois du 15/11/2026).
@@ -119,7 +121,7 @@ def entier(env: Dict[str, str], nom: str, defaut: int) -> int:
 def code_amorce(paquet: Paquet) -> str:
     """Cellule de démarrage : l'amorce reçue exécutée dans un module en mémoire, qui charge les outils."""
     return ("import sys as _s, types as _t\n"
-            "from kernel.pack import sauver_outil as _sauver\n"
+            f"from {PREFIXE_DANS_LE_NOYAU}kernel.pack import sauver_outil as _sauver\n"
             "_m = _t.ModuleType('noyau_amorce')\n"
             "_s.modules['noyau_amorce'] = _m\n"
             f"exec(compile({paquet.amorce!r}, '<bootstrap>', 'exec'), _m.__dict__)\n"

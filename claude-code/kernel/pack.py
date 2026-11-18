@@ -39,6 +39,10 @@ VARIABLE_LIEN = "TOKFIT_NOYAU_LIEN"
 OPTIONS = ("CLAUDE_PLUGIN_OPTION_API_KEY", "CLAUDE_PLUGIN_OPTION_SERVICE_URL")
 log = logging.getLogger("tokfit.kernel")
 
+# Dans le noyau, les modules du plugin sont renommés avec ce préfixe (`cacher_le_plugin` de worker.py) :
+# `kernel.pack` y devient `_tokfit_kernel.pack`.
+PREFIXE_DANS_LE_NOYAU = "_tokfit_"
+
 Lien = Tuple[str, str]
 _lien_du_noyau: Optional[Lien] = None
 

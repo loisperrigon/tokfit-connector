@@ -1,4 +1,6 @@
-"""Le code du projet s'importe depuis le noyau, qui tourne sur le Python de tokfit lancé avec -I.
+"""Le code du projet s'importe depuis le noyau quand il tourne sur le Python de tokfit, lancé avec -I (aucun
+Python du projet utilisable : `python_du_projet` de `kernel/kernel.py`). Sur le Python du projet, tout ce
+module ne trouve rien à ajouter.
 
 -I écarte PYTHONPATH, le site de l'utilisateur et le dossier courant : l'amorce remet le dossier
 courant (`""` en fin de `sys.path`), et ce module ajoute les paquets des environnements du projet
