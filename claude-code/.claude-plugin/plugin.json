@@ -1,7 +1,7 @@
 {
   "name": "tokfit",
-  "version": "0.7.26",
-  "description": "Consommer moins avec le même abonnement : modèle et réflexion de Claude Code choisis à chaque message par le service.",
+  "version": "0.7.27",
+  "description": "Same Claude Code, smaller bill: leaner sessions (context, prompt cache, command output) with the model you chose. About 25% cheaper on Terminal-Bench 4.0.",
   "author": { "name": "Lois Perrigon" },
   "icon": "./icon.png",
   "mcpServers": {
@@ -14,15 +14,15 @@
   "userConfig": {
     "api_key": {
       "type": "string",
-      "title": "Clé du service",
-      "description": "Facultatif : sans clé, l'essai démarre tout seul (clé anonyme). Après l'abonnement, la clé remise une fois (ek_…). Gardée dans le trousseau, jamais dans settings.json.",
+      "title": "Service key",
+      "description": "Optional: without a key, the trial starts on its own (anonymous key). Kept in the keychain, never in settings.json.",
       "sensitive": true,
       "required": false
     },
     "service_url": {
       "type": "string",
-      "title": "Adresse du service",
-      "description": "Laisser vide : adresse officielle. Pour un essai local : http://127.0.0.1:8790.",
+      "title": "Service address",
+      "description": "Leave empty for the official address. For a local test: http://127.0.0.1:8790.",
       "default": ""
     }
   }
