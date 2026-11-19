@@ -16,6 +16,7 @@ import type { EngineInterface } from 'claude-code'
 import { bounded } from './bounded'
 import { TIMEOUT_MS } from './service'
 import type { Link } from './service'
+import { language, t } from './lang'
 
 export const BADGE_EVERY_MS = 5 * 60_000
 export const FRAME_MS = 60
@@ -70,14 +71,22 @@ export function badge(): Badge {
   return { busy: false, from: 0 }
 }
 
+// Montant en dollars : « 12 $ », « 1,50 $ » ; en anglais « $12 », « $1.50 ».
 export function money(usd: number): string {
+  if (language() === 'en') return usd >= 10 ? `$${Math.round(usd)}` : `$${usd.toFixed(2)}`
   return usd >= 10 ? `${Math.round(usd)} $` : `${usd.toFixed(2).replace('.', ',')} $`
 }
 
 export function duration(seconds: number): string {
   const minutes = Math.round(seconds / 60)
   if (minutes < 60) return `${minutes} min`
+  if (language() === 'en') return `${Math.floor(minutes / 60)} hr ${minutes % 60} min`
   return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')}`
+}
+
+// Part gagnée : « −25 % » ; en anglais « −25% ».
+export function share(percent: number): string {
+  return t(`−${Math.round(percent)} %`, `−${Math.round(percent)}%`)
 }
 
 // Marque d'un chiffre estimé, devant le montant.
@@ -104,10 +113,16 @@ export function gainOf(text: string): Gain | undefined {
 // Le bandeau en une ligne de texte, celle que lit un lecteur d'écran.
 export function badgeText(g: Gain, shown: number = g.saved): string {
   const amount = `${approx(g)}${money(shown)}`
-  const parts = [g.reference !== undefined ? `${amount} économisés sur ${money(g.reference)}` : `${amount} économisés`]
-  if (g.percent !== undefined) parts.push(`−${Math.round(g.percent)} %`)
-  if (g.seconds !== undefined) parts.push(`${duration(g.seconds)} d'attente en moins`)
+  const parts = [`${amount}${savedWords(g.reference)}`]
+  if (g.percent !== undefined) parts.push(share(g.percent))
+  if (g.seconds !== undefined) parts.push(t(`${duration(g.seconds)} d'attente en moins`, `${duration(g.seconds)} less waiting`))
   return parts.join(' · ')
+}
+
+// Ce qui suit le montant : « économisés sur 40 $ », ou « économisés » sans référence.
+export function savedWords(reference: number | undefined): string {
+  return reference !== undefined ? t(` économisés sur ${money(reference)}`, ` saved out of ${money(reference)}`)
+    : t(' économisés', ' saved')
 }
 
 // Le gain en texte simple pour la ligne d'état : le montant monte avec le bandeau (la part reste fixe), une étincelle tourne
@@ -116,8 +131,8 @@ export function statusText(b: Badge, now: number): string | undefined {
   const g = b.gain
   if (!g) return undefined
   const shown = current(b)
-  const parts = [`${approx(g)}${money(shown.saved)} économisés`]
-  if (g.percent !== undefined) parts.push(`−${Math.round(g.percent)} %`)
+  const parts = [`${approx(g)}${money(shown.saved)}${savedWords(undefined)}`]
+  if (g.percent !== undefined) parts.push(share(g.percent))
   if (b.delta !== undefined && b.deltaUntil !== undefined && now < b.deltaUntil) {
     parts.push(`+${money(b.delta)} ${b.frame !== undefined ? shown.spark : '↑'}`)
   }

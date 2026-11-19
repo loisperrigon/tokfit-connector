@@ -2,9 +2,11 @@
 // par processus en ligne de la conversation (`$.ui.log`) : le message de fin
 // d'essai (champ `notice` d'une réponse 402) et la phrase qui dit qu'une limite du
 // compte a changé le réglage (champ `notice` d'une réponse 200 de /v1/route).
-// Rien n'est ajouté au texte, rien n'entre dans le prompt. Seule ligne du
-// connecteur lui-même : la clé configurée refusée, remplacée par la clé anonyme.
+// Rien n'est ajouté au texte, rien n'entre dans le prompt (le service l'écrit dans la langue du
+// client). Seule ligne du connecteur lui-même : la clé configurée refusée, remplacée par la clé
+// anonyme, dans la langue des textes (lang.ts).
 import type { EngineInterface } from 'claude-code'
+import { t } from './lang'
 
 // Lignes de la console et de l'écran : le terminal en dessine 2000 caractères.
 export const NOTICE_MAX = 2000
@@ -16,8 +18,10 @@ const shown = new Set<string>()
 
 // Clé configurée refusée par le service (401, 403) : la clé anonyme a pris le relais (service.ts).
 export function refusedKeyText(name: string): string {
-  return `Clé ${name} configurée refusée par le service (remplacée ou révoquée) : ${name} continue avec une clé ` +
-    `d'essai sur cette machine. Pour retrouver votre abonnement, connectez cet appareil à votre compte depuis /${name}.`
+  return t(`Clé ${name} configurée refusée par le service (remplacée ou révoquée) : ${name} continue avec une clé ` +
+    `d'essai sur cette machine. Pour retrouver votre abonnement, connectez cet appareil à votre compte depuis /${name}.`,
+  `Configured ${name} key refused by the service (replaced or revoked): ${name} continues with a trial key on ` +
+    `this machine. To get your subscription back, connect this device to your account from /${name}.`)
 }
 
 export function refusedKeyNotice($: EngineInterface, name: string): void {

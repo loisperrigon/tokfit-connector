@@ -2,11 +2,18 @@
 // qu'embarque une application hôte) : la première copie admise refuse les suivantes au
 // chargement (`plugin.register`), la copie refusée ne pose aucun hook. Les deux lisent le
 // même environnement (relais, leviers coupés, pont de l'application).
+import { t } from './lang'
 
 // Noms sous lesquels le connecteur se charge : celui du dépôt (copie embarquée par une
 // application hôte) et celui de sa version publiée.
 export const COPIES: readonly string[] = ['economiseur', 'tokfit'] // publish: keep
 export const REFUSED = 'une copie du connecteur agit déjà dans cette session'
+export const REFUSED_EN = 'a copy of the connector is already running in this session'
+
+// Raison du refus dans la langue des textes (lang.ts).
+export function refusedText(): string {
+  return t(REFUSED, REFUSED_EN)
+}
 
 export type Loaded = { name: string; root: string }
 

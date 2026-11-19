@@ -5,6 +5,7 @@
 // Claude Code, qui installe tout seul la version publiée (marketplace, mise à jour automatique).
 import type { EngineInterface } from 'claude-code'
 import { pythonFiles } from './python'
+import { t } from './lang'
 
 export type Versions = { plugin?: string; python?: string; claude_code?: string; host?: string }
 
@@ -74,5 +75,6 @@ export function older(version: string, minimum: string): boolean {
 // Ligne du bandeau quand ce connecteur est sous la version minimale du service ; null sinon.
 export function updateNotice(version: string | undefined, minimum: unknown): string | null {
   if (version === undefined || typeof minimum !== 'string' || !older(version, minimum)) return null
-  return `connecteur ${version} trop ancien (${minimum} au moins) : relance Claude Code pour charger la mise à jour automatique.`
+  return t(`connecteur ${version} trop ancien (${minimum} au moins) : relance Claude Code pour charger la mise à jour automatique.`,
+    `connector ${version} too old (${minimum} at least): restart Claude Code to load the automatic update.`)
 }

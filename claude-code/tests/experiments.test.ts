@@ -3,6 +3,7 @@ import { EXECUTION_SECTION } from './plan'
 // la liste une fois par session et n'applique pas ceux qu'elle cite.
 import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
+import { locale } from '../hooks/lang'
 import { CORE_PROMPT, SESSION, complete, end, spawn, step, user, world } from './support'
 import type { Options, Reply, World } from './support'
 
@@ -30,7 +31,8 @@ describe('leviers coupés pour la session', () => {
     await $.prompt.compose(COMPOSE)
     await step($, 0, { turnId: 't1' })
     await step($, 1, { turnId: 't1' })
-    expect(w.leverCalls().map(sent => sent.body)).toEqual([{ session_id: SESSION, versions: { claude_code: '2.1.280' } }])
+    const spoken = locale()
+    expect(w.leverCalls().map(sent => sent.body)).toEqual([{ session_id: SESSION, versions: { claude_code: '2.1.280' }, ...(spoken ? { locale: spoken } : {}) }])
   })
 
   test('réflexion coupée : ni section ni lean_thinking', async ($, on) => {

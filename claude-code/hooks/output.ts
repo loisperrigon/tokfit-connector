@@ -12,6 +12,7 @@
 // Algorithmes inspirés des compresseurs de caveman (Apache-2.0), réécrits ici.
 
 import type { OutputPlan } from './plan'
+import { t } from './lang'
 export const RAW = 'TOKFIT_RAW=1'
 
 // Paramètres (seuils, listes) : ceux du plan de session (plan.ts). Au-delà de `long` lignes
@@ -62,7 +63,7 @@ function collapse(lines: string[], repeat: number): string[] {
     let end = index + 1
     while (end < lines.length && lines[end] === line) end++
     const count = end - index
-    if (count >= repeat) out.push(line, `[… ligne répétée ${count - 1} fois de plus]`)
+    if (count >= repeat) out.push(line, t(`[… ligne répétée ${count - 1} fois de plus]`, `[… line repeated ${count - 1} more times]`))
     else out.push(...lines.slice(index, end))
     index = end
   }
@@ -97,15 +98,18 @@ export function trim(text: string, rules: OutputPlan): Trimmed {
   const hidden = middle.length - kept.length
   const shown = [
     ...lines.slice(0, head),
-    `[… ${hidden} lignes masquées${kept.length ? ` ; lignes d'erreur gardées :` : ''}]`,
+    t(`[… ${hidden} lignes masquées${kept.length ? ` ; lignes d'erreur gardées :` : ''}]`,
+      `[… ${hidden} lines hidden${kept.length ? '; error lines kept:' : ''}]`),
     ...kept.map(({ line, at }) => `${at + 1}: ${line}`),
-    ...(kept.length ? ['[… fin des lignes gardées]'] : []),
+    ...(kept.length ? [t('[… fin des lignes gardées]', '[… end of kept lines]')] : []),
     ...lines.slice(lines.length - tail),
   ]
   return { text: shown.join('\n'), hidden }
 }
 
 export function note(hidden: number): string {
-  return `tokfit : ${hidden} lignes de cette sortie ont été masquées (début, fin et lignes d'erreur gardés). ` +
-    `Pour la sortie entière, relance la commande précédée de ${RAW}.`
+  return t(`tokfit : ${hidden} lignes de cette sortie ont été masquées (début, fin et lignes d'erreur gardés). ` +
+    `Pour la sortie entière, relance la commande précédée de ${RAW}.`,
+  `tokfit: ${hidden} lines of this output were hidden (start, end and error lines kept). ` +
+    `For the whole output, run the command again prefixed with ${RAW}.`)
 }

@@ -12,6 +12,7 @@ import { notice as healthNotice } from './python'
 import type { Health } from './python'
 import { NAME } from './service'
 import type { Link } from './service'
+import { t } from './lang'
 
 // Leviers du connecteur, dans l'ordre de LEVERS de service/experiments.py (vérifié par
 // tests/test_connector.py), et partie du plan de session dont chacun a besoin.
@@ -30,38 +31,47 @@ export function notice(): Notice {
 }
 
 function codeText(code: number): string {
-  return code === 0 ? 'service injoignable' : `code ${code}`
+  return code === 0 ? t('service injoignable', 'service unreachable') : `code ${code}`
 }
 
 // Plan de session absent : une seule ligne pour la personne, jamais pour le modèle.
 export function planNotice($: EngineInterface, n: Notice, code: number): void {
   if (n.shown || code === OWN_NOTICE) return
   n.shown = true
-  $.ui.log(`Économies en pause : le plan du service n'a pas pu être chargé (${codeText(code)}). `
-    + `La session continue sans les leviers qui en dépendent ; nouvel essai automatique. /${NAME} montre leur état.`)
+  $.ui.log(t(`Économies en pause : le plan du service n'a pas pu être chargé (${codeText(code)}). `
+    + `La session continue sans les leviers qui en dépendent ; nouvel essai automatique. /${NAME} montre leur état.`,
+  `Savings paused: the service plan could not be loaded (${codeText(code)}). `
+    + `The session goes on without the levers that need it; it will retry on its own. /${NAME} shows their state.`))
 }
 
 export type Sources = { holdout: Holdout; content: Plans; kernel: Kernel; health: Health }
 
 // Une ligne par levier : actif, coupé (et par qui) ou inactif (et pourquoi).
 export async function leverReport($: EngineInterface, src: Sources, to: Link | null): Promise<string> {
-  if (!to) return 'Leviers : inactifs, connecteur non relié au service (adresse ou clé absente).'
+  if (!to) return t('Leviers : inactifs, connecteur non relié au service (adresse ou clé absente).',
+    'Levers: inactive, connector not linked to the service (address or key missing).')
   const [plan, told, local] = await Promise.all([sessionPlan($, src.content, to), answer($, src.holdout, to), chosen($, src.holdout)])
   const lines: string[] = []
   for (const [lever, part] of LEVERS) {
-    let state = 'actif'
-    if (local.has(lever)) state = 'coupé (réglage de l\'application ou de l\'utilisateur)'
+    let state = t('actif', 'active')
+    if (local.has(lever)) state = t('coupé (réglage de l\'application ou de l\'utilisateur)', 'off (app or user setting)')
     // Routage par message en bêta coupé sur le compte : le service garde modèle et réflexion.
-    else if (told.disabled.has(lever)) state = lever === 'routing' ? 'option bêta coupée (à activer dans le tableau de bord)' : 'coupé (réglage du compte)'
-    else if (told.off.has(lever)) state = 'coupé (session témoin du service)'
-    else if (part !== null && plan === null) state = `inactif (plan du service absent, ${codeText(src.content.missing ?? 0)})`
-    else if (part !== null && plan?.[part] === undefined) state = 'inactif (absent du plan du service)'
+    else if (told.disabled.has(lever)) {
+      state = lever === 'routing' ? t('option bêta coupée (à activer dans le tableau de bord)', 'beta option off (turn it on in the dashboard)')
+        : t('coupé (réglage du compte)', 'off (account setting)')
+    } else if (told.off.has(lever)) state = t('coupé (session témoin du service)', 'off (service holdout session)')
+    else if (part !== null && plan === null) {
+      const code = codeText(src.content.missing ?? 0)
+      state = t(`inactif (plan du service absent, ${code})`, `inactive (service plan missing, ${code})`)
+    } else if (part !== null && plan?.[part] === undefined) state = t('inactif (absent du plan du service)', 'inactive (not in the service plan)')
     else if (lever === 'kernel' && !(await kernelReady($, src.kernel))) {
       const why = healthNotice(src.health.diagnosis)
-      state = src.health.diagnosis?.reason === 'code_mode' ? `coupé (${why})`
-        : why ? `inactif (outil agir non connecté : ${why})` : 'inactif (outil agir non connecté)'
+      state = src.health.diagnosis?.reason === 'code_mode' ? t(`coupé (${why})`, `off (${why})`)
+        : why ? t(`inactif (outil agir non connecté : ${why})`, `inactive (agir tool not connected: ${why})`)
+        : t('inactif (outil agir non connecté)', 'inactive (agir tool not connected)')
     }
-    lines.push(`- ${lever} : ${state}`)
+    lines.push(t(`- ${lever} : ${state}`, `- ${lever}: ${state}`))
   }
-  return ['Leviers de cette session :', ...lines, ...(told.outdated ? [`Mise à jour : ${told.outdated}`] : [])].join('\n')
+  const update = told.outdated ? [t(`Mise à jour : ${told.outdated}`, `Update: ${told.outdated}`)] : []
+  return [t('Leviers de cette session :', 'Levers for this session:'), ...lines, ...update].join('\n')
 }

@@ -49,7 +49,8 @@ import { health, notice as healthNotice, refreshed } from './python'
 import type { Health } from './python'
 import type { Badge } from './badge'
 import { awake, back, cancel, rest, waited, warm } from './warm'
-import { REFUSED, twin } from './single'
+import { refusedText, twin } from './single'
+import { resetLanguage } from './lang'
 import { plans, section, sessionPlan } from './plan'
 import { carried, prefix, taken } from './prefix'
 import type { Prefix } from './prefix'
@@ -852,6 +853,8 @@ async function paused($: EngineInterface, s: State): Promise<void> {
 }
 
 export const register: Register = (on, options) => {
+  // Langue des textes : le français jusqu'à la réponse du service (lang.ts).
+  resetLanguage()
   const s: State = {
     options, queue: queue(options), to: null, routedModel: undefined, turn: {}, steered: new Set(), tags: NO_TAGS, plans: new Map(),
     pending: new Map(), spawning: 0, loops: new Map(), requested: new Map(), sources: new Map(), lastCall: new Map(),
@@ -877,7 +880,7 @@ export const register: Register = (on, options) => {
 
   // Une autre copie du connecteur sur le point de se charger : refusée (single.ts).
   // En cas d'échec du jugement, elle se charge : jamais de blocage par le connecteur.
-  on('plugin.register', ($, e, next) => (twin({ name: $.plugin.name, root: $.plugin.root }, e) ? { refuse: REFUSED } : next(e)))
+  on('plugin.register', ($, e, next) => (twin({ name: $.plugin.name, root: $.plugin.root }, e) ? { refuse: refusedText() } : next(e)))
     .catch(($, e, next) => next(e))
 
   on('turn.step', async function* ($, e, next) {

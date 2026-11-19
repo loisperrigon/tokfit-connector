@@ -12,6 +12,7 @@
 import type { EngineInterface } from 'claude-code'
 import { inCodeMode, isAccountTool, isKernelTool } from './kernel'
 import { keyRefused } from './service'
+import { t } from './lang'
 
 // Raisons de l'absence de `agir` : KERNEL_REASONS de service/usage.py (vérifié par tests/test_connector.py).
 export const REASONS = ['python_installing', 'python_missing', 'install_failed', 'unsupported_platform',
@@ -119,25 +120,25 @@ export function diagnose(kernel: boolean, account: boolean, f: PythonFiles, link
   return source === '' ? { reason: 'server_down', detail: 'no_launch' } : { reason: 'server_down' }
 }
 
-const DETAIL_TEXT: Record<Detail, string> = {
-  disabled: 'installation de Python désactivée par TOKFIT_PYTHON_INSTALL=0',
-  unsupported_platform: 'système non pris en charge',
-  no_downloader: 'aucun outil de téléchargement : installez curl ou wget',
-  no_hash_tool: 'aucun outil de somme SHA-256',
-  no_tar: 'tar absent',
-  no_cache_dir: 'dossier de cache non inscriptible',
-  download: 'téléchargement impossible',
-  checksum: 'archive altérée : somme SHA-256 différente',
-  extract: 'archive illisible',
-  verify: 'Python installé mais inutilisable',
-  disk: 'disque plein ou cache non inscriptible',
-  interrupted: 'installation interrompue',
-  windows: 'Windows : connecteur antérieur à 0.7.13, à mettre à jour',
-  no_launch: 'lanceur jamais parti : sh (ou PowerShell sous Windows) introuvable ?',
+const DETAIL_TEXT: Record<Detail, readonly [string, string]> = {
+  disabled: ['installation de Python désactivée par TOKFIT_PYTHON_INSTALL=0', 'Python installation disabled by TOKFIT_PYTHON_INSTALL=0'],
+  unsupported_platform: ['système non pris en charge', 'unsupported system'],
+  no_downloader: ['aucun outil de téléchargement : installez curl ou wget', 'no download tool: install curl or wget'],
+  no_hash_tool: ['aucun outil de somme SHA-256', 'no SHA-256 checksum tool'],
+  no_tar: ['tar absent', 'tar missing'],
+  no_cache_dir: ['dossier de cache non inscriptible', 'cache folder not writable'],
+  download: ['téléchargement impossible', 'download failed'],
+  checksum: ['archive altérée : somme SHA-256 différente', 'corrupted archive: SHA-256 checksum mismatch'],
+  extract: ['archive illisible', 'unreadable archive'],
+  verify: ['Python installé mais inutilisable', 'Python installed but unusable'],
+  disk: ['disque plein ou cache non inscriptible', 'disk full or cache not writable'],
+  interrupted: ['installation interrompue', 'installation interrupted'],
+  windows: ['Windows : connecteur antérieur à 0.7.13, à mettre à jour', 'Windows: connector older than 0.7.13, update it'],
+  no_launch: ['lanceur jamais parti : sh (ou PowerShell sous Windows) introuvable ?', 'launcher never started: sh (or PowerShell on Windows) not found?'],
 }
 
 export function detailText(detail: Detail | undefined): string {
-  return detail ? DETAIL_TEXT[detail] : ''
+  return detail ? t(...DETAIL_TEXT[detail]) : ''
 }
 
 // Code Mode actif : ce que tokfit perd, pourquoi, et quoi faire (`/<NAME>`).
@@ -146,22 +147,38 @@ export const CODE_MODE_TEXT = 'Code Mode (mode expérimental de Claude Code) est
   + 'les laisse en place et coupe son outil principal, son plus gros levier d\'économie. Le routage, la compaction et le '
   + 'cache gardé au chaud restent actifs. Nous déconseillons Code Mode avec tokfit : retirez '
   + 'CLAUDE_CODE_EXPERIMENTAL_CODE_MODE de votre shell et de ~/.claude/settings.json, puis relancez Claude Code.'
+export const CODE_MODE_TEXT_EN = 'Code Mode (an experimental Claude Code mode) is active in this session. Its scripts call '
+  + 'Bash, Read and Edit, the tools that tokfit replaces with its main tool agir: so as not to break Code Mode, tokfit '
+  + 'leaves them in place and turns off its main tool, its biggest saving. Routing, compaction and the cache kept warm '
+  + 'stay active. We advise against Code Mode with tokfit: remove CLAUDE_CODE_EXPERIMENTAL_CODE_MODE from your shell '
+  + 'and from ~/.claude/settings.json, then restart Claude Code.'
+
+export function codeModeText(): string {
+  return t(CODE_MODE_TEXT, CODE_MODE_TEXT_EN)
+}
 
 // Ligne du bandeau, courte ; null quand rien n'est à dire (outil là, ou serveur qui démarre).
 export function notice(d: Diagnosis | null | undefined): string | null {
   if (!d) return null
   const why = d.detail ? ` (${detailText(d.detail)})` : ''
   switch (d.reason) {
-    case 'python_installing': return 'aucun Python 3.9+ sur la machine : téléchargement de Python en cours, l\'outil principal arrive'
-    case 'python_missing': return `outil principal indisponible${why}`
-    case 'install_failed': return `installation de Python échouée${why}, nouvel essai à la prochaine session`
-    case 'unsupported_platform': return `outil principal indisponible${why}`
+    case 'python_installing': return t('aucun Python 3.9+ sur la machine : téléchargement de Python en cours, l\'outil principal arrive',
+      'no Python 3.9+ on this machine: downloading Python, the main tool is on its way')
+    case 'python_missing': return t(`outil principal indisponible${why}`, `main tool unavailable${why}`)
+    case 'install_failed': return t(`installation de Python échouée${why}, nouvel essai à la prochaine session`,
+      `Python installation failed${why}, trying again next session`)
+    case 'unsupported_platform': return t(`outil principal indisponible${why}`, `main tool unavailable${why}`)
     case 'server_starting': return null
-    case 'server_down': return `outil principal arrêté${why} : /mcp pour relancer le serveur « outils »`
-    case 'pack_unavailable': return 'outil principal en attente du service (pas encore de réponse) : /tokfit pour le détail'
-    case 'code_mode': return 'bridé par Code Mode, outil principal coupé (Code Mode passe par Bash, Read et Edit, que cet outil remplace). '
-      + 'Déconseillé : retirez CLAUDE_CODE_EXPERIMENTAL_CODE_MODE puis relancez Claude Code ; /tokfit pour le détail'
-    case 'key_refused': return 'clé tokfit refusée par le service (remplacée ou révoquée), clé d\'essai comprise : /tokfit pour rattacher cet appareil à votre compte'
+    case 'server_down': return t(`outil principal arrêté${why} : /mcp pour relancer le serveur « outils »`,
+      `main tool stopped${why}: /mcp to restart the "outils" server`)
+    case 'pack_unavailable': return t('outil principal en attente du service (pas encore de réponse) : /tokfit pour le détail',
+      'main tool waiting for the service (no answer yet): /tokfit for details')
+    case 'code_mode': return t('bridé par Code Mode, outil principal coupé (Code Mode passe par Bash, Read et Edit, que cet outil remplace). '
+      + 'Déconseillé : retirez CLAUDE_CODE_EXPERIMENTAL_CODE_MODE puis relancez Claude Code ; /tokfit pour le détail',
+    'limited by Code Mode, main tool turned off (Code Mode goes through Bash, Read and Edit, which this tool replaces). '
+      + 'Not advised: remove CLAUDE_CODE_EXPERIMENTAL_CODE_MODE then restart Claude Code; /tokfit for details')
+    case 'key_refused': return t('clé tokfit refusée par le service (remplacée ou révoquée), clé d\'essai comprise : /tokfit pour rattacher cet appareil à votre compte',
+      'tokfit key refused by the service (replaced or revoked), trial key included: /tokfit to link this device to your account')
   }
 }
 
@@ -219,34 +236,45 @@ export function watch($: EngineInterface, h: Health, linked: () => Promise<boole
   void tick().catch(() => undefined)
 }
 
-const SOURCE_TEXT: Record<string, string> = { managed: 'installé par tokfit', system: 'déjà présent sur la machine', forced: 'imposé par TOKFIT_PYTHON' }
+const SOURCE_TEXT: Record<string, readonly [string, string]> = {
+  managed: ['installé par tokfit', 'installed by tokfit'],
+  system: ['déjà présent sur la machine', 'already on this machine'],
+  forced: ['imposé par TOKFIT_PYTHON', 'set by TOKFIT_PYTHON'],
+}
 
 // Diagnostic complet pour `/<NAME>` : Python, installation, serveur, outils, service, version du connecteur.
 export function healthReport(d: Diagnosis | null | undefined, f: PythonFiles, tools: { kernel: boolean; account: boolean },
   service: string, version: string | undefined): string {
   const launch = f.launch
   const source = text(launch?.source)
+  const known = SOURCE_TEXT[source]
+  const offered = t('proposé', 'offered')
   const python = source !== '' && source !== 'none'
-    ? `${text(launch?.version)} ${SOURCE_TEXT[source] ?? source} (${text(launch?.path)})`
-    : source === 'none' ? `aucun (${notice(d) ?? text(launch?.reason)})` : 'inconnu (lanceur jamais parti)'
+    ? `${text(launch?.version)} ${known ? t(...known) : source} (${text(launch?.path)})`
+    : source === 'none' ? t(`aucun (${notice(d) ?? text(launch?.reason)})`, `none (${notice(d) ?? text(launch?.reason)})`)
+    : t('inconnu (lanceur jamais parti)', 'unknown (launcher never started)')
   const state = text(f.install?.state)
-  const install = state === 'ready' ? `prête (${text(f.install?.version)}, ${text(f.install?.target)})`
-    : state === 'installing' ? 'en cours'
-    : state === 'failed' ? `échouée (${detailText(detailOf(f.install?.detail)) || text(f.install?.detail)})`
-    : source === 'system' ? 'inutile (Python de la machine utilisé)'
-    : 'jamais lancée'
-  const server = tools.kernel || tools.account ? 'démarré'
-    : d?.reason === 'server_starting' ? 'en démarrage'
-    : d?.reason === 'server_down' ? `arrêté${d.detail ? ` (${detailText(d.detail)})` : ''}` : 'en attente de Python'
-  const kernel = d?.reason === 'code_mode' ? `${tools.kernel ? 'proposé' : 'absent'}, levier coupé (Code Mode actif)`
-    : tools.kernel ? 'proposé' : `absent${d ? ` (${notice(d) ?? 'serveur en démarrage'})` : ''}`
-  return ['Outil principal :',
-    `- connecteur : ${version ?? 'version inconnue'}`,
-    `- Python : ${python}`,
-    `- installation de Python : ${install}`,
-    `- serveur MCP « outils » : ${server}`,
-    `- outil agir : ${kernel}`,
-    `- outil compte : ${tools.account ? 'proposé' : 'absent'}`,
-    `- service : ${service}`,
-    ...(d?.reason === 'code_mode' ? ['', CODE_MODE_TEXT] : [])].join('\n')
+  const failedWhy = detailText(detailOf(f.install?.detail)) || text(f.install?.detail)
+  const install = state === 'ready' ? t(`prête (${text(f.install?.version)}, ${text(f.install?.target)})`, `ready (${text(f.install?.version)}, ${text(f.install?.target)})`)
+    : state === 'installing' ? t('en cours', 'in progress')
+    : state === 'failed' ? t(`échouée (${failedWhy})`, `failed (${failedWhy})`)
+    : source === 'system' ? t('inutile (Python de la machine utilisé)', 'not needed (the machine\'s Python is used)')
+    : t('jamais lancée', 'never started')
+  const stopped = d?.reason === 'server_down' && d.detail ? ` (${detailText(d.detail)})` : ''
+  const server = tools.kernel || tools.account ? t('démarré', 'started')
+    : d?.reason === 'server_starting' ? t('en démarrage', 'starting')
+    : d?.reason === 'server_down' ? t(`arrêté${stopped}`, `stopped${stopped}`) : t('en attente de Python', 'waiting for Python')
+  const missing = d ? ` (${notice(d) ?? t('serveur en démarrage', 'server starting')})` : ''
+  const kernel = d?.reason === 'code_mode'
+    ? t(`${tools.kernel ? 'proposé' : 'absent'}, levier coupé (Code Mode actif)`, `${tools.kernel ? 'offered' : 'missing'}, lever off (Code Mode active)`)
+    : tools.kernel ? offered : t(`absent${missing}`, `missing${missing}`)
+  return [t('Outil principal :', 'Main tool:'),
+    t(`- connecteur : ${version ?? 'version inconnue'}`, `- connector: ${version ?? 'unknown version'}`),
+    t(`- Python : ${python}`, `- Python: ${python}`),
+    t(`- installation de Python : ${install}`, `- Python installation: ${install}`),
+    t(`- serveur MCP « outils » : ${server}`, `- MCP server "outils": ${server}`),
+    t(`- outil agir : ${kernel}`, `- agir tool: ${kernel}`),
+    t(`- outil compte : ${tools.account ? 'proposé' : 'absent'}`, `- compte tool: ${tools.account ? 'offered' : 'missing'}`),
+    t(`- service : ${service}`, `- service: ${service}`),
+    ...(d?.reason === 'code_mode' ? ['', codeModeText()] : [])].join('\n')
 }

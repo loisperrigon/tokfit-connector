@@ -10,12 +10,13 @@
 // la variable de fichier de l'hôte désigne un fichier (même liste, séparée par des virgules)
 // relu à chaque message ; quand il se lit, il prime sur les variables.
 // La même réponse dit aussi ce que le compte du client a coupé lui-même (`disabled` : routage par message
-// en bêta) et la version minimale du connecteur (`min_version`) ; la demande joint les versions
-// (versions.ts).
+// en bêta), la version minimale du connecteur (`min_version`) et la langue des textes du connecteur
+// (`language`, lang.ts) ; la demande joint les versions (versions.ts) et la locale du système.
 import type { EngineInterface } from 'claude-code'
 import { field, post } from './service'
 import type { Link } from './service'
 import { reported, updateNotice } from './versions'
+import { locale, setLanguage } from './lang'
 import type { Versions } from './versions'
 
 // Attente maximale de la liste : elle peut précéder la première requête au modèle.
@@ -106,12 +107,14 @@ async function asked($: EngineInterface, h: Holdout, to: Link, session: string):
   } catch {
     // Versions illisibles : la demande part sans elles.
   }
-  const reply = await post($, to, '/v1/levers', { session_id: session, versions }, LEVERS_TIMEOUT_MS)
+  const spoken = locale()
+  const reply = await post($, to, '/v1/levers', { session_id: session, versions, ...(spoken ? { locale: spoken } : {}) }, LEVERS_TIMEOUT_MS)
   const text = reply?.status === 200 ? reply.text : ''
+  const switched = setLanguage(field(text, 'language'))
   const got: Answer = { off: names(field(text, 'off')), disabled: names(field(text, 'disabled')),
     outdated: updateNotice(versions.plugin, field(text, 'min_version')) }
   h.answer = got
-  if (got.outdated !== null) {
+  if (got.outdated !== null || switched) {
     try {
       $.ui.invalidate('ui.render')
     } catch {

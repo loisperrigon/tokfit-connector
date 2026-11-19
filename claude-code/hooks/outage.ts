@@ -4,6 +4,8 @@
 // chaque nouvel échec jusqu'à 5 min) : les messages partent tout de suite avec le réglage en cours. La
 // première réponse du service referme la panne. Pendant une panne, le bandeau dit « tokfit dégradé » :
 // Claude Code garde ses outils habituels (kernel.ts rend les outils retirés dès que `agir` manque).
+import { t } from './lang'
+
 export const FIRST_WAIT_MS = 30_000
 export const MAX_WAIT_MS = 300_000
 
@@ -38,7 +40,8 @@ export function answered(o: Outage): void {
 }
 
 export const DEGRADED = 'dégradé, service injoignable. Claude Code garde ses outils habituels ; les économies reprennent toutes seules.'
+export const DEGRADED_EN = 'degraded, service unreachable. Claude Code keeps its usual tools; savings resume on their own.'
 
 export function degradedNote(o: Outage): string | null {
-  return o.since === null ? null : DEGRADED
+  return o.since === null ? null : t(DEGRADED, DEGRADED_EN)
 }
