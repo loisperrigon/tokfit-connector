@@ -379,6 +379,8 @@ def subagent_hook(event: Json, env: Dict[str, str]) -> Json:
         updated["reasoning_effort"] = selected_effort
     if updated == args:
         return {}
+    # Codex (0.169) n'applique `updatedInput` qu'avec `permissionDecision: "allow"` : sans décision, le hook est
+    # refusé (« updatedInput without permissionDecision:allow ») et « ask » n'est pas pris en charge.
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": updated}}
 
 
@@ -412,6 +414,13 @@ def decision(text: str) -> Optional[Tuple[Optional[str], Optional[str]]]:
     return model, effort
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Redirection refusée : l'en-tête Authorization ne la suit jamais vers une autre adresse."""
+    def redirect_request(self, req: urllib.request.Request, fp: object, code: int, msg: str,
+                         headers: object, newurl: str) -> None:
+        return None
+
+
 def post(to: Link, path: str, body: object, timeout: float, shows_notice: bool = False) -> Reply:
     """POST JSON borné dans le temps (total) ; None sur toute erreur réseau ou lenteur. `shows_notice` :
     la réponse peut porter le message de fin d'essai, que l'appelant montre (`trial_notice`)."""
@@ -422,7 +431,7 @@ def post(to: Link, path: str, body: object, timeout: float, shows_notice: bool =
 
     def call() -> None:
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
                 result[0] = (response.status, response.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as error:
             # Corps gardé (borné) : une réponse 402 porte le message de fin d'essai.

@@ -46,6 +46,7 @@ from kernel import tubes
 from kernel.cellule import GROUPES, PROLONGE, PROLONGEE_MAX
 from kernel.output import MAX_SORTIE, marge_valide, tronque
 from kernel.pack import Lien, environnement_du_noyau
+from kernel.projet import suivi_par_git
 
 WORKER = Path(__file__).with_name("worker.py")
 TIMEOUT_MAX = 600  # délai le plus long d'une cellule (`timeout_s` de l'outil)
@@ -93,7 +94,8 @@ if not defined TOKFIT_PY set "PYTHONHOME=" & set "TOKFIT_PY={secours}"
 SHIMS = ("python", "python3")
 # Python du projet pour le noyau (17/11/2026, retours d'un client : Pillow absent du Python de tokfit, paquets
 # d'un .venv 3.14 invisibles d'un noyau 3.13) : la règle des shims, appliquée au dossier du noyau. La sonde
-# vérifie la version et les modules dont le worker a besoin, sans rien importer du projet.
+# vérifie la version et les modules dont le worker a besoin, sans rien importer du projet : elle tourne depuis le
+# dossier du worker (`sys.path[0]` du worker), jamais depuis celui du projet.
 SONDE_NOYAU = ("import sys; sys.version_info >= (3, 9) or sys.exit(1); "
                "import ast, base64, json, linecache, queue, signal, site, subprocess, threading, traceback; "
                "print('noyau-ok')")
@@ -134,10 +136,13 @@ def relais_macos(chemin: str) -> bool:
 
 
 def candidat_du_projet(dossier: str, env: Dict[str, str]) -> Optional[str]:
-    """Ce que lance `python3` dans `shell()` depuis `dossier` (règle des shims), None sans rien."""
+    """Ce que lance `python3` dans `shell()` depuis `dossier` (règle des shims), None sans rien. Un `.venv` dont
+    l'interpréteur est suivi par le dépôt git du projet est sauté."""
     venv = Path(dossier, ".venv", "Scripts", "python.exe") if tubes.WINDOWS else Path(dossier, ".venv", "bin", "python")
     if venv.is_file():
-        return str(venv)
+        if not suivi_par_git(str(venv)):
+            return str(venv)
+        log.warning("Python du projet %s écarté (suivi par git)", venv)
     nom = "python.exe" if tubes.WINDOWS else "python3"
     for entree in env.get("PATH", "").split(os.pathsep):
         if not entree or "noyau-shims-" in entree or (tubes.WINDOWS and "\\windowsapps" in entree.lower()):
@@ -158,7 +163,7 @@ def python_du_projet(dossier: str, env: Dict[str, str]) -> Optional[str]:
     if chemin is None:
         return None
     try:
-        sonde = subprocess.run([chemin, "-B", *tubes.OPTIONS_PYTHON, "-c", SONDE_NOYAU], cwd=dossier, env=env,
+        sonde = subprocess.run([chemin, "-B", *tubes.OPTIONS_PYTHON, "-c", SONDE_NOYAU], cwd=WORKER.parent, env=env,
                                stdin=subprocess.DEVNULL, capture_output=True, timeout=SONDE_NOYAU_S)
     except (OSError, subprocess.TimeoutExpired) as erreur:
         log.warning("Python du projet %s écarté (%s)", chemin, type(erreur).__name__)

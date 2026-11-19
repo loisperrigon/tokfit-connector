@@ -197,6 +197,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 4:
         tubes.ecouter_interruptions(tubes.ouvrir(sys.argv[4], ecriture=False))
     prendre_lien()
+    requetes, reponses = tubes.ouvrir(sys.argv[1], ecriture=False), tubes.ouvrir(sys.argv[2], ecriture=True)
     ajouter_projet(os.getcwd(), os.environ)
     cacher_le_plugin()
-    boucle(tubes.ouvrir(sys.argv[1], ecriture=False), tubes.ouvrir(sys.argv[2], ecriture=True), int(sys.argv[3]))
+    boucle(requetes, reponses, int(sys.argv[3]))

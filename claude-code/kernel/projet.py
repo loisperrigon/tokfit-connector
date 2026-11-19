@@ -8,16 +8,37 @@ de la même version mineure que ce Python (même ABI) : le venv activé (`VIRTUA
 conda (`CONDA_PREFIX`), `.venv` et `venv` du dossier où le noyau démarre. Ajoutés en fin de
 `sys.path` par `site.addsitedir` (fichiers `.pth` lus, installations éditables comprises), jamais
 devant la bibliothèque standard. D'une autre version, ils sont laissés : le modèle passe par
-`shell()`, dont `python` est celui du projet (shims de `kernel/kernel.py`).
+`shell()`, dont `python` est celui du projet (shims de `kernel/kernel.py`). Un `.venv` ou `venv` du
+dossier dont les paquets sont suivis par le dépôt git du projet (`suivi_par_git`) est laissé aussi.
 """
 from __future__ import annotations
 
 import os
 import site
+import subprocess
 import sys
 from typing import List, Mapping, Optional
 
 DOSSIERS = (".venv", "venv")
+GIT_S = 5.0
+# `core.fsmonitor` coupé : un dépôt peut y nommer une commande que git lancerait en lisant l'index.
+GIT_SANS_COMMANDE = ("git", "-c", "core.fsmonitor=false")
+
+
+def suivi_par_git(chemin: str) -> bool:
+    """Vrai si le fichier `chemin`, ou un fichier sous le dossier `chemin`, est suivi par le dépôt git qui le
+    contient ; faux sans git, hors d'un dépôt, ou si git ne répond pas."""
+    if os.path.isdir(chemin) and not os.path.islink(chemin):
+        dossier, motif = chemin, "."
+    else:
+        dossier, motif = os.path.dirname(chemin) or ".", os.path.basename(chemin)
+    try:
+        reponse = subprocess.run([*GIT_SANS_COMMANDE, "-C", dossier, "ls-files", "--error-unmatch", "--", motif],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 timeout=GIT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return reponse.returncode == 0
 
 
 def version_du_venv(base: str) -> Optional[str]:
@@ -46,14 +67,15 @@ def paquets(base: str) -> Optional[str]:
 
 def sites_du_projet(dossier: str, env: Mapping[str, str]) -> List[str]:
     """Dossiers de paquets à ajouter, dans l'ordre, sans doublon ni ceux de ce Python."""
-    bases = [env.get("VIRTUAL_ENV", ""), env.get("CONDA_PREFIX", "")] + [os.path.join(dossier, nom) for nom in DOSSIERS]
+    du_dossier = [os.path.join(dossier, nom) for nom in DOSSIERS]
+    bases = [env.get("VIRTUAL_ENV", ""), env.get("CONDA_PREFIX", "")] + du_dossier
     deja = {os.path.realpath(chemin) for chemin in sys.path if chemin}
     trouves: List[str] = []
     for base in bases:
         if not base or not os.path.isabs(base):
             continue
         chemin = paquets(base)
-        if chemin is None:
+        if chemin is None or (base in du_dossier and suivi_par_git(chemin)):
             continue
         reel = os.path.realpath(chemin)
         if reel not in deja:

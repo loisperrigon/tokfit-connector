@@ -44,13 +44,25 @@ export async function status($: EngineInterface, seen: Seen, line: Line): Promis
   $.ui.status(text === '' ? undefined : text)
 }
 
+// Pont de l'application : http vers 127.0.0.1 avec un port, sans identifiants.
+export function localBridge(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' && url.hostname === '127.0.0.1' && url.port !== ''
+      && url.username === '' && url.password === ''
+  } catch {
+    // Adresse illisible : pas de pont.
+    return false
+  }
+}
+
 // Issue d'une décision postée sur le pont de l'application ; jamais bloquant, jamais levé.
 export async function report($: EngineInterface, seen: Seen, route: RouteReport): Promise<void> {
   try {
     const at = await host($, seen)
     if (!at) return
     const bridge = JSON.parse(await $.fs.read(at.bridge)) as { url?: unknown; token?: unknown }
-    if (typeof bridge.url !== 'string' || !bridge.url.startsWith('http://127.0.0.1:') || typeof bridge.token !== 'string') return
+    if (typeof bridge.url !== 'string' || !localBridge(bridge.url) || typeof bridge.token !== 'string') return
     await $.http.fetch(bridge.url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

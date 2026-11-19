@@ -16,6 +16,7 @@ import tempfile
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from runtime.completion import relay_address
 from runtime.relay import post
 from runtime.process import run_child
 
@@ -54,7 +55,7 @@ def run(binary: str, args: list[str], env: dict[str, str]) -> int:
     actual = args
     url, token = env.get("TOKFIT_RELAY_URL"), env.get("TOKFIT_RELAY_TOKEN")
     off = list(filter(None, env.get("TOKFIT_OFF", "").split(",")))
-    if url and token and "thinking" not in off:
+    if url and token and relay_address(url) and "thinking" not in off:
         plan = post(url.rstrip("/") + "/v1/optimizations", token, {
             "engine": "cursor", "model": "unknown", "session_id": env.get("OPEN_CODEX_PANE") or str(uuid.uuid4()),
             "event": "launch", "capabilities": ["thinking_instruction"], "off": off,

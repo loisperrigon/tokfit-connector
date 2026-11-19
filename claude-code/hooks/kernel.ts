@@ -109,7 +109,8 @@ export function kernel(): Kernel {
     languageAsked: false, moved: new Map(), sectionCut: 0, trimmed: new Map() }
 }
 
-// Vrai quand l'outil `agir` de ce plugin est parmi ceux que le modèle peut appeler, hors Code Mode, relu au plus toutes
+// Vrai quand l'outil `agir` de ce plugin est parmi ceux que le modèle peut appeler, hors Code Mode et hors règles de
+// permission ou bac à sable des réglages (`permissionRules`), relu au plus toutes
 // les READY_MS : si `agir` disparaît (serveur d'outils relancé pendant une panne du service, sans paquet du
 // noyau), les outils retirés reviennent aussitôt au lieu de rester refusés sans remplaçant.
 export const READY_MS = 2000
@@ -122,6 +123,25 @@ export function inCodeMode(tools: readonly { name: string; mcp?: boolean }[]): b
   return tools.some(tool => !tool.mcp && tool.name === CODE_MODE_TOOL)
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+// Réglages de Claude Code (fusion de toutes les couches) qui bornent ses outils intégrés : une règle
+// `permissions.deny`, ou le bac à sable de Bash (`sandbox.enabled`). Vrai : le levier ne retire rien. Réglages
+// illisibles : traités comme bornés.
+export async function permissionRules($: EngineInterface): Promise<boolean> {
+  try {
+    const [permissions, sandbox]: unknown[] = await Promise.all([
+      $.settings.read({ key: 'permissions' }), $.settings.read({ key: 'sandbox' })])
+    const deny = isRecord(permissions) ? permissions.deny : undefined
+    return (Array.isArray(deny) && deny.length > 0) || (isRecord(sandbox) && sandbox.enabled === true)
+  } catch {
+    // Lecture refusée par le moteur : comme des règles présentes, rien n'est retiré.
+    return true
+  }
+}
+
 export async function kernelReady($: EngineInterface, k: Kernel): Promise<boolean> {
   const session = await $.session.id()
   if (k.session !== session) Object.assign(k, kernel(), { session })
@@ -129,7 +149,7 @@ export async function kernelReady($: EngineInterface, k: Kernel): Promise<boolea
   const now = await $.clock.now()
   if (!k.ready || now - k.checkedAt >= READY_MS) {
     const tools = await $.tool.list()
-    k.ready = tools.some(tool => tool.mcp && isKernelTool(tool.name)) && !inCodeMode(tools)
+    k.ready = tools.some(tool => tool.mcp && isKernelTool(tool.name)) && !inCodeMode(tools) && !(await permissionRules($))
     k.checkedAt = now
   }
   return k.ready

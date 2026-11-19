@@ -23,13 +23,14 @@ import threading
 import time
 from typing import BinaryIO, Callable
 from urllib.parse import urlsplit
+import urllib.error
 import urllib.request
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from runtime.output import OutputPolicy, shorten_request
 from runtime.process import run_child
-from runtime.completion import hook_args as completion_hook_args
+from runtime.completion import NoRedirect, relay_address, hook_args as completion_hook_args
 
 Json = dict[str, object]
 MAX_REQUEST = 16 * 1024 * 1024
@@ -157,9 +158,13 @@ def post(url: str, token: str, body: Json) -> Json | None:
     request = urllib.request.Request(url, json.dumps(body).encode(),
                                      {"Authorization": "Bearer " + token, "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=3) as response:
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=3) as response:
             value = json.loads(response.read(MAX_EVENT))
             return value if isinstance(value, dict) else None
+    except urllib.error.HTTPError as error:
+        error.close()
+        LOG.debug("Policy request refused (%s)", error.code)
+        return None
     except (OSError, ValueError):
         LOG.debug("Policy request failed")
         return None
@@ -668,7 +673,7 @@ def configured(args: list[str], env: dict[str, str]) -> str | None:
 def run(binary: str, args: list[str], env: dict[str, str]) -> int:
     """Supervise the CLI and its in-memory relay in one process lifetime."""
     policy_url, token = env.get("TOKFIT_RELAY_URL", ""), env.get("TOKFIT_RELAY_TOKEN", "")
-    upstream = configured(args, env) if policy_url and token else None
+    upstream = configured(args, env) if policy_url and token and relay_address(policy_url) else None
     relay: Relay | None = None
     if upstream:
         session = str(uuid.uuid4())

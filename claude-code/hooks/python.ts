@@ -10,18 +10,18 @@
 // puis à intervalles (plus serrés au début : l'installation dure de quelques secondes à une minute) tant que
 // `agir` manque, et à chaque étape ; le bandeau disparaît dès que `agir` est là.
 import type { EngineInterface } from 'claude-code'
-import { inCodeMode, isAccountTool, isKernelTool } from './kernel'
+import { inCodeMode, isAccountTool, isKernelTool, permissionRules } from './kernel'
 import { keyRefused } from './service'
 import { t } from './lang'
 
 // Raisons de l'absence de `agir` : KERNEL_REASONS de service/usage.py (vérifié par tests/test_connector.py).
 export const REASONS = ['python_installing', 'python_missing', 'install_failed', 'unsupported_platform',
-  'server_starting', 'server_down', 'pack_unavailable', 'key_refused', 'code_mode'] as const
+  'server_starting', 'server_down', 'pack_unavailable', 'key_refused', 'code_mode', 'permission_rules'] as const
 export type Reason = (typeof REASONS)[number]
 // Détails : écrits par le lanceur, sauf `no_launch` (lanceur jamais parti) ; `windows` n'est plus produit (le noyau
 // tourne sous Windows depuis 0.7.13), gardé pour les anciens connecteurs ; KERNEL_DETAILS du service.
 export const DETAILS = ['disabled', 'unsupported_platform', 'no_downloader', 'no_hash_tool', 'no_tar', 'no_cache_dir',
-  'download', 'checksum', 'extract', 'verify', 'disk', 'interrupted', 'windows', 'no_launch'] as const
+  'download', 'checksum', 'extract', 'verify', 'disk', 'interrupted', 'windows', 'no_launch', 'no_home', 'cache_unsafe'] as const
 export type Detail = (typeof DETAILS)[number]
 export type Diagnosis = { reason: Reason; detail?: Detail }
 
@@ -98,10 +98,12 @@ export async function pythonFiles($: EngineInterface): Promise<PythonFiles> {
 // Pourquoi `agir` manque ; null s'il est proposé, ou si rien ne permet d'en juger (connecteur non relié :
 // le serveur ne propose alors aucun outil, sans panne). `refused` : le service a refusé la clé à sa dernière
 // réponse ; le paquet du noyau, demandé avec la même clé, n'arrivera pas. `codeMode` : l'outil `REPL` de Code Mode
-// est proposé (kernel.ts), le levier ne retire rien, `agir` proposé ou non.
+// est proposé (kernel.ts), le levier ne retire rien, `agir` proposé ou non. `rules` : les réglages de Claude Code
+// portent des règles `permissions.deny` ou le bac à sable de Bash (`permissionRules` de kernel.ts), même effet.
 export function diagnose(kernel: boolean, account: boolean, f: PythonFiles, linked: boolean, now: number, since: number,
-                         refused = false, codeMode = false): Diagnosis | null {
+                         refused = false, codeMode = false, rules = false): Diagnosis | null {
   if (codeMode) return { reason: 'code_mode' }
+  if (rules) return { reason: 'permission_rules' }
   if (kernel) return null
   const source = text(f.launch?.source)
   if (refused && linked) return { reason: 'key_refused' }
@@ -135,6 +137,8 @@ const DETAIL_TEXT: Record<Detail, readonly [string, string]> = {
   interrupted: ['installation interrompue', 'installation interrupted'],
   windows: ['Windows : connecteur antérieur à 0.7.13, à mettre à jour', 'Windows: connector older than 0.7.13, update it'],
   no_launch: ['lanceur jamais parti : sh (ou PowerShell sous Windows) introuvable ?', 'launcher never started: sh (or PowerShell on Windows) not found?'],
+  no_home: ['ni HOME ni dossier de cache (TOKFIT_CACHE_DIR, absolu) : rien n\'est installé', 'neither HOME nor a cache folder (TOKFIT_CACHE_DIR, absolute): nothing is installed'],
+  cache_unsafe: ['dossier de cache à un autre utilisateur ou inscriptible par d\'autres : chmod go-w, ou TOKFIT_CACHE_DIR', 'cache folder owned by another user or writable by others: chmod go-w, or TOKFIT_CACHE_DIR'],
 }
 
 export function detailText(detail: Detail | undefined): string {
@@ -157,6 +161,24 @@ export function codeModeText(): string {
   return t(CODE_MODE_TEXT, CODE_MODE_TEXT_EN)
 }
 
+// Règles de permission ou bac à sable dans les réglages : ce que tokfit perd, pourquoi, et quoi faire (`/<NAME>`).
+export const PERMISSION_TEXT = 'Vos réglages de Claude Code bornent ses outils intégrés (règles permissions.deny, ou bac à '
+  + 'sable de Bash : sandbox.enabled). L\'outil principal de tokfit, agir, lance du Python et des commandes sans passer par '
+  + 'ces règles : pour les respecter, tokfit laisse Bash, Read, Edit… en place et coupe son outil principal, son plus gros '
+  + 'levier d\'économie. Le routage, la compaction et le cache gardé au chaud restent actifs. Pour retrouver l\'outil '
+  + 'principal, retirez ces règles et le bac à sable de vos réglages (~/.claude/settings.json, .claude/settings.json du '
+  + 'projet, réglages gérés) si vous n\'en avez pas besoin, puis relancez Claude Code.'
+export const PERMISSION_TEXT_EN = 'Your Claude Code settings limit its built-in tools (permissions.deny rules, or the Bash '
+  + 'sandbox: sandbox.enabled). tokfit\'s main tool, agir, runs Python and commands without going through those rules: to '
+  + 'respect them, tokfit leaves Bash, Read, Edit… in place and turns off its main tool, its biggest saving. Routing, '
+  + 'compaction and the cache kept warm stay active. To get the main tool back, remove those rules and the sandbox from '
+  + 'your settings (~/.claude/settings.json, the project\'s .claude/settings.json, managed settings) if you do not need '
+  + 'them, then restart Claude Code.'
+
+export function permissionText(): string {
+  return t(PERMISSION_TEXT, PERMISSION_TEXT_EN)
+}
+
 // Ligne du bandeau, courte ; null quand rien n'est à dire (outil là, ou serveur qui démarre).
 export function notice(d: Diagnosis | null | undefined): string | null {
   if (!d) return null
@@ -177,6 +199,10 @@ export function notice(d: Diagnosis | null | undefined): string | null {
       + 'Déconseillé : retirez CLAUDE_CODE_EXPERIMENTAL_CODE_MODE puis relancez Claude Code ; /tokfit pour le détail',
     'limited by Code Mode, main tool turned off (Code Mode goes through Bash, Read and Edit, which this tool replaces). '
       + 'Not advised: remove CLAUDE_CODE_EXPERIMENTAL_CODE_MODE then restart Claude Code; /tokfit for details')
+    case 'permission_rules': return t('outil principal coupé : vos règles de permission (permissions.deny) ou le bac à sable '
+      + 'de Bash restent appliqués à Bash, Read et Edit ; /tokfit pour le détail',
+    'main tool turned off: your permission rules (permissions.deny) or the Bash sandbox stay applied to Bash, Read and '
+      + 'Edit; /tokfit for details')
     case 'key_refused': return t('clé tokfit refusée par le service (remplacée ou révoquée), clé d\'essai comprise : /tokfit pour rattacher cet appareil à votre compte',
       'tokfit key refused by the service (replaced or revoked), trial key included: /tokfit to link this device to your account')
   }
@@ -191,7 +217,8 @@ export async function check($: EngineInterface, h: Health, linked: boolean): Pro
   const account = tools.some(tool => tool.mcp && isAccountTool(tool.name))
   h.files = await pythonFiles($)
   const before = notice(h.diagnosis)
-  h.diagnosis = diagnose(kernel, account, h.files, linked, now, h.since, keyRefused(), inCodeMode(tools))
+  h.diagnosis = diagnose(kernel, account, h.files, linked, now, h.since, keyRefused(), inCodeMode(tools),
+    await permissionRules($))
   h.at = now
   if (notice(h.diagnosis) !== before) $.ui.invalidate('ui.render')
   return h.diagnosis
@@ -267,6 +294,9 @@ export function healthReport(d: Diagnosis | null | undefined, f: PythonFiles, to
   const missing = d ? ` (${notice(d) ?? t('serveur en démarrage', 'server starting')})` : ''
   const kernel = d?.reason === 'code_mode'
     ? t(`${tools.kernel ? 'proposé' : 'absent'}, levier coupé (Code Mode actif)`, `${tools.kernel ? 'offered' : 'missing'}, lever off (Code Mode active)`)
+    : d?.reason === 'permission_rules'
+    ? t(`${tools.kernel ? 'proposé' : 'absent'}, levier coupé (règles de permission ou bac à sable des réglages)`,
+      `${tools.kernel ? 'offered' : 'missing'}, lever off (permission rules or sandbox in the settings)`)
     : tools.kernel ? offered : t(`absent${missing}`, `missing${missing}`)
   return [t('Outil principal :', 'Main tool:'),
     t(`- connecteur : ${version ?? 'version inconnue'}`, `- connector: ${version ?? 'unknown version'}`),
@@ -276,5 +306,6 @@ export function healthReport(d: Diagnosis | null | undefined, f: PythonFiles, to
     t(`- outil agir : ${kernel}`, `- agir tool: ${kernel}`),
     t(`- outil compte : ${tools.account ? 'proposé' : 'absent'}`, `- compte tool: ${tools.account ? 'offered' : 'missing'}`),
     t(`- service : ${service}`, `- service: ${service}`),
-    ...(d?.reason === 'code_mode' ? ['', codeModeText()] : [])].join('\n')
+    ...(d?.reason === 'code_mode' ? ['', codeModeText()] : []),
+    ...(d?.reason === 'permission_rules' ? ['', permissionText()] : [])].join('\n')
 }

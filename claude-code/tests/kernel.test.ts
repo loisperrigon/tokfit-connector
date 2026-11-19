@@ -589,6 +589,37 @@ describe('levier sans effet', () => {
     expect(steps.map(s => [s.kernel_unavailable, s.kernel_reason])).toEqual([[true, 'code_mode']])
   })
 
+  const restricting: [string, Record<string, unknown>][] = [
+    ['règle permissions.deny', { permissions: { deny: ['Bash(rm:*)'] } }],
+    ['bac à sable de Bash', { sandbox: { enabled: true } }],
+  ]
+  for (const [name, settings] of restricting) {
+    test(`${name} dans les réglages : rien retiré ni refusé, prompt intact, fait avec la raison permission_rules`, async ($, on) => {
+      const w = world(on, connected({ settings }))
+      await $.session.start({ cwd: '/projet', surface: null, isInteractive: true })
+      await untouched($)
+      for (const tool of DENIED) expect((await check($, tool)).decision).toBe('allow')
+      await w.clock.settle()
+      await step($, 0, { turnId: 't1' })
+      const steps = await sentSteps($, w)
+      expect(steps.map(s => [s.kernel_unavailable, s.kernel_reason])).toEqual([[true, 'permission_rules']])
+    })
+  }
+
+  test('réglages sans règle de refus ni bac à sable actif : le levier agit', async ($, on) => {
+    world(on, connected({ settings: { permissions: { allow: ['Bash(ls:*)'], deny: [] }, sandbox: { enabled: false } } }))
+    expect((await check($, 'Bash')).decision).toBe('deny')
+  })
+
+  test('règle de refus ajoutée en cours de session : les outils reviennent', async ($, on) => {
+    const settings: Record<string, unknown> = {}
+    const w = world(on, connected({ settings }))
+    expect((await check($, 'Bash')).decision).toBe('deny')
+    settings.permissions = { deny: ['Read(./.env)'] }
+    await w.clock.advance(READY_MS)
+    expect((await check($, 'Bash')).decision).toBe('allow')
+  })
+
   test('Code Mode quitté en cours de session (outil REPL disparu) : le levier reprend', async ($, on) => {
     const tools = [...TOOLS, 'REPL']
     const w = world(on, connected({ tools }))

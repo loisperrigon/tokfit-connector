@@ -3,7 +3,7 @@
 // `/<NAME>`. Rien n'est écrit sur la machine.
 import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import { CHECK_FAST_MS, CODE_MODE_TEXT, INSTALL_STALE_S, START_GRACE_MS, diagnose, notice } from '../hooks/python'
+import { CHECK_FAST_MS, CODE_MODE_TEXT, INSTALL_STALE_S, PERMISSION_TEXT, START_GRACE_MS, diagnose, notice } from '../hooks/python'
 import type { PythonFiles } from '../hooks/python'
 import { NAME } from '../hooks/service'
 import { HOME, end, step, user, world } from './support'
@@ -90,6 +90,13 @@ describe('raison de l’absence de agir', () => {
     expect(diagnose(true, true, f, true, at, at - START_GRACE_MS, false, true)).toEqual({ reason: 'code_mode' })
     expect(diagnose(false, false, f, true, at, at - START_GRACE_MS, true, true)).toEqual({ reason: 'code_mode' })
     expect(diagnose(true, true, f, true, at, at - START_GRACE_MS, false, false)).toBeNull()
+  })
+
+  test('règles de permission ou bac à sable : raison permission_rules, agir proposé ou non, après Code Mode', () => {
+    const f = parsed(files(install('ready'), launch('managed')))
+    expect(diagnose(true, true, f, true, at, at - START_GRACE_MS, false, false, true)).toEqual({ reason: 'permission_rules' })
+    expect(diagnose(false, false, f, true, at, at - START_GRACE_MS, true, false, true)).toEqual({ reason: 'permission_rules' })
+    expect(diagnose(true, true, f, true, at, at - START_GRACE_MS, false, true, true)).toEqual({ reason: 'code_mode' })
   })
 
   test('serveur lancé depuis moins que le délai de démarrage : pas une panne ; non relié : rien à juger', () => {
@@ -200,6 +207,23 @@ describe('bandeau, étape et commande', () => {
     expect(report).toContain('- outil agir : proposé, levier coupé (Code Mode actif)')
     expect(report).toContain(CODE_MODE_TEXT)
     expect(w.shown.join('\n')).toContain(`- kernel : coupé (${notice({ reason: 'code_mode' })})`)
+  })
+
+  test('règles de permission dans les réglages : la ligne le dit, l’étape porte la raison, /<NAME> explique quoi faire', async ($, on) => {
+    const w = world(on, { messages: [user('x')], tools: [AGIR, COMPTE], files: files(install('ready'), launch('managed')),
+      settings: { permissions: { deny: ['Bash(curl:*)'] } } })
+    await started($, w)
+    expect(await shown($)).toBe(`tokfit : ${notice({ reason: 'permission_rules' })}`)
+    await step($, 0, { turnId: 't1' })
+    await end($)
+    await w.clock.settle()
+    const steps = w.usages().flatMap(sent => sent.body.steps as Record<string, unknown>[])
+    expect(steps.map(s => [s.kernel_unavailable, s.kernel_reason])).toEqual([[true, 'permission_rules']])
+    await $.command.run({ command: NAME, args: '', origin: { kind: 'composer' }, presentation: PRESENTATION })
+    const report = w.shown.find(line => line.startsWith('ui.log Outil principal :'))
+    expect(report).toContain('- outil agir : proposé, levier coupé (règles de permission ou bac à sable des réglages)')
+    expect(report).toContain(PERMISSION_TEXT)
+    expect(w.shown.join('\n')).toContain(`- kernel : coupé (${notice({ reason: 'permission_rules' })})`)
   })
 
   test('un outil REPL d’un serveur MCP n’est pas Code Mode', async ($, on) => {

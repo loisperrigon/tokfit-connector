@@ -15,8 +15,8 @@
 // Exception : une application qui lance Claude Code et relaie le service avec
 // son propre jeton (Open Codex, host.ts) pose ses deux variables de relais
 // (`relayed`) dans le terminal de la conversation ; ce relais passe
-// alors avant tout le reste. Son adresse peut être en clair sur un réseau privé
-// (le trajet appartient à l'application), son jeton n'est pas une clé `ek_`.
+// alors avant tout le reste. Son adresse peut être en clair vers une adresse IP
+// privée ou la machine elle-même (`relayAddress`), son jeton n'est pas une clé `ek_`.
 import type { EngineInterface, HttpResponse, PluginOptions } from 'claude-code'
 import { bounded } from './bounded'
 import { anonymousKey } from './key'
@@ -79,9 +79,39 @@ function refusedFor(options: object): Set<string> {
   return found
 }
 
-// Relais d'une application hôte : adresse http(s) sans identifiants, jeton sans espace.
-const RELAY_URL = /^https?:\/\/[A-Za-z0-9.-]{1,253}(:\d{1,5})?(\/[^\s?#]*)?$/
+// Relais d'une application hôte : adresse sans identifiants, en https, ou en http vers un hôte privé
+// (`privateHost`) ; jeton sans espace.
+const RELAY_URL = /^https?:\/\/([A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\])(:\d{1,5})?(\/[^\s?#]*)?$/
 const RELAY_TOKEN = /^[A-Za-z0-9_.~+/=-]{8,512}$/
+
+// Vrai pour `localhost`, un nom Tailscale (`*.ts.net`, ou nom court de MagicDNS : un seul label qui
+// commence par une lettre) et une adresse IP littérale de bouclage (127.0.0.0/8, ::1), privée (10/8,
+// 172.16/12, 192.168/16, fc00::/7) ou partagée (100.64.0.0/10) ; aucun autre nom n'est privé.
+export function privateHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[(.*)\]$/, '$1')
+  if (host === 'localhost' || host === '::1') return true
+  if (/^[a-z][a-z0-9-]*$/.test(host) || /^([a-z0-9-]+\.)+ts\.net$/.test(host)) return true
+  if (host.includes(':')) return /^f[cd][0-9a-f]{0,2}:/.test(host)
+  const parts = host.split('.')
+  if (parts.length !== 4 || !parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)) return false
+  const [a = 0, b = 0] = parts.map(Number)
+  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+    || (a === 100 && b >= 64 && b <= 127)
+}
+
+// Adresse d'un relais : https sans identifiants, ou http vers un hôte privé.
+export function relayAddress(value: string): boolean {
+  if (!RELAY_URL.test(value)) return false
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    // Adresse illisible : pas de relais.
+    return false
+  }
+  if (url.username !== '' || url.password !== '') return false
+  return url.protocol === 'https:' || (url.protocol === 'http:' && privateHost(url.hostname))
+}
 
 // Variables posées par l'application hôte sous le nom de sa copie embarquée :
 // la copie publique les garde (`publish: keep`, connector/publish.py).
@@ -89,7 +119,7 @@ async function relayed($: EngineInterface): Promise<Link | null> {
   try {
     const url = text(await $.env.get('ECONOMISEUR_RELAY_URL')) // publish: keep
     const token = text(await $.env.get('ECONOMISEUR_RELAY_TOKEN')) // publish: keep
-    return RELAY_URL.test(url) && RELAY_TOKEN.test(token) ? { url: url.replace(/\/+$/, ''), key: token } : null
+    return relayAddress(url) && RELAY_TOKEN.test(token) ? { url: url.replace(/\/+$/, ''), key: token } : null
   } catch {
     // Environnement illisible : pas de relais, la configuration du client peut suffire.
     return null

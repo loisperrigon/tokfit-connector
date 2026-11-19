@@ -66,7 +66,8 @@ export async function leverReport($: EngineInterface, src: Sources, to: Link | n
     } else if (part !== null && plan?.[part] === undefined) state = t('inactif (absent du plan du service)', 'inactive (not in the service plan)')
     else if (lever === 'kernel' && !(await kernelReady($, src.kernel))) {
       const why = healthNotice(src.health.diagnosis)
-      state = src.health.diagnosis?.reason === 'code_mode' ? t(`coupé (${why})`, `off (${why})`)
+      const reason = src.health.diagnosis?.reason
+      state = reason === 'code_mode' || reason === 'permission_rules' ? t(`coupé (${why})`, `off (${why})`)
         : why ? t(`inactif (outil agir non connecté : ${why})`, `inactive (agir tool not connected: ${why})`)
         : t('inactif (outil agir non connecté)', 'inactive (agir tool not connected)')
     }

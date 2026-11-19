@@ -6,7 +6,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import { CORE_PROMPT, KEY, URL, agent, step, user, world } from './support'
 import type { Options, Reply, Sent, World } from './support'
 
-const RELAY = 'http://dodoia-vps:7420/tokfit'
+const RELAY = 'http://100.64.0.7:7420/tokfit'
 const TOKEN = 'ocd_' + 'b'.repeat(40)
 const BRIDGE_FILE = '/support/bridge.json'
 const BRIDGE = 'http://127.0.0.1:47321/'
@@ -49,7 +49,23 @@ describe('relais d’une application hôte', () => {
     ['autre protocole', { ECONOMISEUR_RELAY_URL: 'ftp://hote/x', ECONOMISEUR_RELAY_TOKEN: TOKEN }], // publish: keep
     ['jeton avec espace', { ECONOMISEUR_RELAY_URL: RELAY, ECONOMISEUR_RELAY_TOKEN: 'a b c d e f g h' }], // publish: keep
     ['jeton absent', { ECONOMISEUR_RELAY_URL: RELAY }], // publish: keep
+    ['http vers un nom public', { ECONOMISEUR_RELAY_URL: 'http://relais.example:7420/x', ECONOMISEUR_RELAY_TOKEN: TOKEN }], // publish: keep
+    ['http vers une adresse publique', { ECONOMISEUR_RELAY_URL: 'http://8.8.8.8:7420/x', ECONOMISEUR_RELAY_TOKEN: TOKEN }], // publish: keep
+    ['http vers un nom qui commence par 127', { ECONOMISEUR_RELAY_URL: 'http://127.0.0.1.relais.test/x', ECONOMISEUR_RELAY_TOKEN: TOKEN }], // publish: keep
+    ['http vers une adresse publique écrite en nombre', { ECONOMISEUR_RELAY_URL: 'http://134744072:7420/x', ECONOMISEUR_RELAY_TOKEN: TOKEN }], // publish: keep
+    ['http hors de 172.16/12', { ECONOMISEUR_RELAY_URL: 'http://172.32.0.1/x', ECONOMISEUR_RELAY_TOKEN: TOKEN }], // publish: keep
   ]
+  const accepted = ['https://relais.test/x', 'http://127.0.0.1:7420/x', 'http://localhost:7420/x', 'http://10.1.2.3/x',
+    'http://172.20.0.1/x', 'http://192.168.1.2:7420/x', 'http://[::1]:7420/x', 'http://[fd7a:115c:a1e0::1]:7420/x',
+    'http://hote-du-relais:7420/x', 'http://hote.tail1.ts.net:7420/x']
+  for (const url of accepted) {
+    test(`relais accepté : ${url}`, async ($, on) => {
+      const w = world(on, { env: { ECONOMISEUR_RELAY_URL: url, ECONOMISEUR_RELAY_TOKEN: TOKEN }, messages: [user('x')] }) // publish: keep
+      await step($, 0)
+      expect(w.routes()[0]?.headers).toMatchObject({ authorization: `Bearer ${TOKEN}` })
+    })
+  }
+
   for (const [name, env] of refused) {
     test(`${name} : relais ignoré, configuration du client`, async ($, on) => {
       const w = world(on, { env, messages: [user('x')] })
@@ -115,15 +131,17 @@ describe('voyant de l’application hôte', () => {
     expect(reports(w)).toHaveLength(2)
   })
 
-  test('pont illisible ou hors machine : décision appliquée, rien d’envoyé', async ($, on) => {
-    const w = inside(on, {
-      files: { [BRIDGE_FILE]: JSON.stringify({ url: 'http://ailleurs.test/', token: 't' }) },
-      messages: [user('x')], route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } }),
+  for (const bridge of ['http://ailleurs.test/', 'http://127.0.0.1:1@ailleurs.test/', 'http://127.0.0.1.ailleurs.test:1/']) {
+    test(`pont illisible ou hors machine (${bridge}) : décision appliquée, rien d’envoyé`, async ($, on) => {
+      const w = inside(on, {
+        files: { [BRIDGE_FILE]: JSON.stringify({ url: bridge, token: 't' }) },
+        messages: [user('x')], route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } }),
+      })
+      await step($, 0)
+      expect(w.steps[0]).toMatchObject({ model: 'sonnet' })
+      expect(w.sent.filter(sent => !sent.url.startsWith(URL))).toEqual([])
     })
-    await step($, 0)
-    expect(w.steps[0]).toMatchObject({ model: 'sonnet' })
-    expect(w.sent.filter(sent => !sent.url.startsWith(URL))).toEqual([])
-  })
+  }
 
   test('hors de l’application : ligne d’état comme avant, rien sur un pont', async ($, on) => {
     const w = world(on, { messages: [user('x')], route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low', reason: 'r' } }) })

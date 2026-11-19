@@ -29,8 +29,11 @@
 # (jamais d'installation), TOKFIT_CACHE_DIR (cache, ${XDG_CACHE_HOME:-~/.cache}/tokfit par défaut),
 # TOKFIT_PYTHON_MIRROR (miroir des archives, même arborescence), TOKFIT_PYTHON_PINS (autre épinglage).
 # État lu par le connecteur (hooks/python.ts) : <cache>/python/install.json et launch.json.
+# Cache : chemin absolu, sinon aucun (ni installation ni état ; jamais de repli sur /tmp) ; dossiers créés en 0700 ;
+# le Python de tokfit n'y est lancé que si chaque dossier, du cache à bin/, appartient à l'utilisateur et n'est
+# inscriptible ni par le groupe ni par les autres (`cache_sur`), sinon l'installation est refusée (cache_unsafe).
+# Le masque 022 ne vaut que pour l'installation : serveur, noyau et commandes gardent celui de l'utilisateur.
 set -u
-umask 022
 
 ICI=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P) || { printf 'tokfit: dossier du lanceur introuvable\n' >&2; exit 1; }
 LANCEUR="$ICI/launch.sh"
@@ -114,23 +117,49 @@ case $CIBLE in *windows*) EXE_RELATIF=python.exe ;; *) EXE_RELATIF=bin/python3 ;
 
 if [ -n "${TOKFIT_CACHE_DIR:-}" ]; then CACHE=$TOKFIT_CACHE_DIR
 elif [ -n "${XDG_CACHE_HOME:-}" ]; then CACHE=$XDG_CACHE_HOME/tokfit
-else CACHE=${HOME:-/tmp}/.cache/tokfit
+elif [ -n "${HOME:-}" ]; then CACHE=$HOME/.cache/tokfit
+else CACHE=
 fi
-PYDIR="$CACHE/python"
-DIR="$PYDIR/$NOM"
-EXE="$DIR/$EXE_RELATIF"
-ETAT_INSTALL="$PYDIR/install.json"
-ETAT_LANCEMENT="$PYDIR/launch.json"
-LOG="$PYDIR/install.log"
-VERROU="$PYDIR/.verrou"
+case $CACHE in /*|[A-Za-z]:*) ;; *) CACHE= ;; esac
+if [ -n "$CACHE" ]; then
+  PYDIR="$CACHE/python"
+  DIR="$PYDIR/$NOM"
+  EXE="$DIR/$EXE_RELATIF"
+  ETAT_INSTALL="$PYDIR/install.json"
+  ETAT_LANCEMENT="$PYDIR/launch.json"
+  LOG="$PYDIR/install.log"
+  VERROU="$PYDIR/.verrou"
+else
+  PYDIR= DIR= EXE= ETAT_INSTALL= ETAT_LANCEMENT= LOG= VERROU=
+fi
 DEPART=$(date +%s 2>/dev/null || echo 0)
 
 maintenant() { date +%s 2>/dev/null || echo 0; }
 
 json_chaine() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n\r'; }
 
+creer_cache() {  # dossier du cache (0700), faux sans cache
+  [ -n "$PYDIR" ] && (umask 077 && mkdir -p "$PYDIR") 2>/dev/null
+}
+
+UID_COURANT=$(id -u 2>/dev/null)
+a_moi() {  # dossier → vrai s'il appartient à l'utilisateur et n'est inscriptible ni par le groupe ni par les autres
+  [ -n "$UID_COURANT" ] || return 1
+  [ -n "$(find "$1/." -maxdepth 0 -user "$UID_COURANT" ! -perm -0020 ! -perm -0002 2>/dev/null)" ]
+}
+
+cache_sur() {  # chaque dossier présent, du cache à bin/ du Python de tokfit, est à l'utilisateur seul
+  [ -n "$CACHE" ] || return 1
+  case $CIBLE in *windows*) return 0 ;; esac
+  for d in "$CACHE" "$PYDIR" "$DIR" "$(dirname "$EXE")"; do
+    [ -e "$d" ] || continue
+    a_moi "$d" || return 1
+  done
+  return 0
+}
+
 ecrire_json() {
-  mkdir -p "$PYDIR" 2>/dev/null || return 0
+  creer_cache || return 0
   printf '%s\n' "$2" > "$1.$$" 2>/dev/null && mv -f "$1.$$" "$1" 2>/dev/null || rm -f "$1.$$" 2>/dev/null
   return 0
 }
@@ -164,7 +193,7 @@ python_valide() {  # chemin → vrai s'il passe le test ; PY_VERSION posé
   return 1
 }
 
-gere_pret() { [ -f "$DIR/.tokfit-ok" ] && [ -x "$EXE" ]; }
+gere_pret() { [ -n "$DIR" ] && [ -f "$DIR/.tokfit-ok" ] && [ -x "$EXE" ] && cache_sur; }
 
 # Python imposé (s'il passe le test), sinon celui de tokfit déjà installé.
 choisir() {
@@ -210,11 +239,11 @@ wget_busybox() {
   return 1
 }
 
-python_ancien() {  # n'importe quel Python capable de télécharger (2.7 compris), hors du test du noyau
+python_ancien() {  # n'importe quel Python capable de télécharger (3.4 et plus : -I), hors du test du noyau
   for nom in python3 python; do
     chemin=$(command -v "$nom" 2>/dev/null) || continue
     relais_macos "$chemin" && continue
-    "$chemin" -E -s -c 'import sys' >/dev/null 2>&1 && { printf '%s' "$chemin"; return 0; }
+    "$chemin" -I -c 'import sys' >/dev/null 2>&1 && { printf '%s' "$chemin"; return 0; }
   done
   return 1
 }
@@ -243,7 +272,7 @@ empreinte() {  # fichier → SHA-256 en hexadécimal minuscule
     sha256sum) s=$(sha256sum "$1") || return 1 ;;
     shasum) s=$(shasum -a 256 "$1") || return 1 ;;
     openssl) s=$(openssl dgst -sha256 -r "$1") || return 1 ;;
-    python) s=$("$(python_ancien)" -E -s -c 'import hashlib, sys
+    python) s=$("$(python_ancien)" -I -c 'import hashlib, sys
 h = hashlib.sha256()
 f = open(sys.argv[1], "rb")
 for b in iter(lambda: f.read(1 << 20), b""):
@@ -293,10 +322,7 @@ function obtenir(u,n){
 obtenir(adresse,0);'
 
 PYTHON_TELECHARGER='import sys
-try:
-    from urllib.request import urlopen
-except ImportError:
-    from urllib2 import urlopen
+from urllib.request import urlopen
 reponse = urlopen(sys.argv[1], timeout=60)
 sortie = open(sys.argv[2], "wb")
 while True:
@@ -313,7 +339,7 @@ telecharger_une_fois() {  # outil adresse fichier ; curl reprend un fichier part
     busybox-wget-applet) rm -f "$3"; wget -q -T 60 -O "$3" "$2" ;;
     busybox) rm -f "$3"; busybox wget -q -T 60 -O "$3" "$2" ;;
     node) rm -f "$3"; node -e "$NODE_TELECHARGER" "$2" "$3" ;;
-    python) rm -f "$3"; "$(python_ancien)" -E -s -c "$PYTHON_TELECHARGER" "$2" "$3" ;;
+    python) rm -f "$3"; "$(python_ancien)" -I -c "$PYTHON_TELECHARGER" "$2" "$3" ;;
     *) return 1 ;;
   esac
 }
@@ -348,11 +374,13 @@ extraire() {  # archive dossier
 # Raison pour laquelle l'installation est impossible ici (vide si elle est possible).
 impossible() {
   if [ "${TOKFIT_PYTHON_INSTALL:-1}" = 0 ]; then echo disabled
+  elif [ -z "$CACHE" ]; then echo no_home
   elif [ -z "$CIBLE" ] || [ -z "$SHA" ] || [ -z "$PIN_VERSION" ]; then echo unsupported_platform
   elif [ -z "$(outil_telechargement)" ]; then echo no_downloader
   elif [ -z "$(outil_somme)" ]; then echo no_hash_tool
   elif ! a tar; then echo no_tar
-  elif ! mkdir -p "$PYDIR" 2>/dev/null || [ ! -w "$PYDIR" ]; then echo no_cache_dir
+  elif ! creer_cache || [ ! -w "$PYDIR" ]; then echo no_cache_dir
+  elif ! cache_sur; then echo cache_unsafe
   fi
 }
 
@@ -399,9 +427,9 @@ echec_recent() {
 }
 
 nettoyer() {  # dossiers temporaires d'installations interrompues, anciennes versions inutilisées depuis 30 jours
-  for d in "$PYDIR"/.tmp-*; do
+  for d in "$PYDIR"/.tmp-* "$PYDIR"/.session-*; do
     [ -d "$d" ] || continue
-    kill -0 "${d##*.tmp-}" 2>/dev/null || rm -rf "$d"
+    kill -0 "${d##*-}" 2>/dev/null || rm -rf "$d"
   done
   for d in "$PYDIR"/cpython-*; do
     [ -d "$d" ] && [ "$d" != "$DIR" ] || continue
@@ -419,6 +447,7 @@ echouer() {  # raison détail
 }
 
 installer() {
+  umask 022
   raison=$(impossible)
   if [ -n "$raison" ]; then ecrire_install failed python_missing "$raison"; return 1; fi
   prendre_verrou || { journal "installation déjà en cours"; return 0; }
@@ -453,7 +482,7 @@ installer() {
 }
 
 installer_en_fond() {
-  mkdir -p "$PYDIR" 2>/dev/null || return 0
+  creer_cache || return 0
   if [ -f "$LOG" ] && [ "$(taille_de "$LOG")" -gt 1048576 ] 2>/dev/null; then : > "$LOG"; fi
   if a setsid; then
     (setsid sh "$LANCEUR" installer </dev/null >/dev/null 2>>"$LOG" &)
@@ -475,9 +504,10 @@ certificats() {
   case $CIBLE in *windows*) return 0 ;; esac
   [ -s /etc/ssl/cert.pem ] && { export SSL_CERT_FILE=/etc/ssl/cert.pem; return 0; }
   # Aucune autorité sur la machine (images Node « slim ») : celles que Node embarque, exportées une fois.
+  [ -n "$CACHE" ] || return 0
   ca="$CACHE/ca-node.pem"
   if [ ! -s "$ca" ] && a node; then
-    mkdir -p "$CACHE" 2>/dev/null
+    creer_cache
     if node -e 'process.stdout.write(require("tls").rootCertificates.join("\n")+"\n")' > "$ca.$$" 2>/dev/null && [ -s "$ca.$$" ]; then
       mv -f "$ca.$$" "$ca"
     else
@@ -563,7 +593,9 @@ relayer() {  # ligne en attente → exec du vrai serveur
 }
 
 repondeur() {
-  SESSION=$(mktemp -d 2>/dev/null) || { SESSION="${TMPDIR:-/tmp}/tokfit-$$"; mkdir -p "$SESSION"; }
+  # Sans mktemp : un dossier neuf du cache (mkdir sans -p échoue s'il existe déjà), sinon aucun répondeur.
+  SESSION=$(mktemp -d 2>/dev/null) || { SESSION="$PYDIR/.session-$$"; creer_cache && (umask 077 && mkdir "$SESSION") 2>/dev/null; } \
+    || { journal "aucun dossier de session (mktemp absent, cache indisponible)"; exit 1; }
   PROTOCOLE=
   annonceur &
   ANNONCEUR=$!

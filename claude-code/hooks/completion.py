@@ -6,6 +6,7 @@ and continuation text; this adapter cannot grant permissions or change models.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -26,6 +27,47 @@ MAX_TRANSCRIPT = 4 * 1024 * 1024
 # clé configurée sans adresse (option api_key seule, ou config.json sans `url`) laissait le noyau sans outil.
 DEFAULT_URL = "https://api.tokfit.fr"
 LOG = logging.getLogger("tokfit.completion")
+# Key issued by the service, as KEY of hooks/key.ts.
+ANONYMOUS_KEY = re.compile(r"ek_[A-Za-z0-9_-]{20,200}")
+# Networks a relay may be reached over plain http: loopback, RFC 1918, shared address space (RFC 6598), IPv6
+# unique local addresses (RFC 4193).
+PRIVATE_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
+    "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7"))
+
+
+# Tailscale names: `*.ts.net`, or a short MagicDNS name (one label starting with a letter, so never a numeric
+# address such as 134744072 or 0x8080808).
+TAILSCALE_NAME = re.compile(r"[a-z][a-z0-9-]*|([a-z0-9-]+\.)+ts\.net")
+
+
+def private_host(host: str) -> bool:
+    """True for localhost, a Tailscale name (TAILSCALE_NAME) or an IP literal in PRIVATE_NETWORKS; no other name."""
+    if host.lower() == "localhost" or TAILSCALE_NAME.fullmatch(host.lower()):
+        return True
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return any(address in network for network in PRIVATE_NETWORKS)
+
+
+def relay_address(url: str) -> bool:
+    """True if a relay may be called at `url`: https, or http toward a private host; never with credentials."""
+    try:
+        parsed = urlsplit(url)
+        host, port = parsed.hostname, parsed.port
+    except ValueError:  # malformed host or port
+        return False
+    if not host or port == 0 or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return False
+    return parsed.scheme == "https" or (parsed.scheme == "http" and private_host(host))
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Redirects are refused: the Authorization header never follows them to another address."""
+    def redirect_request(self, req: urllib.request.Request, fp: object, code: int, msg: str,
+                         headers: object, newurl: str) -> None:
+        return None
 
 
 def pending(rows: Iterable[object]) -> int:
@@ -89,8 +131,9 @@ def store_folder(env: dict[str, str]) -> Path:
     return Path(env.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")) / "plugins" / "store"
 
 
-def stored_link(env: dict[str, str]) -> tuple[str, str] | None:
-    """(url, key) of the anonymous key the connector keeps in its plugin store (hooks/key.ts), if any."""
+def stored_key(env: dict[str, str], url: str, refused: Collection[str] = ()) -> str | None:
+    """The anonymous key the connector keeps in its plugin store (hooks/key.ts) for the service at `url`, if any;
+    as in key.ts, an entry kept for another address, or a malformed key, is never used."""
     for path in sorted(store_folder(env).glob("tokfit_*.json")):
         try:
             with path.open("rb") as file:
@@ -98,8 +141,11 @@ def stored_link(env: dict[str, str]) -> tuple[str, str] | None:
         except (OSError, ValueError, AttributeError):
             # Unreadable store: another copy's file may still hold the key.
             continue
-        if isinstance(entry, dict) and isinstance(entry.get("url"), str) and isinstance(entry.get("key"), str):
-            return entry["url"].rstrip("/"), entry["key"]
+        if not isinstance(entry, dict) or not isinstance(entry.get("url"), str):
+            continue
+        key = entry.get("key")
+        if entry["url"].rstrip("/") == url and isinstance(key, str) and ANONYMOUS_KEY.fullmatch(key) and key not in refused:
+            return key
     return None
 
 
@@ -108,8 +154,8 @@ def link(env: dict[str, str], refused: Collection[str] = ()) -> tuple[str, str] 
     key of the plugin store; a configured or anonymous key in `refused` (401 or 403 from the service) is skipped,
     as in hooks/service.ts. The relay token is never skipped: nothing replaces it."""
     url, key = env.get("TOKFIT_RELAY_URL"), env.get("TOKFIT_RELAY_TOKEN")
-    relay = bool(url and key)
-    if not url or not key:
+    relay = bool(url and key and relay_address(url))
+    if not relay:
         path = Path(env.get("TOKFIT_CONFIG") or str(Path.home() / ".config/tokfit/config.json"))
         try:
             with path.open("rb") as file:
@@ -122,19 +168,14 @@ def link(env: dict[str, str], refused: Collection[str] = ()) -> tuple[str, str] 
         url = env.get("CLAUDE_PLUGIN_OPTION_SERVICE_URL") or config.get("url")
         key = next((value for value in (env.get("CLAUDE_PLUGIN_OPTION_API_KEY"), config.get("key"))
                     if value and value not in refused), None)
-    if not relay and not key:
-        stored = stored_link(env)
-        if stored is not None and stored[1] not in refused and (
-                not isinstance(url, str) or not url or url.rstrip("/") == stored[0]):
-            url, key = stored
     if not isinstance(url, str) or not url:
         url = DEFAULT_URL
-    if not isinstance(url, str) or not isinstance(key, str) or not key:
+    if not relay and not key and url:
+        key = stored_key(env, url.rstrip("/"), refused)
+    if not isinstance(url, str) or not isinstance(key, str) or not key or not relay_address(url):
         return None
-    parsed = urlsplit(url)
-    if parsed.username or parsed.password or parsed.query or parsed.fragment or not parsed.hostname:
-        return None
-    if parsed.scheme != "https" and not (parsed.scheme == "http" and (relay or parsed.hostname in ("localhost", "127.0.0.1"))):
+    # Outside a relay, plain http only toward this machine.
+    if not relay and urlsplit(url).scheme == "http" and urlsplit(url).hostname not in ("localhost", "127.0.0.1"):
         return None
     return url.rstrip("/"), key
 
@@ -144,10 +185,6 @@ class KeyRefused(Exception):
 
 
 def request(url: str, key: str, facts: Json) -> Json | None:
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req: urllib.request.Request, fp: object, code: int, msg: str,
-                             headers: object, newurl: str) -> None:
-            return None
     try:
         req = urllib.request.Request(url + "/v1/optimizations", json.dumps(facts).encode(),
                                      {"Authorization": "Bearer " + key, "Content-Type": "application/json"})
