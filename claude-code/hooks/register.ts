@@ -42,7 +42,8 @@ import { compacted, observed, rereads, stepped } from './rereads'
 import type { Rereads } from './rereads'
 import { host, report, status } from './host'
 import type { Line, RouteReport, Seen } from './host'
-import { animate, badge, refresh, statusText } from './badge'
+import { SYNC_MS, adopt, animate, badge, refresh, statusText } from './badge'
+import type { Gain } from './badge'
 import { band } from './band'
 import { health, notice as healthNotice, refreshed } from './python'
 import type { Health } from './python'
@@ -57,7 +58,7 @@ import type { Warm } from './warm'
 import { attachmentCut, called, composed, composedCut, contradicts, finalAnswer, isAccountTool, isBehind, isDenied, isKernelTool, kernel, kernelFacts, kernelReady, passed, placed, refused, refusedFinish, searchable, shortened, summaryOf, unlisted, withAgent } from './kernel'
 import { languageRefusal } from './language'
 import type { Kernel } from './kernel'
-import { access } from './access'
+import { access, startAccess } from './access'
 import { notice, planNotice } from './state'
 import type { Notice } from './state'
 
@@ -768,12 +769,36 @@ async function shown($: EngineInterface, s: State): Promise<void> {
   try {
     const to = await link($, s.options)
     if (!to) return
-    const gain = await refresh($, s.badge, to, await $.clock.now())
-    if (gain === null || (gain?.saved === s.badge.gain?.saved && gain?.seconds === s.badge.gain?.seconds)) return
-    animate($, s.badge, gain, await $.clock.now(), () => void painted($, s))
+    await show($, s, await refresh($, s.badge, to, await $.clock.now()))
   } catch {
     // Service ou horloge illisible : la marque garde sa valeur.
   }
+}
+
+// Relevé fait par une autre session de la machine (magasin commun, badge.ts) : montré ici aussi,
+// même sans tour dans cette conversation. Jamais levé.
+async function synced($: EngineInterface, s: State): Promise<void> {
+  try {
+    await show($, s, await adopt($, s.badge))
+  } catch {
+    // Magasin ou horloge illisible : la marque garde sa valeur.
+  }
+}
+
+function follow($: EngineInterface, s: State): void {
+  try {
+    s.badge.sync?.()
+    void synced($, s)
+    const tick = $.clock.every(SYNC_MS, () => void synced($, s))
+    s.badge.sync = () => tick.cancel()
+  } catch {
+    // Minuterie refusée : le gain se relit après chaque tour de cette session.
+  }
+}
+
+async function show($: EngineInterface, s: State, gain: Gain | undefined | null): Promise<void> {
+  if (gain === null || (gain?.saved === s.badge.gain?.saved && gain?.seconds === s.badge.gain?.seconds)) return
+  animate($, s.badge, gain, await $.clock.now(), () => void painted($, s))
 }
 
 // Gain dans la ligne d'état sur les surfaces graphiques sans terminal (Desktop, mobile), où le bandeau
@@ -838,7 +863,17 @@ export const register: Register = (on, options) => {
 
   // Essai sans inscription : clé anonyme dès le démarrage, commande du tableau de bord et de
   // l'état des leviers (access.ts, state.ts).
-  access(on, options, { holdout: s.holdout, content: s.content, kernel: s.kernel, health: s.health })
+  const sources = { holdout: s.holdout, content: s.content, kernel: s.kernel, health: s.health }
+  access(on, options, sources)
+
+  // Démarrage : lien, commande et outil principal (access.ts), puis les relevés du gain des autres
+  // sessions de la machine, relus tant que la session vit.
+  on('session.start', async ($, e, next) => {
+    const result = await next(e)
+    startAccess($, options, sources)
+    follow($, s)
+    return result
+  })
 
   // Une autre copie du connecteur sur le point de se charger : refusée (single.ts).
   // En cas d'échec du jugement, elle se charge : jamais de blocage par le connecteur.
@@ -1280,6 +1315,7 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     cancel(s.warm)
     s.badge.stop?.()
+    s.badge.sync?.()
     s.health.stop?.()
     await flush($, s.queue)
     return next(e)

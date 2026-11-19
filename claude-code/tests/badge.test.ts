@@ -1,9 +1,16 @@
-// Bandeau du gain au-dessus de la saisie (hooks/badge.ts, hooks/band.ts) : chiffres du bilan du service.
+// Bandeau du gain au-dessus de la saisie (hooks/badge.ts, hooks/band.ts) : chiffres du bilan du service,
+// relevé commun aux conversations de la machine (magasin du plugin).
 import { describe, expect, test } from 'claude-code/testing'
-import { BADGE_EVERY_MS, DELTA_MS, FRAMES, FRAME_MS, badgeText, gainOf } from '../hooks/badge'
+import { BADGE_EVERY_MS, DELTA_MS, FRAMES, FRAME_MS, STORE_GAIN, SYNC_MS, badgeText, gainOf } from '../hooks/badge'
 import { complete, step, user, world } from './support'
 
 const BILAN = { saved_usd: 74.2, reference_cost: 161.3, saved_percent: 46, seconds_saved: 9540, saved_kind: 'estimated', text: 'x' }
+const GAIN = { saved: 74.2, reference: 161.3, percent: 46, seconds: 9540, estimated: true }
+// Fin du tour, puis la montée du montant jusqu'au bout.
+async function settled(w: { clock: { settle: () => Promise<void>; advance: (ms: number) => Promise<void> } }): Promise<void> {
+  await w.clock.settle()
+  await w.clock.advance(FRAMES * FRAME_MS * 2)
+}
 const PROPS = { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 1 }, view: {} }
 
 describe('bandeau tokfit', () => {
@@ -68,6 +75,72 @@ describe('bandeau tokfit', () => {
     // Décision suivante : la ligne garde le gain.
     await step($, 0, { turnId: 't3' })
     expect(lines().at(-1)).toBe('ui.status sonnet · low · ≈ 80 $ économisés · −46 %')
+  })
+
+  test('autre conversation de la machine : son relevé monte ici, sans tour ni lecture du bilan', async ($, on) => {
+    const w = world(on, { surfaces: ['desktop'], messages: [user('x')], bilan: () => ({ status: 200, body: BILAN }) })
+    const lines = (): string[] => w.shown.filter(l => l.startsWith('ui.status '))
+    await $.session.start({ cwd: '/projet', surface: null, isInteractive: true })
+    await w.clock.settle()
+    expect(lines().some(l => l.includes('économisés'))).toBe(false)
+    // Au démarrage, seule la sonde de la clé lit le bilan (service.ts, `probeKey`).
+    const reads = (): number => w.sent.filter(s => s.url.endsWith('/v1/bilan')).length
+    const probes = reads()
+    // Une autre session range son relevé dans le magasin commun.
+    w.store[STORE_GAIN] = { at: 1_000_001, gain: GAIN }
+    await w.clock.advance(SYNC_MS)
+    await w.clock.advance(FRAMES * FRAME_MS * 2)
+    expect(lines().at(-1)).toBe('ui.status ≈ 74 $ économisés · −46 %')
+    w.store[STORE_GAIN] = { at: 1_000_002, gain: { ...GAIN, saved: 80 } }
+    await w.clock.advance(SYNC_MS)
+    await w.clock.advance(FRAMES * FRAME_MS * 2)
+    expect(lines().at(-1)).toBe('ui.status ≈ 80 $ économisés · −46 % · +5,80 $ ↑')
+    // Même relevé relu : rien ne bouge.
+    const count = lines().length
+    await w.clock.advance(SYNC_MS * 3)
+    expect(lines().slice(count).filter(l => !l.includes('↑'))).toEqual(['ui.status ≈ 80 $ économisés · −46 %'])
+    // Le terminal le montre aussi dans son bandeau.
+    const ui = await $.ui.mount({ plugin: 'tokfit', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+    expect((await ui.find({ key: 'tokfit-band' }))?.text).toMatch(/^✦ tokfit {2}≈ 80 \$ économisés sur 161 \$/)
+    await ui.unmount()
+    expect(reads()).toBe(probes)
+  })
+
+  test('relevé rangé dans le magasin commun (nombres seulement) ; un relevé récent d\'une autre conversation tient lieu de lecture', async ($, on) => {
+    const w = world(on, { messages: [user('x')], route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } }),
+                          bilan: () => ({ status: 200, body: BILAN }) })
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    const shared = w.store[STORE_GAIN] as { at: unknown; gain: unknown }
+    expect(typeof shared.at).toBe('number')
+    expect(shared.gain).toEqual(GAIN)
+  })
+
+  test('relevé récent d\'une autre conversation : montré après le tour, sans lecture du bilan', async ($, on) => {
+    const route = (): { status: number; body: unknown } => ({ status: 200, body: { model: 'sonnet', effort: 'low' } })
+    const fresh = world(on, { messages: [user('x')], route, bilan: () => ({ status: 200, body: BILAN }),
+                              store: { [STORE_GAIN]: { at: 1_000_000, gain: { ...GAIN, saved: 50 } } } })
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await settled(fresh)
+    expect(fresh.sent.filter(s => s.url.endsWith('/v1/bilan'))).toHaveLength(0)
+    const ui = await $.ui.mount({ plugin: 'tokfit', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+    expect((await ui.find({ key: 'tokfit-band' }))?.text).toMatch(/^✦ tokfit {2}≈ 50 \$ économisés/)
+    await ui.unmount()
+  })
+
+  test('relevé trop vieux d\'une autre conversation : le bilan est relu après le tour', async ($, on) => {
+    const w = world(on, { messages: [user('x')], route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } }),
+                          bilan: () => ({ status: 200, body: BILAN }),
+                          store: { [STORE_GAIN]: { at: 1_000_000 - BADGE_EVERY_MS, gain: { ...GAIN, saved: 50 } } } })
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await settled(w)
+    expect(w.sent.filter(s => s.url.endsWith('/v1/bilan'))).toHaveLength(1)
+    const ui = await $.ui.mount({ plugin: 'tokfit', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+    expect((await ui.find({ key: 'tokfit-band' }))?.text).toMatch(/^✦ tokfit {2}≈ 74 \$ économisés/)
+    await ui.unmount()
   })
 
   test('bilan indisponible : pas de bandeau', async ($, on) => {

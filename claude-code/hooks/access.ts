@@ -1,5 +1,6 @@
 // Au démarrage de la session : lien au service (clé anonyme comprise, key.ts), commande `/<NAME>` et
-// surveillance de l'outil principal (python.ts). La commande écrit en ligne de la conversation (`$.ui.log`)
+// surveillance de l'outil principal (python.ts) : `startAccess`, appelé par le hook `session.start` de register.ts
+// (le moteur n'admet qu'un hook `session.start` sans filtre pour tout le connecteur). La commande écrit en ligne de la conversation (`$.ui.log`)
 // le texte du lien du tableau de bord rendu par le service, l'état de chaque levier pour la session
 // (state.ts, même quand le service ne répond pas), puis le diagnostic de l'outil principal (Python,
 // installation, serveur, outils, service, version du connecteur) ; la commande ne rend aucune sortie.
@@ -15,23 +16,22 @@ import { pluginVersion } from './versions'
 // Attente maximale du lien (commande tapée par la personne).
 export const LINK_TIMEOUT_MS = 6000
 
-export function access(on: On, options: PluginOptions, sources: Sources): void {
-  on('session.start', async ($, e, next) => {
-    const started = await next(e)
-    void probeKey($, options, LINK_TIMEOUT_MS).catch(() => {
-      // Service injoignable : rien n'est su de la clé, le bandeau garde ses autres raisons.
-    })
-    void $.command.register({ name: NAME, description: 'Lien vers ton tableau de bord (bilan, abonnement), état des leviers et de l\'outil principal.' })
-      .catch(() => {
-        // Nom refusé par le moteur : la session continue sans la commande.
-      })
-    try {
-      watch($, sources.health, async () => (await link($, options)) !== null)
-    } catch {
-      // Minuterie refusée : le diagnostic se fait aux étapes et au rendu du bandeau.
-    }
-    return started
+export function startAccess($: EngineInterface, options: PluginOptions, sources: Sources): void {
+  void probeKey($, options, LINK_TIMEOUT_MS).catch(() => {
+    // Service injoignable : rien n'est su de la clé, le bandeau garde ses autres raisons.
   })
+  void $.command.register({ name: NAME, description: 'Lien vers ton tableau de bord (bilan, abonnement), état des leviers et de l\'outil principal.' })
+    .catch(() => {
+      // Nom refusé par le moteur : la session continue sans la commande.
+    })
+  try {
+    watch($, sources.health, async () => (await link($, options)) !== null)
+  } catch {
+    // Minuterie refusée : le diagnostic se fait aux étapes et au rendu du bandeau.
+  }
+}
+
+export function access(on: On, options: PluginOptions, sources: Sources): void {
 
   on('command.run', { command: NAME }, async ($) => {
     const to = await link($, options)

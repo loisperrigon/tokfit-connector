@@ -3,7 +3,10 @@
 // aurait coûté sans tokfit, la part gagnée en barre, et le temps d'attente en
 // moins, précédés de « ≈ » tant que le service les dit estimés (`saved_kind`). Les chiffres viennent du bilan du service (`GET /v1/bilan`,
 // service/bilan.py), relu après un tour au plus une fois toutes les
-// BADGE_EVERY_MS. À chaque hausse, le montant monte jusqu'au nouveau chiffre,
+// BADGE_EVERY_MS. Le dernier relevé est rangé dans le magasin du plugin (`STORE_GAIN`, nombres seulement),
+// commun aux sessions de la machine : chacune le relit toutes les SYNC_MS (`adopt`, lecture locale, sans
+// réseau) et le montre, si bien que le travail d'une conversation fait monter le chiffre de toutes les autres,
+// et qu'un relevé récent d'une autre session tient lieu de nouvelle lecture. À chaque hausse, le montant monte jusqu'au nouveau chiffre,
 // la barre se remplit, l'étincelle scintille et le gain du dernier tour
 // s'affiche quelques secondes ; puis le bandeau ne bouge plus (aucun
 // rafraîchissement en continu). Sur les surfaces graphiques sans terminal (Desktop, mobile), le même gain
@@ -18,6 +21,8 @@ export const BADGE_EVERY_MS = 5 * 60_000
 export const FRAME_MS = 60
 export const FRAMES = 22
 export const DELTA_MS = 5000
+export const SYNC_MS = 15_000
+export const STORE_GAIN = 'gain'
 const BAR = 10
 const SPARKS = ['✦', '✧', '✶', '✷', '✸', '✹', '✺', '✹', '✸', '✷', '✶', '✧']
 
@@ -34,6 +39,31 @@ export type Badge = {
   // Gain apparu au dernier relevé, montré DELTA_MS.
   delta?: number
   deltaUntil?: number
+  // Relecture du magasin commun en cours (arrêtée en fin de session).
+  sync?: () => void
+}
+
+// Relevé commun aux sessions : heure de la lecture et gain lu (null : aucun gain à montrer).
+type Shared = { at: number; gain: Gain | null }
+
+function sharedOf(value: unknown): Shared | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const { at, gain } = value as Record<string, unknown>
+  if (typeof at !== 'number') return undefined
+  if (gain === null) return { at, gain: null }
+  if (typeof gain !== 'object') return undefined
+  const g = gain as Record<string, unknown>
+  const optional = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined)
+  if (typeof g.saved !== 'number' || typeof g.estimated !== 'boolean') return undefined
+  return { at, gain: { saved: g.saved, reference: optional(g.reference), percent: optional(g.percent), seconds: optional(g.seconds), estimated: g.estimated } }
+}
+
+// Relevé d'une autre session plus récent que le dernier vu ici : son gain (undefined : plus de gain), sinon null.
+export async function adopt($: EngineInterface, b: Badge): Promise<Gain | undefined | null> {
+  const shared = sharedOf(await $.store.get(STORE_GAIN))
+  if (!shared || (b.at !== undefined && shared.at <= b.at)) return null
+  b.at = shared.at
+  return shared.gain ?? undefined
 }
 
 export function badge(): Badge {
@@ -118,14 +148,24 @@ export function bar(percent: number): [string, string] {
 
 // Relit le bilan si le délai est passé : le nouveau gain (undefined : plus de
 // gain à montrer), ou null quand rien n'a changé (trop tôt, déjà en cours, échec).
+// Un relevé plus récent d'une autre session (magasin commun) passe avant la lecture et compte dans le délai.
 export async function refresh($: EngineInterface, b: Badge, to: Link, now: number): Promise<Gain | undefined | null> {
-  if (b.busy || (b.at !== undefined && now - b.at < BADGE_EVERY_MS)) return null
+  if (b.busy) return null
   b.busy = true
-  b.at = now
   try {
+    const other = await adopt($, b).catch(() => {
+      // Magasin illisible : seule la lecture du bilan compte.
+      return null
+    })
+    if (b.at !== undefined && now - b.at < BADGE_EVERY_MS) return other
+    b.at = now
     const reply = await bounded($, `${to.url}/v1/bilan`, { method: 'GET', headers: { authorization: `Bearer ${to.key}` } }, TIMEOUT_MS)
-    if (!reply || reply.status !== 200) return null
-    return gainOf(reply.text)
+    if (!reply || reply.status !== 200) return other
+    const gain = gainOf(reply.text)
+    await $.store.set(STORE_GAIN, { at: now, gain: gain ?? null }).catch(() => {
+      // Magasin refusé : les autres sessions liront le bilan elles-mêmes.
+    })
+    return gain
   } finally {
     b.busy = false
   }
