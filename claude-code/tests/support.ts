@@ -1,7 +1,7 @@
 // Monde simulé sous le connecteur : fichier de configuration, service
 // (réponses programmées), conversation, horloge, et tout ce qui se voit à
 // l'écran ou s'écrit sur la machine. Aucun réseau, aucun disque.
-import type { AgentSpawnInput, ModelForkResult, PromptComposeSection, SessionContextBreakdown, On, SessionMessage, TurnStepInput, TurnStepResult, TurnUsage } from 'claude-code'
+import type { AgentSpawnInput, ModelForkResult, PromptComposeSection, RenderSurface, SessionContextBreakdown, On, SessionMessage, TurnStepInput, TurnStepResult, TurnUsage } from 'claude-code'
 import type { Engine, MockClock } from 'claude-code/testing'
 import { expect, mock } from 'claude-code/testing'
 import { DEFAULT_URL } from '../hooks/service'
@@ -64,6 +64,8 @@ export type Options = {
   content?: (body: Record<string, unknown>) => Reply
   // Bilan du client (`/v1/bilan`, GET) ; par défaut 404 : pas de marque.
   bilan?: () => Reply
+  // Surfaces qui dessinent la session (`$.session.surfaces()`) ; par défaut, le terminal seul.
+  surfaces?: RenderSurface[]
   // Clés que le service refuse (401) sur toutes ses routes ; par défaut, aucune.
   refusedKeys?: string[]
   // Réponse de `$.model.fork` (relance du cache) ; par défaut, « ok » sur le cache du fil.
@@ -224,6 +226,7 @@ export function world(on: On, options: Options = {}): World {
     return { value: options.layers?.[e.source] ?? (e.source === 'user' ? options.settings : undefined) ?? {} }
   })
   on('session.root', async () => ({ value: '/projet' }))
+  on('session.surfaces', async () => ({ value: options.surfaces ?? ['terminal'] }))
   // Dossier de la boucle qui appelle (`$.session.cwd()` lu dans un hook) ; par défaut, la racine.
   on('session.cwd', async () => ({ value: options.cwd ?? '/projet' }))
   on('session.messages', async ($, e) => ({ value: e.agentId ? options.agentMessages?.[e.agentId] ?? [] : options.messages ?? [] }))

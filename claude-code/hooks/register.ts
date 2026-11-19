@@ -42,7 +42,7 @@ import { compacted, observed, rereads, stepped } from './rereads'
 import type { Rereads } from './rereads'
 import { host, report, status } from './host'
 import type { Line, RouteReport, Seen } from './host'
-import { animate, badge, refresh } from './badge'
+import { animate, badge, refresh, statusText } from './badge'
 import { band } from './band'
 import { health, notice as healthNotice, refreshed } from './python'
 import type { Health } from './python'
@@ -770,9 +770,21 @@ async function shown($: EngineInterface, s: State): Promise<void> {
     if (!to) return
     const gain = await refresh($, s.badge, to, await $.clock.now())
     if (gain === null || (gain?.saved === s.badge.gain?.saved && gain?.seconds === s.badge.gain?.seconds)) return
-    animate($, s.badge, gain, await $.clock.now())
+    animate($, s.badge, gain, await $.clock.now(), () => void painted($, s))
   } catch {
     // Service ou horloge illisible : la marque garde sa valeur.
+  }
+}
+
+// Gain dans la ligne d'état sur les surfaces graphiques sans terminal (Desktop, mobile), où le bandeau
+// ne le dessine pas ; ailleurs la ligne garde la décision seule. Jamais levé.
+async function painted($: EngineInterface, s: State): Promise<void> {
+  try {
+    const surfaces = await $.session.surfaces()
+    s.line.gain = surfaces.length > 0 && !surfaces.includes('terminal') ? statusText(s.badge, await $.clock.now()) : undefined
+    await status($, s.seen, s.line)
+  } catch {
+    // Surfaces ou horloge illisibles : la ligne garde son dernier texte.
   }
 }
 

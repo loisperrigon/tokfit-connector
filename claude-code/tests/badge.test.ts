@@ -1,6 +1,6 @@
 // Bandeau du gain au-dessus de la saisie (hooks/badge.ts, hooks/band.ts) : chiffres du bilan du service.
 import { describe, expect, test } from 'claude-code/testing'
-import { FRAMES, FRAME_MS, badgeText, gainOf } from '../hooks/badge'
+import { BADGE_EVERY_MS, DELTA_MS, FRAMES, FRAME_MS, badgeText, gainOf } from '../hooks/badge'
 import { complete, step, user, world } from './support'
 
 const BILAN = { saved_usd: 74.2, reference_cost: 161.3, saved_percent: 46, seconds_saved: 9540, saved_kind: 'estimated', text: 'x' }
@@ -17,7 +17,7 @@ describe('bandeau tokfit', () => {
     expect(gainOf('<html>')).toBeUndefined()
   })
 
-  test('après un tour : le montant monte puis se fixe, sur le terminal et Desktop ; bilan lu une fois dans le délai', async ($, on) => {
+  test('après un tour : le montant monte puis se fixe sur le terminal, aucun bandeau du gain sur Desktop ; bilan lu une fois dans le délai', async ($, on) => {
     const w = world(on, { messages: [user('x')], route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } }),
                           bilan: () => ({ status: 200, body: BILAN }) })
     await step($, 0, { turnId: 't1' })
@@ -26,12 +26,9 @@ describe('bandeau tokfit', () => {
     const first = await $.ui.mount({ plugin: 'tokfit', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
     expect((await first.find({ key: 'tokfit-band' }))?.text).toMatch(/^✦ tokfit {2}≈ 0,00 \$ économisés sur 161 \$/)
     await first.unmount()
-    // Desktop : la mascotte, une ligne discrète à droite, sans la barre ▰▱ ; fond transparent.
+    // Desktop : pas de bandeau du gain (il est dans la ligne d'état, test suivant).
     const desktop = await $.ui.mount({ plugin: 'tokfit', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
-    const row = await desktop.find({ key: 'tokfit-band' })
-    expect(row?.text).toMatch(/^tokfit≈ 0,00 \$ économisés· −\d+ % · 2 h 39$/)
-    expect(row?.text).not.toMatch(/[▰▱]/)
-    expect(await desktop.find({ type: 'Svg' })).toBeDefined()
+    expect(await desktop.find({ key: 'tokfit-band' })).toBeUndefined()
     await desktop.unmount()
     await w.clock.advance(FRAMES * FRAME_MS * 2)
     const ui = await $.ui.mount({ plugin: 'tokfit', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
@@ -43,6 +40,34 @@ describe('bandeau tokfit', () => {
     expect(w.sent.filter(s => s.url.endsWith('/v1/bilan'))).toHaveLength(1)
     // La ligne d'état garde la seule décision.
     expect(w.shown.filter(l => l.startsWith('ui.status')).at(-1)).toBe('ui.status sonnet · low')
+  })
+
+  test('Desktop : le gain monte dans la ligne d\'état, puis le gain du tour s\'y montre et s\'efface', async ($, on) => {
+    let saved = 74.2
+    const w = world(on, { surfaces: ['desktop'], messages: [user('x')], route: () => ({ status: 200, body: { model: 'sonnet', effort: 'low' } }),
+                          bilan: () => ({ status: 200, body: { ...BILAN, saved_usd: saved } }) })
+    const lines = (): string[] => w.shown.filter(l => l.startsWith('ui.status '))
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    await w.clock.advance(FRAMES * FRAME_MS * 2)
+    expect(lines().at(-1)).toBe('ui.status sonnet · low · ≈ 74 $ économisés · −46 %')
+    // Le montant est monté par étapes, sans gain du tour au premier relevé.
+    expect(lines().filter(l => /≈ \d+ \$ économisés/.test(l)).length).toBeGreaterThan(3)
+    expect(lines().some(l => l.includes('+'))).toBe(false)
+    saved = 80
+    await w.clock.advance(BADGE_EVERY_MS)
+    await step($, 0, { turnId: 't2' })
+    await complete($, 't2')
+    await w.clock.settle()
+    expect(lines().at(-1)).toMatch(/^ui\.status sonnet · low · ≈ \d+ \$ économisés · −46 % · \+5,80 \$ [✦✧✶✷✸✹✺]$/)
+    await w.clock.advance(FRAMES * FRAME_MS * 2)
+    expect(lines().at(-1)).toBe('ui.status sonnet · low · ≈ 80 $ économisés · −46 % · +5,80 $ ↑')
+    await w.clock.advance(DELTA_MS)
+    expect(lines().at(-1)).toBe('ui.status sonnet · low · ≈ 80 $ économisés · −46 %')
+    // Décision suivante : la ligne garde le gain.
+    await step($, 0, { turnId: 't3' })
+    expect(lines().at(-1)).toBe('ui.status sonnet · low · ≈ 80 $ économisés · −46 %')
   })
 
   test('bilan indisponible : pas de bandeau', async ($, on) => {

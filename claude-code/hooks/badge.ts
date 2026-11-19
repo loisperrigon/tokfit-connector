@@ -6,7 +6,8 @@
 // BADGE_EVERY_MS. À chaque hausse, le montant monte jusqu'au nouveau chiffre,
 // la barre se remplit, l'étincelle scintille et le gain du dernier tour
 // s'affiche quelques secondes ; puis le bandeau ne bouge plus (aucun
-// rafraîchissement en continu). Service muet, lent, refus ou gain nul : le
+// rafraîchissement en continu). Sur les surfaces graphiques sans terminal (Desktop, mobile), le même gain
+// passe dans la ligne d'état (`statusText`, register.ts) au lieu du bandeau. Service muet, lent, refus ou gain nul : le
 // bandeau garde sa dernière valeur ou ne s'affiche pas ; rien d'autre ne change.
 import type { EngineInterface } from 'claude-code'
 import { bounded } from './bounded'
@@ -79,6 +80,20 @@ export function badgeText(g: Gain, shown: number = g.saved): string {
   return parts.join(' · ')
 }
 
+// Le gain en texte simple pour la ligne d'état : le montant monte avec le bandeau (la part reste fixe), une étincelle tourne
+// pendant la montée, puis le gain du dernier relevé reste affiché jusqu'à `deltaUntil`.
+export function statusText(b: Badge, now: number): string | undefined {
+  const g = b.gain
+  if (!g) return undefined
+  const shown = current(b)
+  const parts = [`${approx(g)}${money(shown.saved)} économisés`]
+  if (g.percent !== undefined) parts.push(`−${Math.round(g.percent)} %`)
+  if (b.delta !== undefined && b.deltaUntil !== undefined && now < b.deltaUntil) {
+    parts.push(`+${money(b.delta)} ${b.frame !== undefined ? shown.spark : '↑'}`)
+  }
+  return parts.join(' · ')
+}
+
 function ease(t: number): number {
   return 1 - Math.pow(1 - t, 3)
 }
@@ -116,24 +131,33 @@ export async function refresh($: EngineInterface, b: Badge, to: Link, now: numbe
   }
 }
 
-// Nouveau gain : la montée part du montant affiché ; le bandeau est redessiné à chaque image.
-export function animate($: EngineInterface, b: Badge, gain: Gain | undefined, now: number): void {
+// Nouveau gain : la montée part du montant affiché ; le bandeau est redessiné et `paint` appelé à chaque
+// image, puis une dernière fois quand le gain du dernier relevé cesse d'être montré.
+export function animate($: EngineInterface, b: Badge, gain: Gain | undefined, now: number, paint: () => void = () => {}): void {
   const before = b.gain?.saved
   b.stop?.()
   b.stop = undefined
   b.from = b.gain ? current(b).saved : 0
   b.gain = gain
+  const draw = (): void => {
+    $.ui.invalidate('ui.render')
+    paint()
+  }
   if (gain && before !== undefined && gain.saved - before >= 0.01) {
     b.delta = gain.saved - before
     b.deltaUntil = now + FRAMES * FRAME_MS + DELTA_MS
+    const fade = $.clock.every(FRAMES * FRAME_MS + DELTA_MS, () => {
+      fade.cancel()
+      draw()
+    })
   }
   if (!gain) {
     b.frame = undefined
-    $.ui.invalidate('ui.render')
+    draw()
     return
   }
   b.frame = 0
-  $.ui.invalidate('ui.render')
+  draw()
   let stop: (() => void) | undefined
   const timer = $.clock.every(FRAME_MS, () => {
     const frame = (b.frame ?? FRAMES) + 1
@@ -144,7 +168,7 @@ export function animate($: EngineInterface, b: Badge, gain: Gain | undefined, no
     } else {
       b.frame = frame
     }
-    $.ui.invalidate('ui.render')
+    draw()
   })
   stop = () => timer.cancel()
   b.stop = stop
