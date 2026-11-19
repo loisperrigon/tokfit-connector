@@ -1,9 +1,10 @@
-// Faits de durée joints aux compteurs (timing.ts) : attente du modèle, temps des
+// Faits de durée joints aux compteurs (timing.ts) : attente du modèle, phase des
 // outils, durée du tour jusqu'à la réponse finale ; des nombres seulement.
 import { describe, expect, test } from 'claude-code/testing'
+import type { TurnStepInput } from 'claude-code'
 import { aborted, complete, step, user, world } from './support'
 import type { World } from './support'
-import { duration, ran, timing, toolTime } from '../hooks/timing'
+import { duration, responded, timing, toolTime } from '../hooks/timing'
 
 type Sent = Record<string, unknown>
 
@@ -17,11 +18,16 @@ async function during<T>(w: World, ms: number, run: Promise<T>): Promise<T> {
   return run
 }
 
+// La réponse de chaque étape demande une lecture, sauf aux étapes `last` de la boucle.
+const reading = (last: (e: TurnStepInput) => boolean) => (e: TurnStepInput) =>
+  last(e) ? [] : [{ name: 'Read', input: { file_path: '/x' } }]
+
 describe('durées des étapes', () => {
-  test('attente du modèle, outils de la boucle et durée du tour', async ($, on) => {
-    const w = world(on, { messages: [user('x')], slow: { step: 1_500, tool: 2_000 }, read: () => 'contenu' })
+  test('attente du modèle, phase des outils de la boucle et durée du tour', async ($, on) => {
+    const w = world(on, { messages: [user('x')], slow: { step: 1_500 }, uses: reading(e => e.index === 1) })
     await during(w, 1_500, step($, 0, { turnId: 't1' }))
-    await during(w, 2_000, $.tool.call({ tool: 'Read', tool_use_id: 'tu-1', file_path: '/x' }))
+    // Outils, permissions et crochets : tout ce qui sépare la réponse de l'envoi de l'étape suivante.
+    await w.clock.advance(2_000)
     await during(w, 1_500, step($, 1, { turnId: 't1' }))
     await complete($, 't1')
     await w.clock.settle()
@@ -33,25 +39,38 @@ describe('durées des étapes', () => {
     ])
   })
 
-  test('outils en parallèle : comptés une fois ; ceux d’un sous-agent sur sa propre étape', async ($, on) => {
-    const w = world(on, { messages: [user('x')], slow: { tool: 1_000 }, read: () => 'contenu' })
+  test('phase des outils lue sur les étapes : un outil qu’aucun crochet du connecteur ne vise est compté', async ($, on) => {
+    const w = world(on, { messages: [user('x')], slow: { tool: 1_000 }, uses: reading(e => e.index === 1) })
     await step($, 0, { turnId: 't1' })
-    await during(w, 1_000, Promise.all([
-      $.tool.call({ tool: 'Read', tool_use_id: 'tu-1', file_path: '/a' }),
-      $.tool.call({ tool: 'Read', tool_use_id: 'tu-2', file_path: '/b' }),
-    ]))
-    await during(w, 1_000, $.tool.call({ tool: 'Read', tool_use_id: 'tu-3', file_path: '/c', agentId: 'agent-1' }))
-    await step($, 0, { turnId: 't1', agentId: 'agent-1' })
+    await during(w, 1_000, $.tool.call({ tool: 'WebFetch', tool_use_id: 'tu-1', url: 'https://exemple.test', prompt: 'titre' }))
     await step($, 1, { turnId: 't1' })
     await complete($, 't1')
     await w.clock.settle()
-    expect(sentSteps(w).map(s => [s.subagent, s.tool_ms])).toEqual([[undefined, undefined], [true, 1_000], [undefined, 1_000]])
+    expect(sentSteps(w).map(s => s.tool_ms)).toEqual([undefined, 1_000])
   })
 
-  test('tour interrompu : pas de durée de tour, et ses outils ne passent pas au tour suivant', async ($, on) => {
-    const w = world(on, { messages: [user('x')], slow: { tool: 1_000 }, read: () => 'contenu' })
+  test('chaque boucle a sa phase d’outils ; une réponse finale n’en ouvre pas', async ($, on) => {
+    const w = world(on, { messages: [user('x')], uses: reading(e => e.agentId === undefined ? e.index === 1 : e.index === 2) })
     await step($, 0, { turnId: 't1' })
-    await during(w, 1_000, $.tool.call({ tool: 'Read', tool_use_id: 'tu-1', file_path: '/x' }))
+    await w.clock.advance(500)
+    await step($, 0, { turnId: 'a1', agentId: 'agent-1' })
+    await w.clock.advance(1_000)
+    await step($, 1, { turnId: 'a1', agentId: 'agent-1' })
+    await w.clock.advance(300)
+    await step($, 1, { turnId: 't1' })
+    await w.clock.advance(4_000)
+    await step($, 0, { turnId: 't2' })
+    await complete($, 't2')
+    await w.clock.settle()
+    expect(sentSteps(w).map(s => [s.subagent, s.tool_ms])).toEqual([
+      [undefined, undefined], [true, undefined], [true, 1_000], [undefined, 1_800], [undefined, undefined],
+    ])
+  })
+
+  test('tour interrompu : pas de durée de tour, et sa phase d’outils ne passe pas au tour suivant', async ($, on) => {
+    const w = world(on, { messages: [user('x')], uses: reading(e => e.turnId === 't2') })
+    await step($, 0, { turnId: 't1' })
+    await w.clock.advance(1_000)
     await aborted($, 't1')
     await w.clock.advance(5_000)
     await step($, 0, { turnId: 't2' })
@@ -67,11 +86,13 @@ describe('durées des étapes', () => {
     expect(duration(12.4)).toBe(12)
     expect(duration(1e12)).toBe(604_800_000)
     const t = timing()
-    ran(t, 'main', 10, 20)
-    ran(t, 'main', 15, 30)
-    ran(t, 'main', 40, 45)
-    ran(t, 'main', 50, 50)
-    expect(toolTime(t, 'main')).toEqual({ tool_ms: 25 })
-    expect(toolTime(t, 'main')).toEqual({})
+    responded(t, 'main', 10, 2)
+    expect(toolTime(t, 'main', 1, 35)).toEqual({ tool_ms: 25 })
+    expect(toolTime(t, 'main', 2, 50)).toEqual({})
+    responded(t, 'main', 10, 1)
+    expect(toolTime(t, 'main', 0, 35)).toEqual({})
+    responded(t, 'main', 10, 1)
+    responded(t, 'main', 20, 0)
+    expect(toolTime(t, 'main', 1, 35)).toEqual({})
   })
 })

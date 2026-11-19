@@ -28,7 +28,7 @@ import type { Link } from './service'
 import { showNotice } from './trial'
 import { add, flush, queue, stepOf } from './usage'
 import type { Queue, StepFacts } from './usage'
-import { began, ended, modelTime, queued as timed, ran, timing, toolTime } from './timing'
+import { began, closed, ended, modelTime, queued as timed, responded, timing, toolTime } from './timing'
 import type { Timing } from './timing'
 import { audit } from './audit'
 import { compactNow, wanted } from './compact'
@@ -56,7 +56,7 @@ import { carried, prefix, taken } from './prefix'
 import type { Prefix } from './prefix'
 import type { KernelPlan, Plans, PrefixPlan, SessionPlan } from './plan'
 import type { Warm } from './warm'
-import { attachmentCut, called, composed, composedCut, contradicts, finalAnswer, isAccountTool, isBehind, isDenied, isKernelTool, kernel, kernelFacts, kernelReady, passed, placed, refused, refusedFinish, searchable, shortened, summaryOf, unlisted, withAgent } from './kernel'
+import { attachmentCut, called, composed, composedCut, contradicts, finalAnswer, isAccountTool, isBehind, isDenied, isKernelTool, KERNEL_MATCH, kernel, kernelFacts, kernelReady, passed, placed, refused, refusedFinish, searchable, shortened, summaryOf, unlisted, withAgent } from './kernel'
 import { languageRefusal } from './language'
 import type { Kernel } from './kernel'
 import { access, startAccess } from './access'
@@ -70,6 +70,8 @@ type Facts = Record<string, unknown>
 const MODELS: readonly string[] = ['sonnet', 'opus', 'haiku', 'fable']
 // Outils qui modifient un fichier : leur nombre au tour précédent dit au service ce que ce tour a demandé.
 const EDITS: readonly string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
+// Outils dont le crochet des fichiers lit l'appel : ceux qui nomment un `file_path`.
+const FILE_TOOLS = ['Read', 'Edit', 'Write'] as const
 // Début de la demande qui a ouvert la conversation (FIRST_MESSAGE_HEAD du service).
 const FIRST_HEAD = 600
 // Le service ne lit que le début et la fin des textes : la requête est bornée
@@ -257,9 +259,7 @@ type State = {
   pending: Map<string, Plan>
   spawning: number
   loops: Map<string, Loop>
-  // Ce que l'appel Agent a fixé (tool_use_id → modèle, effort) et d'où vient
-  // chaque type d'agent offert au modèle : seulement dits au service.
-  requested: Map<string, { model?: string; effort?: string }>
+  // D'où vient chaque type d'agent offert au modèle : seulement dit au service.
   sources: Map<string, string>
   // Dernier appel du fil principal par famille de modèle : quand, et combien de
   // tokens il a laissés dans le cache (fait transmis au service).
@@ -578,6 +578,24 @@ async function asked($: EngineInterface, to: Link, facts: Facts, o: Outage): Pro
   }
 }
 
+// Ce qu'avait fixé l'appel Agent qui lance le sous-agent (modèle, effort), relu dans la conversation de la
+// boucle qui l'appelle, où l'appel figure pendant qu'il tourne. Lu là plutôt que par un crochet `tool.call`
+// sur Agent : un tel crochet empêche de passer l'agent en arrière-plan. Rien pour un autre lancement.
+const CALL_ROWS = 64
+
+async function requested($: EngineInterface, e: AgentSpawnInput): Promise<{ model?: string; effort?: string }> {
+  if (e.tool_use_id === '' || e.workflow !== undefined) return {}
+  const rows = await $.session.messages({ last: CALL_ROWS, ...(e.parentAgentId === undefined ? {} : { agentId: e.parentAgentId }) })
+  if ('deny' in rows) return {}
+  for (const row of [...rows].reverse()) {
+    const call = row.toolUses.find(use => use.tool_use_id === e.tool_use_id && use.tool === 'Agent')
+    if (!call) continue
+    const { model, effort } = call.input
+    return { ...(typeof model === 'string' && model ? { model } : {}), ...(typeof effort === 'string' && effort ? { effort } : {}) }
+  }
+  return {}
+}
+
 // Lancement d'un sous-agent, quel qu'il soit (appel du modèle, définition,
 // plugin, workflow, coéquipier, fork) : le service décide.
 async function spawned($: EngineInterface, s: State, e: AgentSpawnInput): Promise<Plan> {
@@ -588,7 +606,7 @@ async function spawned($: EngineInterface, s: State, e: AgentSpawnInput): Promis
   const parentLoop = parent === undefined ? undefined : s.loops.get(parent)
   // Modèle sur lequel tourne le parent : celui que le connecteur lui a posé.
   const current = (parent === undefined ? s.routedModel : s.plans.get(parent)?.model ?? parentLoop?.model) ?? e.parentModel
-  const asked = s.requested.get(e.tool_use_id) ?? {}
+  const asked = await requested($, e)
   const facts: AgentFacts = {
     origin: origin(e, s.sources), message: e.prompt, model: current, conversation_tokens: 0, subagent_type: e.subagentType,
     requested_model: asked.model ?? e.model ?? '', requested_effort: asked.effort ?? '',
@@ -857,7 +875,7 @@ export const register: Register = (on, options) => {
   resetLanguage()
   const s: State = {
     options, queue: queue(options), to: null, routedModel: undefined, turn: {}, steered: new Set(), tags: NO_TAGS, plans: new Map(),
-    pending: new Map(), spawning: 0, loops: new Map(), requested: new Map(), sources: new Map(), lastCall: new Map(),
+    pending: new Map(), spawning: 0, loops: new Map(), sources: new Map(), lastCall: new Map(),
     compacted: false, warm: warm(), audited: false, fanout: fanout(), trimmed: new Map(), compactedFrom: undefined,
     compactTry: undefined, lean: false, prefix: prefix(),
     rereads: rereads(), holdout: holdout(), off: new Set(), seen: {}, line: {}, badge: badge(), workSteps: 0, workEdits: 0, sessionModel: undefined,
@@ -903,7 +921,7 @@ export const register: Register = (on, options) => {
     try {
       const now = await $.clock.now()
       if (e.agentId === undefined && e.index === 0) began(s.timing, now)
-      Object.assign(before, toolTime(s.timing, e.agentId ?? 'main'))
+      Object.assign(before, toolTime(s.timing, e.agentId ?? 'main', e.index, now))
     } catch {
       // Horloge illisible : les durées manquent, rien d'autre.
     }
@@ -993,9 +1011,11 @@ export const register: Register = (on, options) => {
       lead()
     }
     try {
-      if (sent !== undefined) Object.assign(before, modelTime(sent, await $.clock.now()))
+      const received = await $.clock.now()
+      if (sent !== undefined) Object.assign(before, modelTime(sent, received))
+      responded(s.timing, e.agentId ?? 'main', received, result.toolUses.length)
     } catch {
-      // Horloge illisible : l'attente du modèle manque, rien d'autre.
+      // Horloge illisible : l'attente du modèle et la phase des outils manquent, rien d'autre.
     }
     try {
       await counted($, s, step, result, idleS, before)
@@ -1004,13 +1024,6 @@ export const register: Register = (on, options) => {
     }
     return result
   })
-
-  // Ce que l'agent principal a fixé, et la source de chaque type d'agent : faits
-  // pour le journal du service, jamais une raison de ne pas router.
-  on('tool.call', { tool: 'Agent' }, ($, e, next) => {
-    s.requested.set(e.tool_use_id, { ...(e.model ? { model: e.model } : {}), ...(e.effort ? { effort: e.effort } : {}) })
-    return next(e)
-  }).catch(($, e, next) => next(e))
 
   // Sortie d'une commande bruyante raccourcie (output.ts), pour un client relié
   // au service seulement ; une erreur de l'outil passe telle quelle. Pas de
@@ -1056,7 +1069,10 @@ export const register: Register = (on, options) => {
     }
   })
 
-  // Fichiers lus et modifiés par le fil principal (rereads.ts) : chemins en mémoire seulement.
+  // Crochets d'outils filtrés sur les seuls outils qu'ils lisent : un crochet `tool.call` qui peut viser un
+  // outil coupe pour lui le passage en arrière-plan, sa sortie en direct et l'attente de Code Mode (durée des
+  // outils lue sur les étapes, timing.ts ; effort fixé par un appel Agent relu dans la conversation, `requested`).
+
   // Appels de `python` comptés (kernel.ts), jamais lus : leur code ne quitte pas la machine.
   // Seul le bloc du résumé de `fini()` est lu, dans le fil principal, pour arrêter le tour ;
   // un résumé clairement dans une autre langue que la demande est refusé une fois par tour
@@ -1064,52 +1080,41 @@ export const register: Register = (on, options) => {
   // Pas de `.catch` qui rappellerait `next` : l'outil tournerait deux fois.
   // Un noyau par agent (kernel.ts, `withAgent`) : l'agent qui appelle `python` part avec
   // l'appel, levier coupé ou non (l'outil reste le même, son noyau ne se partage jamais).
-  // Test dans le corps plutôt qu'un filtre `{ tool: KERNEL_TOOL }` : typé `mcp__${string}__${string}`, ce
-  // filtre fait calculer au compilateur le résultat de chaque outil possible (tsc au-delà de 8 Go).
-  on('tool.call', async ($, e, next) => {
-    if (isKernelTool(e.tool)) {
-      let cwd: string | undefined
-      try {
-        cwd = await $.session.cwd()
-      } catch {
-        // Dossier illisible : le noyau de l'agent démarre dans celui du serveur.
-      }
-      e = withAgent(e, cwd)
-    }
-    let start: number | undefined
+  on('tool.call', { tool: KERNEL_MATCH }, async ($, e, next) => {
+    let cwd: string | undefined
     try {
-      start = await $.clock.now()
+      cwd = await $.session.cwd()
     } catch {
-      // Horloge illisible : la durée de l'outil manque, rien d'autre.
+      // Dossier illisible : le noyau de l'agent démarre dans celui du serveur.
     }
-    const result = await next(e)
-    let answer: typeof result = result
+    const call = withAgent(e, cwd)
+    const result = await next(call)
     try {
-      if (start !== undefined) ran(s.timing, e.agentId ?? 'main', start, await $.clock.now())
-    } catch {
-      // Horloge illisible : la durée de l'outil manque, rien d'autre.
-    }
-    try {
-      const plan = isKernelTool(e.tool) && result.deny === undefined ? await kernelOn($, s) : null
-      if (plan) {
-        called(s.kernel, e.agentId)
-        const summary = e.agentId === undefined && !result.isError ? summaryOf(result.result, plan.finished) : undefined
-        const refusal = summary !== undefined && !s.kernel.languageAsked ? await otherLanguage($, summary) : undefined
-        if (refusal !== undefined) {
-          s.kernel.languageAsked = true
-          // Seul `context` (rappels d'un crochet PostToolUse) passe avec la réponse refaite : `ref` ferait reprendre
-          // tel quel le message d'origine (refus perdu), `text` et `isReadOnly` sont ceux du moteur.
-          answer = {
-            result: refusedFinish(result.result, plan.finished, refusal) as typeof result.result,
-            ...(result.context === undefined ? {} : { context: result.context }),
-          }
-        } else if (summary !== undefined) {
-          s.kernel.summary = summary
+      const plan = isKernelTool(call.tool) && result.deny === undefined ? await kernelOn($, s) : null
+      if (!plan) return result
+      called(s.kernel, call.agentId)
+      const summary = call.agentId === undefined && !result.isError ? summaryOf(result.result, plan.finished) : undefined
+      const refusal = summary !== undefined && !s.kernel.languageAsked ? await otherLanguage($, summary) : undefined
+      if (refusal !== undefined) {
+        s.kernel.languageAsked = true
+        // Seul `context` (rappels d'un crochet PostToolUse) passe avec la réponse refaite : `ref` ferait reprendre
+        // tel quel le message d'origine (refus perdu), `text` et `isReadOnly` sont ceux du moteur.
+        return {
+          result: refusedFinish(result.result, plan.finished, refusal) as typeof result.result,
+          ...(result.context === undefined ? {} : { context: result.context }),
         }
       }
+      if (summary !== undefined) s.kernel.summary = summary
     } catch {
       // Configuration ou liste des outils illisible : l'appel n'est pas compté, rien d'autre.
     }
+    return result
+  })
+
+  // Fichiers lus et modifiés par le fil principal (rereads.ts) : chemins en mémoire seulement.
+  // Pas de `.catch` qui rappellerait `next` : l'outil tournerait deux fois.
+  on('tool.call', { tool: FILE_TOOLS }, async ($, e, next) => {
+    const result = await next(e)
     try {
       const path = 'file_path' in e ? e.file_path : undefined
       if (e.agentId === undefined && typeof path === 'string' && result.deny === undefined && !result.isError) {
@@ -1119,7 +1124,7 @@ export const register: Register = (on, options) => {
     } catch {
       // Appel illisible : rien à suivre.
     }
-    return answer
+    return result
   })
 
   // Levier kernel (kernel.ts) : `python` et `compte` devant, outils intégrés d'action et outils
@@ -1275,7 +1280,6 @@ export const register: Register = (on, options) => {
     } finally {
       s.spawning--
       s.pending.delete(e.prompt)
-      s.requested.delete(e.tool_use_id)
     }
   }).catch(($, e, next) => next(e))
 
@@ -1287,9 +1291,10 @@ export const register: Register = (on, options) => {
   })
 
   // Fin d'un tour du fil principal : le lot part et la pause commence (relances
-  // du cache), sans retenir la main.
+  // du cache), sans retenir la main. Fin du tour de toute boucle : sa phase d'outils est close.
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
+    closed(s.timing, e.agentId ?? 'main')
     if (e.agentId === undefined && e.reason !== 'aborted') s.steered.clear()
     if (e.agentId === undefined) {
       try {

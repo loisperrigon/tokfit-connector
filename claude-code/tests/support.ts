@@ -1,7 +1,7 @@
 // Monde simulé sous le connecteur : fichier de configuration, service
 // (réponses programmées), conversation, horloge, et tout ce qui se voit à
 // l'écran ou s'écrit sur la machine. Aucun réseau, aucun disque.
-import type { AgentSpawnInput, ModelForkResult, PromptComposeSection, RenderSurface, SessionContextBreakdown, On, SessionMessage, TurnStepInput, TurnStepResult, TurnUsage } from 'claude-code'
+import type { AgentSpawnInput, ModelForkResult, PromptComposeSection, RenderSurface, SessionContextBreakdown, On, SessionMessage, ToolUseSummary, TurnStepInput, TurnStepResult, TurnStepToolUse, TurnUsage } from 'claude-code'
 import type { Engine, MockClock } from 'claude-code/testing'
 import { expect, mock } from 'claude-code/testing'
 import { DEFAULT_URL } from '../hooks/service'
@@ -52,6 +52,8 @@ export type Options = {
   holdAgent?: (agentId: string) => Promise<void>
   // Durées simulées (ms, horloge du monde) : réponse de chaque requête au modèle, et de chaque outil.
   slow?: { step?: number; tool?: number }
+  // Appels d'outils que demande la réponse de chaque étape ; par défaut, aucun (réponse finale).
+  uses?: (e: TurnStepInput) => TurnStepToolUse[]
   // Compaction au coût : par défaut, ne jamais compacter.
   compact?: (body: Record<string, unknown>) => Reply
   // Refus de `$.session.compact` par le moteur, avec ce message (session sans terminal, tour en cours).
@@ -229,7 +231,13 @@ export function world(on: On, options: Options = {}): World {
   on('session.surfaces', async () => ({ value: options.surfaces ?? ['terminal'] }))
   // Dossier de la boucle qui appelle (`$.session.cwd()` lu dans un hook) ; par défaut, la racine.
   on('session.cwd', async () => ({ value: options.cwd ?? '/projet' }))
-  on('session.messages', async ($, e) => ({ value: e.agentId ? options.agentMessages?.[e.agentId] ?? [] : options.messages ?? [] }))
+  // Un appel Agent figure dans la conversation de la boucle qui l'a fait, comme chez le moteur pendant qu'il tourne.
+  const calls = new Map<string, ToolUseSummary[]>()
+  on('session.messages', async ($, e) => {
+    const rows = e.agentId ? options.agentMessages?.[e.agentId] ?? [] : options.messages ?? []
+    const uses = calls.get(e.agentId ?? 'main') ?? []
+    return { value: uses.length ? [...rows, { role: 'assistant' as const, text: '', toolUses: uses }] : rows }
+  })
   const listed = [...options.listed ?? []]
   const agentInfo = (agent: NonNullable<Options['roster']>[number]) => ({
     description: 'sous-tâche', type: 'general-purpose', kind: 'local_agent' as const,
@@ -268,7 +276,8 @@ export function world(on: On, options: Options = {}): World {
     if (options.slow?.step) await clock.sleep(options.slow.step)
     const model = e.model.includes('claude-') ? e.model : `claude-${e.model}-5-5`
     const usage = options.counted === false ? null : usageOf(model)
-    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: usage ? 'end_turn' : null, usage }
+    const toolUses = usage ? options.uses?.(e) ?? [] : []
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses, stopReason: usage ? (toolUses.length ? 'tool_use' : 'end_turn') : null, usage }
   })
   on('classic.Stop', async () => options.stop?.() ?? {})
   // Pièces jointes du moteur : rendues telles quelles sous le connecteur.
@@ -277,6 +286,11 @@ export function world(on: On, options: Options = {}): World {
     value: (options.tools ?? []).map(name => ({ name, description: `outil ${name}`, mcp: name.startsWith('mcp__') })),
   }))
   on('tool.call', async ($, e) => {
+    if (e.tool === 'Agent') {
+      const { tool, tool_use_id, agentId, ...input } = e
+      const loop = agentId ?? 'main'
+      calls.set(loop, [...calls.get(loop) ?? [], { tool, tool_use_id, input }])
+    }
     if (options.slow?.tool) await clock.sleep(options.slow.tool)
     if (options.python && e.tool.startsWith('mcp__') && e.tool.endsWith('__agir')) {
       const out = options.python('code' in e ? String(e.code) : '', e)

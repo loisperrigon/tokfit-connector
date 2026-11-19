@@ -1,7 +1,11 @@
 // Faits de durée joints aux compteurs, en millisecondes :
 // - `model_ms` : de l'envoi de la requête de l'étape à sa réponse entière ;
-// - `tool_ms` : outils lancés par la boucle (fil principal ou sous-agent) depuis
-//   son étape précédente, appels simultanés comptés une fois (union des intervalles) ;
+// - `tool_ms` : phase des outils de la boucle (fil principal ou sous-agent), de la
+//   réponse d'une étape qui demande des outils à l'envoi de l'étape suivante du même
+//   tour : outils, demandes de permission et crochets compris, appels simultanés
+//   comptés une fois. Lue sur les étapes, sans crochet sur les outils : un crochet
+//   `tool.call` coupe pour l'outil visé le passage en arrière-plan, sa sortie en
+//   direct et l'attente de Code Mode ;
 // - `turn_ms` : tour du fil principal, de sa première étape à sa fin avec une
 //   réponse, posé sur sa dernière étape si elle attend encore l'envoi.
 // Une durée nulle ou illisible n'est pas envoyée.
@@ -19,14 +23,14 @@ export type TimeFacts = {
 export type Timing = {
   // Début du tour en cours du fil principal (horloge du moteur, ms).
   turnAt: number | undefined
-  // Intervalles [début, fin] des outils de chaque boucle (`main` ou identifiant d'agent).
-  tools: Map<string, [number, number][]>
+  // Fin de la dernière réponse de chaque boucle (`main` ou identifiant d'agent) qui a demandé des outils.
+  asked: Map<string, number>
   // Dernière étape du fil principal mise en file, et son tour : elle reçoit `turn_ms`.
   last: { turnId: string; step: Step } | undefined
 }
 
 export function timing(): Timing {
-  return { turnAt: undefined, tools: new Map(), last: undefined }
+  return { turnAt: undefined, asked: new Map(), last: undefined }
 }
 
 // Durée en millisecondes entières, bornée ; undefined si elle est nulle ou illisible.
@@ -35,33 +39,30 @@ export function duration(ms: number): number | undefined {
   return Math.min(MAX_MS, Math.round(ms))
 }
 
-// Première étape d'un tour du fil principal : les outils du fil restés sans étape suivante sont oubliés.
+// Première étape d'un tour du fil principal.
 export function began(t: Timing, at: number): void {
   t.turnAt = at
-  t.tools.delete('main')
 }
 
-export function ran(t: Timing, loop: string, start: number, end: number): void {
-  if (!(end > start)) return
-  const spans = t.tools.get(loop) ?? []
-  spans.push([start, end])
-  t.tools.set(loop, spans)
+// Réponse d'une étape reçue à `at` : si elle demande des outils, leur phase commence.
+export function responded(t: Timing, loop: string, at: number, toolUses: number): void {
+  if (toolUses > 0) t.asked.set(loop, at)
+  else t.asked.delete(loop)
 }
 
-// Temps des outils de la boucle depuis son étape précédente (union des intervalles), puis remis à zéro.
-export function toolTime(t: Timing, loop: string): TimeFacts {
-  const spans = t.tools.get(loop)
-  t.tools.delete(loop)
-  if (!spans?.length) return {}
-  let total = 0
-  let end = -Infinity
-  for (const [from, to] of [...spans].sort((a, b) => a[0] - b[0])) {
-    const start = Math.max(from, end)
-    if (to > start) total += to - start
-    end = Math.max(end, to)
-  }
-  const ms = duration(total)
+// Étape `index` de la boucle sur le point de partir à `at` : temps depuis la réponse qui a demandé des
+// outils, dans le même tour seulement (une première étape n'hérite de rien), puis remis à zéro.
+export function toolTime(t: Timing, loop: string, index: number, at: number): TimeFacts {
+  const from = t.asked.get(loop)
+  t.asked.delete(loop)
+  if (index === 0 || from === undefined) return {}
+  const ms = duration(at - from)
   return ms === undefined ? {} : { tool_ms: ms }
+}
+
+// Tour de la boucle fini : une phase d'outils restée ouverte (tour interrompu) est oubliée.
+export function closed(t: Timing, loop: string): void {
+  t.asked.delete(loop)
 }
 
 export function modelTime(sent: number, received: number): TimeFacts {

@@ -42,6 +42,12 @@ export function isKernelTool(name: string): boolean {
   return name === KERNEL_TOOL
 }
 
+// Filtre d'un hook `tool.call` sur `python` seul. Une expression plutôt que `{ tool: KERNEL_TOOL }` :
+// typé `mcp__${string}__${string}`, ce filtre fait calculer au compilateur le résultat de chaque outil
+// possible (tsc au-delà de 8 Go), alors qu'une expression ne restreint pas le type de l'appel. Le nom
+// ne porte que [A-Za-z0-9_-] (`spelled`) : aucun caractère à échapper.
+export const KERNEL_MATCH = new RegExp(`^${KERNEL_TOOL}$`)
+
 // Un noyau par agent (kernel/server.py) : chaque appel de `python` porte en argument
 // `agent` la boucle qui l'a lancé, `main` pour le fil principal. Sans lui, le fil
 // principal et les sous-agents partageraient répertoire courant et variables : un
