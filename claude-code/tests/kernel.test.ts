@@ -7,7 +7,7 @@ import type { Engine } from 'claude-code/testing'
 import type { PromptComposeSection, ToolDescribeResult } from 'claude-code'
 import { KERNEL_TOOL, LEGACY_FINISHED, READY_MS } from '../hooks/kernel'
 import { DEFERRED, DENIED, EXECUTION_SECTION, FINISHED, KERNEL_SECTION, LISTING, REFUSAL, TEST_PLAN, THINKING_SECTION } from './plan'
-import { DEFAULT_URL, end, step, streamed, unconfigured, user, world } from './support'
+import { DEFAULT_URL, end, spawn, step, streamed, unconfigured, user, world } from './support'
 import type { Options, Reply, World } from './support'
 import { PLAN_RETRY_MS, PLAN_TIMEOUT_MS } from '../hooks/plan'
 
@@ -39,8 +39,13 @@ async function placement($: Engine, tool: string, provider: { plugin: string; ti
   return $.tool.describe({ tool, description: `outil ${tool}`, provider, ...(isDeferred ? { isDeferred } : {}) })
 }
 
-async function check($: Engine, tool: string, id = 'tu-9'): Promise<{ decision: string; reason?: string }> {
-  return $.tool.check({ tool, input: {}, tool_use_id: id })
+async function check($: Engine, tool: string, id = 'tu-9', agentId?: string): Promise<{ decision: string; reason?: string }> {
+  return $.tool.check({ tool, input: {}, tool_use_id: id, ...(agentId ? { agentId } : {}) })
+}
+
+// Le moteur offre `agir` au modèle d'un sous-agent (avant sa première requête) : sa définition ne ferme pas ses outils.
+async function offer($: Engine, agentId: string, subagentType = 'general-purpose'): Promise<void> {
+  await $.tool.offer({ tool: PYTHON, provider: OURS, agentId, subagentType })
 }
 
 // Pièce jointe `auto_mode` du moteur, telle que Claude Code 2.1.323 la rend en bypassPermissions
@@ -195,6 +200,7 @@ describe('levier actif, noyau connecté', () => {
 
   test('la pièce jointe auto_mode qui pousse vers Bash est retirée, les autres restent', async ($, on) => {
     world(on, connected())
+    await offer($, 'agent-1')
     expect(await attachment($, 'auto_mode', AUTO_MODE)).toBeNull()
     expect(await attachment($, 'auto_mode', AUTO_MODE, 'agent-1')).toBeNull()
     // Une pièce jointe auto_mode qui ne parle pas de Bash (mode auto et son classeur) reste.
@@ -205,6 +211,7 @@ describe('levier actif, noyau connecté', () => {
 
   test('liste que le plan raccourcit : chaque entrée coupée à sa longueur, le reste intact', async ($, on) => {
     world(on, connected())
+    await offer($, 'agent-1')
     expect(LISTING.entry).toBe(40)
     expect(await attachment($, 'skill_listing', SKILLS)).toBe(SKILLS_SHORT)
     expect(await attachment($, 'skill_listing', SKILLS, 'agent-1')).toBe(SKILLS_SHORT)
@@ -257,6 +264,73 @@ describe('levier actif, noyau connecté', () => {
   })
 })
 
+// Sous-agent dont la définition ferme la liste des outils sans `agir` (`.claude/agents/x.md`, `tools: Read, Bash`) :
+// le moteur ne lui offre pas `agir` (vu en vrai, 2.1.328, essai e2e `kernel-agent`). Retour d'un client du 19/11/2026 :
+// Read et Bash refusés, l'agent rendait la main sans rien faire.
+describe('sous-agent sans agir : ses outils intégrés restent', () => {
+  const LISTING_DEFERRED = ['The following deferred tools are now available via ToolSearch:', 'Bash', 'Read', 'WebFetch'].join('\n')
+
+  test('Read et Bash permis au sous-agent sans agir, refusés au fil principal et au sous-agent qui l’a', async ($, on) => {
+    const w = world(on, connected())
+    await offer($, 'agent-2')
+    expect(await check($, 'Read', 'tu-1', 'agent-1')).toEqual({ decision: 'allow' })
+    expect(await check($, 'Bash', 'tu-2', 'agent-1')).toEqual({ decision: 'allow' })
+    expect(await check($, 'Read', 'tu-3', 'agent-2')).toEqual({ decision: 'deny', reason: REFUSAL })
+    expect(await check($, 'Read', 'tu-4')).toEqual({ decision: 'deny', reason: REFUSAL })
+    await step($, 0, { turnId: 'a1', agentId: 'agent-1' })
+    await step($, 0, { turnId: 'a2', agentId: 'agent-2' })
+    await step($, 0, { turnId: 't1' })
+    const steps = await sentSteps($, w)
+    // Aucun refus compté pour le sous-agent sans agir.
+    expect(steps.map(s => [s.subagent, s.kernel_denied])).toEqual([[true, undefined], [true, 1], [undefined, 1]])
+  })
+
+  test('pièces jointes du sous-agent sans agir intactes : outils différés, auto_mode, listes', async ($, on) => {
+    world(on, connected())
+    expect(await attachment($, 'deferred_tools_delta', LISTING_DEFERRED, 'agent-1')).toBe(LISTING_DEFERRED)
+    expect(await attachment($, 'auto_mode', AUTO_MODE, 'agent-1')).toBe(AUTO_MODE)
+    expect(await attachment($, 'skill_listing', SKILLS, 'agent-1')).toBe(SKILLS)
+    // Le fil principal, lui, garde le levier.
+    expect(await attachment($, 'deferred_tools_delta', LISTING_DEFERRED)).toBe(
+      ['The following deferred tools are now available via ToolSearch:', 'WebFetch'].join('\n'))
+  })
+
+  test('ToolSearch charge Read pour le sous-agent sans agir, sans raison de refus', async ($, on) => {
+    world(on, connected({ search: () => ['Read', 'WebFetch'] }))
+    const found = await $.tool.call({ tool: 'ToolSearch', tool_use_id: 'tu-1', query: 'select:Read,WebFetch', max_results: 5, agentId: 'agent-1' })
+    expect((found.result as { matches: string[] }).matches).toEqual(['Read', 'WebFetch'])
+    expect(found.context).toBeUndefined()
+    await offer($, 'agent-2')
+    const hidden = await $.tool.call({ tool: 'ToolSearch', tool_use_id: 'tu-2', query: 'select:Read,WebFetch', max_results: 5, agentId: 'agent-2' })
+    expect((hidden.result as { matches: string[] }).matches).toEqual(['WebFetch'])
+  })
+
+  test('agir que le moteur n’offre pas (réponse d’un autre hook) : le sous-agent garde ses outils', async ($, on) => {
+    world(on, connected({ offered: e => e.agentId !== 'agent-1' }))
+    await offer($, 'agent-1')
+    expect(await check($, 'Read', 'tu-1', 'agent-1')).toEqual({ decision: 'allow' })
+  })
+
+  test('un fork garde la liste de la boucle qui le lance', async ($, on) => {
+    world(on, connected())
+    await $.tool.offer({ tool: PYTHON, provider: OURS })
+    const main = await spawn($, 'SOUSTACHE-FORK vérifie', { fork: true })
+    expect(await check($, 'Read', 'tu-1', main.agentId)).toEqual({ decision: 'deny', reason: REFUSAL })
+    // Fork d'un sous-agent sans agir : outils intégrés gardés.
+    const child = await spawn($, 'SOUSTACHE-FORK relis', { fork: true, parentAgentId: 'agent-9' })
+    expect(await check($, 'Read', 'tu-2', child.agentId)).toEqual({ decision: 'allow' })
+  })
+
+  test('nouvelle session : les sous-agents de la précédente sont oubliés', async ($, on) => {
+    const options = connected({ session: 'session-1' })
+    world(on, options)
+    await offer($, 'agent-1')
+    expect((await check($, 'Read', 'tu-1', 'agent-1')).decision).toBe('deny')
+    options.session = 'session-2'
+    expect((await check($, 'Read', 'tu-2', 'agent-1')).decision).toBe('allow')
+  })
+})
+
 describe('ce que le levier retire des requêtes (part mécanique, service/levers.py)', () => {
   test('fil principal : descriptions déplacées et section remplacée, sur chaque étape ; rien sur un sous-agent', async ($, on) => {
     const w = world(on, connected())
@@ -290,6 +364,7 @@ describe('ce que le levier retire des requêtes (part mécanique, service/levers
 
   test('pièces jointes retirées ou raccourcies : comptées une fois, sur l’étape suivante de la boucle qui les porte', async ($, on) => {
     const w = world(on, connected())
+    await offer($, 'agent-1')
     await step($, 0, { turnId: 't1' })
     await attachment($, 'auto_mode', AUTO_MODE)
     await attachment($, 'skill_listing', SKILLS, 'agent-1')

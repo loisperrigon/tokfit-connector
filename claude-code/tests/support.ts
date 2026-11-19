@@ -1,7 +1,7 @@
 // Monde simulé sous le connecteur : fichier de configuration, service
 // (réponses programmées), conversation, horloge, et tout ce qui se voit à
 // l'écran ou s'écrit sur la machine. Aucun réseau, aucun disque.
-import type { AgentSpawnInput, ModelForkResult, PromptComposeSection, RenderSurface, SessionContextBreakdown, On, SessionMessage, ToolUseSummary, TurnStepInput, TurnStepResult, TurnStepToolUse, TurnUsage } from 'claude-code'
+import type { AgentSpawnInput, ModelForkResult, PromptComposeSection, RenderSurface, SessionContextBreakdown, On, SessionMessage, ToolOfferInput, ToolUseSummary, TurnStepInput, TurnStepResult, TurnStepToolUse, TurnUsage } from 'claude-code'
 import type { Engine, MockClock } from 'claude-code/testing'
 import { expect, mock } from 'claude-code/testing'
 import { DEFAULT_URL } from '../hooks/service'
@@ -87,6 +87,10 @@ export type Options = {
   whileSpawning?: () => Promise<void>
   // Faux : l'API n'a rien répondu (étape sans compteurs).
   counted?: boolean
+  // Identifiant de la session (`$.session.id()`), relu à chaque appel ; par défaut SESSION.
+  session?: string
+  // Réponse de `tool.offer` (un autre hook peut cacher un outil à une boucle) ; par défaut, offert.
+  offered?: (e: ToolOfferInput) => boolean
   // Version du moteur (`$.session.version()`) ; par défaut une version sans compaction à l'inactivité.
   version?: string
   // Réglages fusionnés (`$.settings.read()`), et couche de l'utilisateur quand `layers` ne la donne
@@ -215,7 +219,7 @@ export function world(on: On, options: Options = {}): World {
     const out = reply.text ?? JSON.stringify(reply.body ?? {})
     return { value: { status: reply.status, ok: reply.status >= 200 && reply.status < 300, headers: {}, text: out } }
   })
-  on('session.id', async () => ({ value: SESSION }))
+  on('session.id', async () => ({ value: options.session ?? SESSION }))
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
   on('command.register', async ($, e) => { w.commands.push(e.name); return { value: { command: e.name } } })
   on('session.version', async () => {
@@ -341,6 +345,7 @@ export function world(on: On, options: Options = {}): World {
   // Décision du moteur sur un appel d'outil : toujours permis ; place de chaque outil : la sienne.
   on('tool.check', async () => ({ decision: 'allow' as const }))
   on('tool.describe', async ($, e) => ({ description: e.description, ...(e.isDeferred ? { isDeferred: true } : {}) }))
+  on('tool.offer', async ($, e) => ({ isOffered: options.offered?.(e) ?? true }))
   on('turn.complete', async ($, e) => ({ text: e.answer }))
   on('prompt.submit', async ($, e) => ({ text: e.text }))
   on('session.end', async ($, e) => ({ sessionId: e.sessionId }))

@@ -56,7 +56,7 @@ import { carried, prefix, taken } from './prefix'
 import type { Prefix } from './prefix'
 import type { KernelPlan, Plans, PrefixPlan, SessionPlan } from './plan'
 import type { Warm } from './warm'
-import { attachmentCut, called, composed, composedCut, contradicts, finalAnswer, isAccountTool, isBehind, isDenied, isKernelTool, KERNEL_MATCH, kernel, kernelFacts, kernelReady, passed, placed, refused, refusedFinish, searchable, shortened, summaryOf, unlisted, withAgent } from './kernel'
+import { attachmentCut, called, composed, composedCut, contradicts, finalAnswer, forked, isAccountTool, isBehind, isDenied, isKernelTool, KERNEL_MATCH, kernel, kernelFacts, kernelLoop, kernelReady, offeredTo, passed, placed, refused, refusedFinish, searchable, shortened, sessionOf, summaryOf, unlisted, withAgent } from './kernel'
 import { languageRefusal } from './language'
 import type { Kernel } from './kernel'
 import { access, startAccess } from './access'
@@ -765,12 +765,13 @@ async function planned($: EngineInterface, s: State): Promise<SessionPlan | null
 
 // Plan du levier kernel s'il est actif : client relié au service, levier non coupé (témoin
 // du service, application hôte, TOKFIT_OFF), présent dans le plan, et outil `python`
-// connecté ; sinon null et rien ne change.
-async function kernelOn($: EngineInterface, s: State): Promise<KernelPlan | null> {
+// connecté ; sinon null et rien ne change. Pour un sous-agent (`agentId`) : seulement si `agir` lui est
+// offert (kernel.ts, `kernelLoop`) ; refuser ses outils intégrés le laisserait sans moyen d'agir.
+async function kernelOn($: EngineInterface, s: State, agentId?: string): Promise<KernelPlan | null> {
   const to = await link($, s.options)
   if (!to || (await levers($, s.holdout, to)).has('kernel')) return null
   const plan = (await sessionPlan($, s.content, to))?.kernel
-  return plan && (await kernelReady($, s.kernel)) ? plan : null
+  return plan && (await kernelReady($, s.kernel)) && kernelLoop(s.kernel, agentId) ? plan : null
 }
 
 // Plan du levier prefix s'il est actif : client relié au service, levier non coupé, présent dans le plan.
@@ -1150,7 +1151,7 @@ export const register: Register = (on, options) => {
       if (result.deny !== undefined || result.isError) return result
       const found: unknown = result.result
       const matches = typeof found === 'object' && found !== null ? (found as { matches?: unknown }).matches : undefined
-      const plan = Array.isArray(matches) ? await kernelOn($, s) : null
+      const plan = Array.isArray(matches) ? await kernelOn($, s, e.agentId) : null
       if (!plan || !Array.isArray(matches)) return result
       const kept = searchable(plan, matches)
       if (kept.length === matches.length) return result
@@ -1161,12 +1162,25 @@ export const register: Register = (on, options) => {
     }
   })
 
+  // Boucles dont le modèle se voit offrir `agir` (kernel.ts, `offered`) : un sous-agent dont la définition ferme
+  // la liste des outils sans lui garde ses outils intégrés. Rien n'est retiré ici : la réponse du moteur.
+  on('tool.offer', { tool: KERNEL_MATCH }, async ($, e, next) => {
+    const result = await next(e)
+    try {
+      await sessionOf($, s.kernel)
+      if (result.isOffered) offeredTo(s.kernel, e.agentId)
+    } catch {
+      // Session illisible : boucle non retenue, le levier n'y refuse rien.
+    }
+    return result
+  }).catch(($, e, next) => next(e))
+
   // Outil retiré que le modèle appelle quand même (chargé par ToolSearch) : refusé
-  // avec la consigne de passer par `python`. Seul un vrai appel compte (pas une
+  // avec la consigne de passer par `python`, dans une boucle qui a `agir`. Seul un vrai appel compte (pas une
   // question `$.tool.check` d'un plugin). Sur toute erreur, la décision du moteur.
   on('tool.check', async ($, e, next) => {
     try {
-      const plan = await kernelOn($, s)
+      const plan = await kernelOn($, s, e.agentId)
       if (plan && isDenied(plan, e.tool)) {
         if (e.tool_use_id !== undefined) refused(s.kernel, e.agentId)
         return { decision: 'deny' as const, reason: plan.refusal }
@@ -1202,13 +1216,13 @@ export const register: Register = (on, options) => {
     }
   }).catch(($, e, next) => next(e))
 
-  // Levier kernel : la pièce jointe que le plan désigne est retirée de la requête, les
+  // Levier kernel, dans une boucle qui a `agir` : la pièce jointe que le plan désigne est retirée de la requête, les
   // listes qu'il nomme sont raccourcies, et la liste des outils différés perd les outils refusés
   // (kernel.ts). Sur toute erreur, celle du moteur.
   on('prompt.attachment', async ($, e, next) => {
     const result = await next(e)
     try {
-      const plan = result.text !== null ? await kernelOn($, s) : null
+      const plan = result.text !== null ? await kernelOn($, s, e.agentId) : null
       if (plan && result.text !== null) {
         if (contradicts(plan, e.type, result.text)) {
           attachmentCut(s.kernel, e.agentId, result.text, null)
@@ -1273,6 +1287,7 @@ export const register: Register = (on, options) => {
       s.pending.set(e.prompt, plan)
       const result = await next(!e.fork && plan.model ? { ...e, model: plan.model } : e)
       if (result.deny === undefined && result.agentId !== undefined) {
+        if (e.fork) forked(s.kernel, e.parentAgentId, result.agentId)
         started(s, e.prompt, result.agentId, plan)
         launched(s.fanout, result.agentId, e.subagentType)
       }

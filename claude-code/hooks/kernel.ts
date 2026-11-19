@@ -94,6 +94,8 @@ export function isBehind(plan: KernelPlan, name: string): boolean {
 // Caractères que le levier retire des requêtes : `moved`, par outil déplacé (description et nom dans la liste
 // des outils différés ; négatif pour un outil passé devant) ; `sectionCut`, section remplacée moins la consigne ;
 // `trimmed`, par boucle, pièces jointes retirées ou raccourcies, en attente de l'étape suivante de cette boucle.
+// `offered` : sous-agents (et forks, teammates) dont le modèle se voit offrir `agir` (`tool.offer`) ; un sous-agent
+// que le moteur n'y a pas mis (définition aux `tools` fermés : `tools: Read, Bash`) garde ses outils intégrés.
 export type Kernel = {
   session: string | undefined
   ready: boolean
@@ -108,11 +110,34 @@ export type Kernel = {
   moved: Map<string, number>
   sectionCut: number
   trimmed: Map<string, number>
+  offered: Set<string>
 }
 
 export function kernel(): Kernel {
   return { session: undefined, ready: false, checkedAt: Number.NEGATIVE_INFINITY, calls: new Map(), denied: new Map(), pass: 'never', summary: undefined, stopped: false,
-    languageAsked: false, moved: new Map(), sectionCut: 0, trimmed: new Map() }
+    languageAsked: false, moved: new Map(), sectionCut: 0, trimmed: new Map(), offered: new Set() }
+}
+
+// État remis à neuf quand la session change (`/clear`, reprise d'une autre).
+export async function sessionOf($: EngineInterface, k: Kernel): Promise<void> {
+  const session = await $.session.id()
+  if (k.session !== session) Object.assign(k, kernel(), { session })
+}
+
+// `agir` offert au modèle d'une boucle (`tool.offer` : avant sa première requête, puis à chaque appel).
+export function offeredTo(k: Kernel, agentId: string | undefined): void {
+  k.offered.add(agentId ?? MAIN_LOOP)
+}
+
+// Fork : il garde la liste d'outils de la boucle qui le lance.
+export function forked(k: Kernel, parentAgentId: string | undefined, agentId: string): void {
+  if (parentAgentId === undefined ? k.offered.has(MAIN_LOOP) : k.offered.has(parentAgentId)) k.offered.add(agentId)
+}
+
+// Boucle où le levier agit : le fil principal (et une question `$.tool.check`, hors de toute boucle), régi par
+// `kernelReady` ; un sous-agent seulement si `agir` lui est offert.
+export function kernelLoop(k: Kernel, agentId: string | undefined): boolean {
+  return agentId === undefined || k.offered.has(agentId)
 }
 
 // Vrai quand l'outil `agir` de ce plugin est parmi ceux que le modèle peut appeler, hors Code Mode et hors règles de
@@ -149,8 +174,7 @@ export async function permissionRules($: EngineInterface): Promise<boolean> {
 }
 
 export async function kernelReady($: EngineInterface, k: Kernel): Promise<boolean> {
-  const session = await $.session.id()
-  if (k.session !== session) Object.assign(k, kernel(), { session })
+  await sessionOf($, k)
   // Absent : relu à chaque fois (il prend dès qu'il apparaît) ; présent : relu au plus toutes les READY_MS.
   const now = await $.clock.now()
   if (!k.ready || now - k.checkedAt >= READY_MS) {
