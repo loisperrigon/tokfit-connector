@@ -80,9 +80,10 @@ function refusedFor(options: object): Set<string> {
 }
 
 // Relais d'une application hôte : adresse sans identifiants, en https, ou en http vers un hôte privé
-// (`privateHost`) ; jeton sans espace.
+// (`privateHost`) ; jeton en ASCII visible, sans espace ni caractère de contrôle (il part dans l'en-tête
+// Authorization).
 const RELAY_URL = /^https?:\/\/([A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\])(:\d{1,5})?(\/[^\s?#]*)?$/
-const RELAY_TOKEN = /^[A-Za-z0-9_.~+/=-]{8,512}$/
+const RELAY_TOKEN = /^[\x21-\x7E]{8,2048}$/
 
 // Vrai pour `localhost`, un nom Tailscale (`*.ts.net`, ou nom court de MagicDNS : un seul label qui
 // commence par une lettre) et une adresse IP littérale de bouclage (127.0.0.0/8, ::1), privée (10/8,

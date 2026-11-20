@@ -44,10 +44,19 @@ describe('relais d’une application hôte', () => {
     expect(w.routes()[0]?.url).toBe(`${RELAY}/v1/route`)
   })
 
+  test('jeton signé de session, groupes séparés par des virgules', async ($, on) => {
+    const signed = `ocm1.1795200000.1192e370.google,seo,seo-perso,economy.${'c'.repeat(64)}`
+    const w = world(on, { env: { ECONOMISEUR_RELAY_URL: RELAY, ECONOMISEUR_RELAY_TOKEN: signed }, messages: [user('x')] }) // publish: keep
+    await step($, 0)
+    expect(w.routes()[0]?.url).toBe(`${RELAY}/v1/route`)
+    expect(w.routes()[0]?.headers).toMatchObject({ authorization: `Bearer ${signed}` })
+  })
+
   const refused: [string, Record<string, string>][] = [
     ['adresse avec identifiants', { ECONOMISEUR_RELAY_URL: 'http://moi@hote:1/x', ECONOMISEUR_RELAY_TOKEN: TOKEN }], // publish: keep
     ['autre protocole', { ECONOMISEUR_RELAY_URL: 'ftp://hote/x', ECONOMISEUR_RELAY_TOKEN: TOKEN }], // publish: keep
     ['jeton avec espace', { ECONOMISEUR_RELAY_URL: RELAY, ECONOMISEUR_RELAY_TOKEN: 'a b c d e f g h' }], // publish: keep
+    ['jeton avec retour à la ligne', { ECONOMISEUR_RELAY_URL: RELAY, ECONOMISEUR_RELAY_TOKEN: 'abcdefgh\r\nX-Autre: 1' }], // publish: keep
     ['jeton absent', { ECONOMISEUR_RELAY_URL: RELAY }], // publish: keep
     ['http vers un nom public', { ECONOMISEUR_RELAY_URL: 'http://relais.example:7420/x', ECONOMISEUR_RELAY_TOKEN: TOKEN }], // publish: keep
     ['http vers une adresse publique', { ECONOMISEUR_RELAY_URL: 'http://8.8.8.8:7420/x', ECONOMISEUR_RELAY_TOKEN: TOKEN }], // publish: keep
