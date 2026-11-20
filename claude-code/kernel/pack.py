@@ -19,6 +19,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import zlib
 from pathlib import Path
 from typing import Any, Collection, Dict, List, MutableMapping, NamedTuple, Optional, Tuple
 
@@ -47,6 +48,10 @@ PREFIXE_DANS_LE_NOYAU = "_tokfit_"
 
 Lien = Tuple[str, str]
 _lien_du_noyau: Optional[Lien] = None
+
+
+class Illisible(ValueError):
+    """Corps de réponse illisible : compression invalide ou plus grand que TAILLE_MAX une fois décompressé."""
 
 
 class Paquet(NamedTuple):
@@ -114,12 +119,40 @@ def demander(vers: Lien, chemin: str, corps: object = None, delai_s: float = DEL
                              headers: object, newurl: str) -> None:
             return None
     adresse, cle = vers
-    entetes = {"Authorization": "Bearer " + cle}
+    entetes = {"Authorization": "Bearer " + cle, "Accept-Encoding": "gzip"}
     if corps is not None:
         entetes["Content-Type"] = "application/json"
     requete = urllib.request.Request(adresse + chemin, None if corps is None else json.dumps(corps).encode(), entetes)
     with urllib.request.build_opener(SansRedirection()).open(requete, timeout=delai_s) as reponse:
-        return json.loads(reponse.read(TAILLE_MAX))
+        return json.loads(corps_de(reponse))
+
+
+def corps_de(reponse: Any) -> bytes:
+    """Corps d'une réponse (ou d'une HTTPError), décompressé s'il arrive en gzip ; TAILLE_MAX au plus, sinon Illisible."""
+    brut: bytes = reponse.read(TAILLE_MAX)
+    if (reponse.headers.get("Content-Encoding") or "").strip().lower() != "gzip":
+        return brut
+    decompresseur = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        donnees = decompresseur.decompress(brut, TAILLE_MAX)
+    except zlib.error as erreur:
+        raise Illisible("gzip invalide") from erreur
+    if decompresseur.unconsumed_tail:
+        raise Illisible("corps trop grand")
+    return donnees
+
+
+def refus_du_service(erreur: urllib.error.HTTPError) -> str:
+    """Raison d'un 402 : code d'erreur du service et adresse où reprendre l'accès, s'ils se lisent."""
+    try:
+        detail = json.loads(corps_de(erreur))
+    except (OSError, ValueError):
+        detail = None
+    code = detail.get("error") if isinstance(detail, dict) else None
+    url = detail.get("url") if isinstance(detail, dict) else None
+    if not isinstance(code, str) or not code:
+        return "accès suspendu par le service (402)"
+    return f"accès suspendu par le service (402 {code}" + (f" : {url})" if isinstance(url, str) and url else ")")
 
 
 def recevoir(vers: Optional[Lien], delai_s: float = DELAI_S) -> Tuple[Optional[Paquet], str]:
@@ -129,8 +162,14 @@ def recevoir(vers: Optional[Lien], delai_s: float = DELAI_S) -> Tuple[Optional[P
     try:
         paquet = lire(poster(vers, "/v1/content", {"parts": ["kernel"]}, delai_s))
     except urllib.error.HTTPError as erreur:
-        erreur.close()
-        return None, REFUS if erreur.code in (401, 403) else f"service en erreur ({erreur.code})"
+        try:
+            if erreur.code == 402:
+                return None, refus_du_service(erreur)
+            return None, REFUS if erreur.code in (401, 403) else f"service en erreur ({erreur.code})"
+        finally:
+            erreur.close()
+    except Illisible:
+        return None, "réponse illisible"
     except (OSError, ValueError) as erreur:
         return None, f"service injoignable ou refus ({type(erreur).__name__})"
     return (paquet, "") if paquet is not None else (None, "réponse illisible")
@@ -175,7 +214,7 @@ def sauver_outil(module: str, fonction: str, test: str) -> str:
         reponse = poster(_lien_du_noyau, "/v1/tools", {"module": module, "function": fonction, "test": test})
     except urllib.error.HTTPError as erreur:
         try:
-            detail = json.loads(erreur.read(TAILLE_MAX)).get("error")
+            detail = json.loads(corps_de(erreur)).get("error")
         except (OSError, ValueError, AttributeError):
             detail = None
         finally:

@@ -153,7 +153,7 @@ def link(env: dict[str, str], refused: Collection[str] = ()) -> tuple[str, str] 
     """(url, key): the host's relay, else the configured key (plugin option, then config file), else the anonymous
     key of the plugin store; a configured or anonymous key in `refused` (401 or 403 from the service) is skipped,
     as in hooks/service.ts. The relay token is never skipped: nothing replaces it."""
-    url, key = env.get("TOKFIT_RELAY_URL"), env.get("TOKFIT_RELAY_TOKEN")
+    url, key = env.get("ECONOMISEUR_RELAY_URL"), env.get("ECONOMISEUR_RELAY_TOKEN")  # publish: keep
     relay = bool(url and key and relay_address(url))
     if not relay:
         path = Path(env.get("TOKFIT_CONFIG") or str(Path.home() / ".config/tokfit/config.json"))
@@ -217,8 +217,15 @@ def ask(env: dict[str, str], facts: Json, to: tuple[str, str] | None = None) -> 
     return None
 
 
+def levers_off(env: dict[str, str]) -> list[str]:
+    """Levers turned off by the host app (its embedded copy's variable) and by the user."""
+    host = env.get("ECONOMISEUR_OFF", "")  # publish: keep
+    user = env.get("TOKFIT_OFF", "")
+    return [word.strip() for word in f"{host},{user}".split(",") if word.strip()]
+
+
 def decide(event: Json, env: dict[str, str], engine: str) -> Json:
-    off = [word.strip() for word in env.get("TOKFIT_OFF", "").split(",") if word.strip()]
+    off = levers_off(env)
     if event.get("hook_event_name") != "Stop" or event.get("stop_hook_active") is not False or "persistence" in off:
         return {}
     to = link(env)

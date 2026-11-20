@@ -30,7 +30,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from runtime.output import OutputPolicy, shorten_request
 from runtime.process import run_child
-from runtime.completion import NoRedirect, relay_address, hook_args as completion_hook_args
+from runtime.completion import NoRedirect, levers_off, relay_address, hook_args as completion_hook_args
 
 Json = dict[str, object]
 MAX_REQUEST = 16 * 1024 * 1024
@@ -672,12 +672,12 @@ def configured(args: list[str], env: dict[str, str]) -> str | None:
 
 def run(binary: str, args: list[str], env: dict[str, str]) -> int:
     """Supervise the CLI and its in-memory relay in one process lifetime."""
-    policy_url, token = env.get("TOKFIT_RELAY_URL", ""), env.get("TOKFIT_RELAY_TOKEN", "")
+    policy_url, token = env.get("ECONOMISEUR_RELAY_URL", ""), env.get("ECONOMISEUR_RELAY_TOKEN", "")  # publish: keep
     upstream = configured(args, env) if policy_url and token and relay_address(policy_url) else None
     relay: Relay | None = None
     if upstream:
         session = str(uuid.uuid4())
-        off = tuple(filter(None, env.get("TOKFIT_OFF", "").split(",")))
+        off = tuple(levers_off(env))
         capture_dir = env.get("TOKFIT_CAPTURE_DIR", "")
         capture = Path(capture_dir) if capture_dir and Path(capture_dir).is_absolute() else None
         plan = post(policy_url.rstrip("/") + "/v1/optimizations", token,

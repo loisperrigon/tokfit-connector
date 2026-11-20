@@ -620,7 +620,7 @@ def run_codex(args: List[str], env: Dict[str, str]) -> int:
         if to and (runtime / "relay.py").is_file():
             sys.path.insert(0, str(runtime.parent))
             from runtime.relay import run
-            return run(binary, args, {**env, "TOKFIT_RELAY_URL": to[0], "TOKFIT_RELAY_TOKEN": to[1]})
+            return run(binary, args, {**env, "ECONOMISEUR_RELAY_URL": to[0], "ECONOMISEUR_RELAY_TOKEN": to[1]})  # publish: keep
     # Ctrl-C va à Codex (même groupe de processus) : le lanceur attend sa fin.
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:

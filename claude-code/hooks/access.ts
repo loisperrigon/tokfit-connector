@@ -13,6 +13,7 @@ import { check, healthReport, watch } from './python'
 import { isAccountTool, isKernelTool } from './kernel'
 import { pluginVersion } from './versions'
 import { answer } from './experiments'
+import { sessionPlan } from './plan'
 import { t } from './lang'
 
 // Attente maximale du lien (commande tapée par la personne).
@@ -21,6 +22,9 @@ export const LINK_TIMEOUT_MS = 6000
 export function startAccess($: EngineInterface, options: PluginOptions, sources: Sources): void {
   void probeKey($, options, LINK_TIMEOUT_MS).catch(() => {
     // Service injoignable : rien n'est su de la clé, le bandeau garde ses autres raisons.
+  })
+  void prefetch($, options, sources).catch(() => {
+    // Service injoignable : liste et plan seront redemandés à leur premier usage.
   })
   void $.command.register({ name: NAME, description: t('Lien vers ton tableau de bord (bilan, abonnement), état des leviers et de l\'outil principal.',
     'Link to your dashboard (savings, subscription), state of the levers and of the main tool.') })
@@ -32,6 +36,13 @@ export function startAccess($: EngineInterface, options: PluginOptions, sources:
   } catch {
     // Minuterie refusée : le diagnostic se fait aux étapes et au rendu du bandeau.
   }
+}
+
+// Liste des leviers et plan de la session demandés ensemble dès le démarrage ; gardés pour la session
+// (experiments.ts, plan.ts), le premier message les trouve reçus ou en route.
+async function prefetch($: EngineInterface, options: PluginOptions, sources: Sources): Promise<void> {
+  const to = await link($, options)
+  if (to) await Promise.all([answer($, sources.holdout, to), sessionPlan($, sources.content, to)])
 }
 
 export function access(on: On, options: PluginOptions, sources: Sources): void {

@@ -769,16 +769,18 @@ async function planned($: EngineInterface, s: State): Promise<SessionPlan | null
 // offert (kernel.ts, `kernelLoop`) ; refuser ses outils intégrés le laisserait sans moyen d'agir.
 async function kernelOn($: EngineInterface, s: State, agentId?: string): Promise<KernelPlan | null> {
   const to = await link($, s.options)
-  if (!to || (await levers($, s.holdout, to)).has('kernel')) return null
-  const plan = (await sessionPlan($, s.content, to))?.kernel
+  if (!to) return null
+  const [off, session] = await Promise.all([levers($, s.holdout, to), sessionPlan($, s.content, to)])
+  const plan = off.has('kernel') ? undefined : session?.kernel
   return plan && (await kernelReady($, s.kernel)) && kernelLoop(s.kernel, agentId) ? plan : null
 }
 
 // Plan du levier prefix s'il est actif : client relié au service, levier non coupé, présent dans le plan.
 async function prefixOn($: EngineInterface, s: State): Promise<PrefixPlan | null> {
   const to = await link($, s.options)
-  if (!to || (await levers($, s.holdout, to)).has('prefix')) return null
-  return (await sessionPlan($, s.content, to))?.prefix ?? null
+  if (!to) return null
+  const [off, plan] = await Promise.all([levers($, s.holdout, to), sessionPlan($, s.content, to)])
+  return off.has('prefix') ? null : plan?.prefix ?? null
 }
 
 // Pause après un tour du fil principal : compaction si le service la veut, après l'absence
@@ -843,10 +845,9 @@ async function paused($: EngineInterface, s: State): Promise<void> {
       s.audited = true
       await audit($, to)
     }
-    const plan = to ? await sessionPlan($, s.content, to) : null
+    const [plan, off] = to ? await Promise.all([sessionPlan($, s.content, to), levers($, s.holdout, to)]) : [null, new Set<string>()]
     ping = plan?.warm
     const instructions = plan?.compaction
-    const off = to ? await levers($, s.holdout, to) : new Set<string>()
     const model = s.warm.main?.model
     const after = to && model && instructions !== undefined && !off.has('compaction')
       ? await wanted($, to, model, (await host($, s.seen)) !== null) : null
