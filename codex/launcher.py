@@ -28,6 +28,10 @@ identifiants, et son `step_id` est stable (session, rang de l'événement) : un
 renvoi n'est compté qu'une fois. Le format de ces fichiers n'est pas une
 interface stable de Codex : un format inconnu ne fait perdre que des compteurs.
 
+`tokfit handoff <étapes> <décidé> <contrôle> <goût>` (lancé par le modèle de Codex par son shell, comme le dit la
+description de l'agent `tokfit_executor` qu'installe `connector/install.sh codex`) : relit la session en
+cours (modèle, taille du prompt, ancienneté) et demande au service (/v1/handoff) qui doit faire le travail.
+
 Clé et adresse : `~/.config/tokfit/config.json` (`{"url", "key"}`, écrit
 par `connector/install.sh codex`, le même que pour Claude Code), ou le fichier
 de `TOKFIT_CONFIG`. Sans clé dans ce fichier (essai sans inscription), le
@@ -608,6 +612,97 @@ def send_usage(env: Dict[str, str], since: float, cwd: str, reference: str = "",
             return
 
 
+# Agent d'exécution de Codex (`tokfit_executor`), rangé par `connector/install.sh codex` dans
+# $CODEX_HOME/agents/ (seul endroit où Codex lit un agent personnalisé). Sans `model` : le modèle choisi au
+# lancement (`spawn_agent`, d'après `tokfit handoff`) s'applique, un modèle dans le fichier passerait devant.
+# Applications, plugins, mémoires et consignes des skills retirés : il démarre léger et agit par le shell.
+EXECUTOR_FILE = "tokfit-executor.toml"
+EXECUTOR_MARK = "# tokfit executor agent"
+EXECUTOR_AGENT = EXECUTOR_MARK + '''
+name = "tokfit_executor"
+description = "Executes one fully decided piece of work (a brief with GOAL, DECIDED, SCOPE, CHECK), then reports. Before delegating, run `tokfit handoff <steps> <decided yes|no> <checkable yes|no> <taste yes|no>` (taste: the result is judged by eye or style, such as visuals, layout, wording or creative choices; that work is never delegated): it says whether to delegate, with which model, and gives the brief format."
+developer_instructions = """
+You carry out the brief you are given, nothing more. Everything you need is in the brief; when it is not, or the code contradicts it, stop and say so in your report instead of guessing. End with the report the brief asks for.
+"""
+
+[features]
+apps = false
+plugins = false
+memories = false
+
+[skills]
+include_instructions = false
+'''
+YES_NO = {"yes": True, "no": False}
+HANDOFF_ARGS = "<steps> <decided yes|no> <checkable yes|no> <taste yes|no>"
+
+
+def install_executor(home: Path) -> str:
+    """Range l'agent dans `home/agents` ; un fichier de même nom qui n'est pas le nôtre est laissé tel quel."""
+    target = home / "agents" / EXECUTOR_FILE
+    try:
+        if target.exists() and not target.read_text(encoding="utf-8").startswith(EXECUTOR_MARK):
+            return f"{target} existe déjà et n'est pas celui de {NAME} : laissé tel quel."
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(EXECUTOR_AGENT, encoding="utf-8")
+    except OSError as error:
+        return f"agent d'exécution non installé ({type(error).__name__})."
+    return f"agent d'exécution installé : {target}"
+
+
+def current_session(home: Path, cwd: str, now: float) -> Optional[Json]:
+    """Faits de la session Codex la plus récente de ce dossier (celle qui lance la commande) : modèle, taille du
+    dernier prompt, tokens relus en cache et ancienneté du dernier appel. Aucun texte."""
+    files = session_files(home, now - 86_400, cwd)
+    if not files:
+        return None
+    try:
+        path = max(files, key=lambda found: found.stat().st_mtime)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        idle = max(0, round(now - path.stat().st_mtime))
+    except OSError:
+        return None
+    model, context, cached = "", 0, 0
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        payload = item.get("payload") if isinstance(item, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        if item.get("type") == "turn_context" and isinstance(payload.get("model"), str):
+            model = payload["model"]
+        elif item.get("type") == "event_msg" and payload.get("type") == "token_count" and isinstance(payload.get("info"), dict):
+            last = payload["info"].get("last_token_usage")
+            if isinstance(last, dict):
+                context, cached = number(last.get("input_tokens")), number(last.get("cached_input_tokens"))
+    if not MODEL_ID.fullmatch(model):
+        return None
+    return {"session_model": model, "context_tokens": context,
+            "model_cache": {model: {"idle_s": idle, "tokens": max(context, cached)}}}
+
+
+def handoff(args: List[str], env: Dict[str, str]) -> int:
+    """`tokfit handoff <étapes> <décidé> <contrôle> <goût>` (yes|no) : qui doit faire le travail, d'après le service."""
+    if len(args) != 4 or not args[0].isdigit() or any(arg not in YES_NO for arg in args[1:]):
+        print(f"usage : {NAME} handoff {HANDOFF_ARGS}", file=sys.stderr)
+        return 2
+    to = link(env)
+    facts = current_session(codex_home(env), os.getcwd(), time.time())
+    if to is None or facts is None:
+        print("Do it yourself (no service or no Codex session found).")
+        return 0
+    reply = post(to, "/v1/handoff", {**facts, "surface": "codex", "steps": int(args[0]), "decided": YES_NO[args[1]],
+                                     "checkable": YES_NO[args[2]], "taste": YES_NO[args[3]]}, TIMEOUT_S)
+    try:
+        text = json.loads(reply[1]).get("text") if reply is not None and reply[0] == 200 else None
+    except (ValueError, AttributeError):
+        text = None
+    print(text if isinstance(text, str) else "Do it yourself (the service did not answer).")
+    return 0
+
+
 def run_codex(args: List[str], env: Dict[str, str]) -> int:
     binary = env.get("TOKFIT_CODEX") or shutil.which("codex", path=env.get("PATH"))
     if not binary:
@@ -646,8 +741,14 @@ def main(argv: List[str], env: Dict[str, str]) -> int:
     if argv[:1] == ["_usage"] and len(argv) in (3, 4, 5):
         send_usage(env, float(argv[1]), argv[2], argv[3] if len(argv) >= 4 else "", argv[4:] == [PINNED])
         return 0
+    if argv[:1] == ["handoff"]:
+        return handoff(argv[1:], env)
+    if argv == ["_agent"]:
+        print(install_executor(codex_home(env)))
+        return 0
     if argv[:1] != ["codex"]:
-        print(f"usage : {NAME} codex [options et message de codex]", file=sys.stderr)
+        print(f"usage : {NAME} codex [options et message de codex] | {NAME} handoff {HANDOFF_ARGS}",
+              file=sys.stderr)
         return 2
     args = argv[1:]
     since = time.time()

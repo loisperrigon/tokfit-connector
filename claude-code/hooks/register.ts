@@ -57,6 +57,7 @@ import type { Prefix } from './prefix'
 import type { KernelPlan, Plans, PrefixPlan, SessionPlan } from './plan'
 import type { Warm } from './warm'
 import { attachmentCut, called, composed, composedCut, contradicts, finalAnswer, forked, isAccountTool, isBehind, isDenied, isKernelTool, KERNEL_MATCH, kernel, kernelFacts, kernelLoop, kernelReady, offeredTo, passed, placed, refused, refusedFinish, searchable, shortened, sessionOf, summaryOf, unlisted, withAgent } from './kernel'
+import type { LoopFacts } from './kernel'
 import { languageRefusal } from './language'
 import type { Kernel } from './kernel'
 import { access, startAccess } from './access'
@@ -530,6 +531,20 @@ function idle(now: number, at: number): number {
 async function modelCache($: EngineInterface, s: State): Promise<Record<string, { idle_s: number; tokens: number }>> {
   const now = await $.clock.now()
   return Object.fromEntries([...s.lastCall].map(([name, call]) => [name, { idle_s: idle(now, call.at), tokens: call.tokens }]))
+}
+
+// Faits du fil principal joints à ses appels de `python` (kernel.ts, `facts`) ; absents si un relevé manque.
+async function loopFacts($: EngineInterface, s: State): Promise<LoopFacts | undefined> {
+  try {
+    const usage = await $.session.usage()
+    const model = s.routedModel ?? s.sessionModel
+    if (model === undefined) return undefined
+    return { session_model: model, context_tokens: usage.context.tokens ?? 0, cache_cold: s.compacted,
+      model_cache: await modelCache($, s) }
+  } catch {
+    // Relevé illisible : l'appel part sans les faits, `delegate` le dira.
+    return undefined
+  }
 }
 
 async function loopCache($: EngineInterface, loop: Loop): Promise<Record<string, { idle_s: number; tokens: number }>> {
@@ -1089,7 +1104,7 @@ export const register: Register = (on, options) => {
     } catch {
       // Dossier illisible : le noyau de l'agent démarre dans celui du serveur.
     }
-    const call = withAgent(e, cwd)
+    const call = withAgent(e, cwd, e.agentId === undefined ? await loopFacts($, s) : undefined)
     const result = await next(call)
     try {
       const plan = isKernelTool(call.tool) && result.deny === undefined ? await kernelOn($, s) : null

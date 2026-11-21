@@ -160,6 +160,8 @@ if [ "$target" = codex ]; then
   rm -rf -- "$stage"
   trap - EXIT INT TERM
   printf '%s : lanceur installé (%s) ; lance « %s codex \"ta demande\" ».\n' "$NAME" "$bin/$NAME" "$NAME"
+  # Agent d'exécution léger de Codex (tokfit_executor), à qui le modèle de la session délègue un travail décidé.
+  "$bin/$NAME" _agent || printf '%s : agent d’exécution non installé.\n' "$NAME"
   case ":$PATH:" in
     *":$bin:"*) ;;
     *) printf '%s : ajoute %s à ton PATH pour taper « %s codex ».\n' "$NAME" "$bin" "$NAME" ;;

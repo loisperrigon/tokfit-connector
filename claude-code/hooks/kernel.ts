@@ -55,13 +55,24 @@ export const KERNEL_MATCH = new RegExp(`^${KERNEL_TOOL}$`)
 // est remplacée : seul le moteur sait quelle boucle appelle. `cwd` : le dossier de
 // cette boucle (`$.session.cwd()` lu dans le hook : celui du sous-agent, son worktree
 // s'il est isolé), où son noyau démarre ; absent si le moteur ne le rend pas.
+// `facts` : faits du fil principal (modèle de la session, contexte, caches par famille), joints à ses seuls
+// appels ; le noyau les passe au service quand le modèle demande qui doit faire un travail (`delegate`).
 export const AGENT_ARGUMENT = 'agent'
 export const CWD_ARGUMENT = 'cwd'
+export const FACTS_ARGUMENT = 'facts'
 export const MAIN_LOOP = 'main'
 
-export function withAgent<E extends { agentId?: string }>(e: E, cwd: string | undefined): E & { [AGENT_ARGUMENT]: string } {
-  const { [CWD_ARGUMENT]: _ignored, ...rest } = e as E & { [CWD_ARGUMENT]?: unknown }
-  return { ...(rest as E), [AGENT_ARGUMENT]: e.agentId ?? MAIN_LOOP, ...(cwd ? { [CWD_ARGUMENT]: cwd } : {}) }
+export type LoopFacts = {
+  session_model: string; context_tokens: number; cache_cold: boolean
+  model_cache: Record<string, { idle_s: number; tokens: number }>
+}
+
+export function withAgent<E extends { agentId?: string }>(e: E, cwd: string | undefined, facts?: LoopFacts): E & { [AGENT_ARGUMENT]: string } {
+  const { [CWD_ARGUMENT]: _ignored, [FACTS_ARGUMENT]: _ignoredFacts, ...rest } = e as E & { [CWD_ARGUMENT]?: unknown; [FACTS_ARGUMENT]?: unknown }
+  return {
+    ...(rest as E), [AGENT_ARGUMENT]: e.agentId ?? MAIN_LOOP, ...(cwd ? { [CWD_ARGUMENT]: cwd } : {}),
+    ...(facts && e.agentId === undefined ? { [FACTS_ARGUMENT]: facts } : {}),
+  }
 }
 
 export function isAccountTool(name: string): boolean {

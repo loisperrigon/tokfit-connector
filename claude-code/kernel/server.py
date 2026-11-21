@@ -99,6 +99,10 @@ AGENT = "agent"
 # Dossier de la boucle qui appelle (worktree d'un sous-agent isolé), posé par le connecteur :
 # le noyau de l'agent y démarre ; ensuite, son dossier courant est le sien.
 DOSSIER = "cwd"
+# Faits du fil principal posés par le connecteur (`facts`, hooks/kernel.ts) : nombres et identifiant de modèle
+# seulement, lus par `delegate()` dans le noyau. Les autres clés et les valeurs mal formées sont écartées.
+FAITS = "facts"
+FAITS_NOMBRES = ("context_tokens",)
 PRINCIPAL = "main"
 AGENT_LONGUEUR_MAX = 128
 NOYAUX_MAX = 8
@@ -119,14 +123,17 @@ def entier(env: Dict[str, str], nom: str, defaut: int) -> int:
 
 
 def code_amorce(paquet: Paquet) -> str:
-    """Cellule de démarrage : l'amorce reçue exécutée dans un module en mémoire, qui charge les outils."""
+    """Cellule de démarrage : l'amorce reçue exécutée dans un module en mémoire, qui charge les outils.
+    `relais` (conseil de délégation) n'est passé qu'à une amorce qui le prend : un service pas encore à jour
+    sert une amorce à quatre arguments."""
     return ("import sys as _s, types as _t\n"
-            f"from {PREFIXE_DANS_LE_NOYAU}kernel.pack import sauver_outil as _sauver\n"
+            f"from {PREFIXE_DANS_LE_NOYAU}kernel.pack import sauver_outil as _sauver, conseiller_relais as _relais\n"
             "_m = _t.ModuleType('noyau_amorce')\n"
             "_s.modules['noyau_amorce'] = _m\n"
             f"exec(compile({paquet.amorce!r}, '<bootstrap>', 'exec'), _m.__dict__)\n"
-            f"_m.charger(globals(), {paquet.modules!r}, {paquet.catalogue!r}, _sauver)\n"
-            "del _s, _t, _m, _sauver")
+            "_o = {'relais': _relais} if 'relais' in _m.charger.__code__.co_varnames else {}\n"
+            f"_m.charger(globals(), {paquet.modules!r}, {paquet.catalogue!r}, _sauver, **_o)\n"
+            "del _s, _t, _m, _sauver, _relais, _o")
 
 
 class Compteur:
@@ -177,6 +184,7 @@ def schema_outil(description: str) -> Dict[str, Any]:
                               "minimum": 1, "maximum": TIMEOUT_MAX},
                 AGENT: {"type": "string", "description": "Filled in by the connector: do not set it."},
                 DOSSIER: {"type": "string", "description": "Filled in by the connector: do not set it."},
+                FAITS: {"type": "object", "description": "Filled in by the connector: do not set it."},
             },
             "required": ["code"],
         },
@@ -189,6 +197,31 @@ def agent_de(arguments: Dict[str, Any]) -> str:
     if isinstance(valeur, str) and 0 < len(valeur) <= AGENT_LONGUEUR_MAX and valeur.isprintable():
         return valeur
     return PRINCIPAL
+
+
+def faits_de(arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Faits du fil principal joints à l'appel, réduits à ce que lit le service ; None sans eux."""
+    brut = arguments.get(FAITS)
+    if not isinstance(brut, dict) or agent_de(arguments) != PRINCIPAL:
+        return None
+    faits: Dict[str, Any] = {}
+    modele = brut.get("session_model")
+    if isinstance(modele, str) and 0 < len(modele) <= AGENT_LONGUEUR_MAX and modele.isprintable():
+        faits["session_model"] = modele
+    for nom in FAITS_NOMBRES:
+        valeur = brut.get(nom)
+        if isinstance(valeur, int) and not isinstance(valeur, bool) and valeur >= 0:
+            faits[nom] = valeur
+    if isinstance(brut.get("cache_cold"), bool):
+        faits["cache_cold"] = brut["cache_cold"]
+    caches = brut.get("model_cache")
+    if isinstance(caches, dict):
+        faits["model_cache"] = {
+            str(famille)[:AGENT_LONGUEUR_MAX]: {"idle_s": entree["idle_s"], "tokens": entree["tokens"]}
+            for famille, entree in list(caches.items())[:8]
+            if isinstance(entree, dict) and all(isinstance(entree.get(cle), (int, float)) and not isinstance(entree.get(cle), bool)
+                                                for cle in ("idle_s", "tokens"))}
+    return faits if "session_model" in faits else None
 
 
 def dossier_de(arguments: Dict[str, Any], defaut: str) -> str:
@@ -368,7 +401,7 @@ class Serveur:
                 if not poste.demarre:
                     poste.demarre = True
                     prefixe += poste.noyau.demarrer()
-                execution = poste.noyau.executer(code, delai)
+                execution = poste.noyau.executer(code, delai, faits_de(arguments))
         finally:
             self.rendre(poste)
         if execution.usage:

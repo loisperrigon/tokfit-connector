@@ -206,6 +206,33 @@ def prendre_lien(env: MutableMapping[str, str] = os.environ) -> None:
         _lien_du_noyau = (valeur[0], valeur[1])
 
 
+# Faits du fil principal joints par le connecteur à son dernier appel (`facts` de l'outil, hooks/kernel.ts) :
+# modèle de la session, contexte, caches par famille. Posés par le worker à chaque cellule, absents ailleurs.
+faits_du_fil: Optional[Dict[str, Any]] = None
+
+
+def conseiller_relais(faits_du_modele: Dict[str, object]) -> object:
+    """Demande au service qui doit faire un travail (`POST /v1/handoff`) : sa réponse, ou la raison d'un échec.
+
+    `faits_du_modele` : les faits que l'amorce du service a demandés au modèle (noms et sens servis avec elle) ;
+    seuls les nombres et les booléens partent, jamais un texte. Les faits du fil passent devant."""
+    if _lien_du_noyau is None:
+        return "service not configured"
+    if faits_du_fil is None:
+        return "only the main conversation delegates"
+    comptes = {nom: valeur for nom, valeur in faits_du_modele.items()
+               if isinstance(nom, str) and isinstance(valeur, (bool, int)) and not isinstance(valeur, float)}
+    try:
+        return poster(_lien_du_noyau, "/v1/handoff", {**comptes, **faits_du_fil, "surface": "claude"})
+    except urllib.error.HTTPError as erreur:
+        try:
+            return f"service ({erreur.code})"
+        finally:
+            erreur.close()
+    except (OSError, ValueError) as erreur:
+        return f"service unreachable ({type(erreur).__name__})"
+
+
 def sauver_outil(module: str, fonction: str, test: str) -> str:
     """Envoie au service une fonction et son test (rien d'autre) ; rend le verdict lu par le modèle."""
     if _lien_du_noyau is None:

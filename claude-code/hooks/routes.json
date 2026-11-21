@@ -7,6 +7,7 @@
     {"path": "content", "methods": ["POST"]},
     {"path": "context", "methods": ["POST"]},
     {"path": "dashboard/link", "methods": ["POST"]},
+    {"path": "handoff", "methods": ["POST"]},
     {"path": "levers", "methods": ["POST"]},
     {"path": "optimizations", "methods": ["POST"]},
     {"path": "route", "methods": ["POST"]},

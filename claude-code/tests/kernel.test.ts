@@ -411,6 +411,20 @@ describe('un noyau par agent', () => {
     expect(dirs).toEqual(['/projet/.worktrees/agent-1'])
   })
 
+  test('le fil principal joint ses faits (modèle, contexte, caches) ; un sous-agent jamais, ni ce que le modèle écrit', async ($, on) => {
+    const facts: unknown[] = []
+    world(on, connected({ python: (code, args) => (facts.push(args.facts), 'ok') }))
+    await step($, 0, { turnId: 't1' })
+    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-1', code: 'x = 1', facts: { session_model: 'faux' } })
+    await $.tool.call({ tool: PYTHON, tool_use_id: 'tu-2', code: 'x = 2', agentId: 'agent-1', facts: { session_model: 'faux' } })
+    const [main, sub] = facts as [Record<string, unknown> | undefined, unknown]
+    expect(main?.session_model).toBe('claude-opus-5-5')
+    expect(typeof main?.context_tokens).toBe('number')
+    expect(typeof main?.cache_cold).toBe('boolean')
+    expect(typeof main?.model_cache).toBe('object')
+    expect(sub).toBeUndefined()
+  })
+
   test('un agent écrit par le modèle est remplacé par la vraie boucle', async ($, on) => {
     const { agents, options } = recorded()
     world(on, options)

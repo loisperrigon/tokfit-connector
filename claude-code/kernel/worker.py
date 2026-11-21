@@ -5,7 +5,8 @@ passés par `kernel/tubes.py` : descripteurs sous POSIX, poignées sous Windows,
 interruptions) ; les paquets
 des environnements du projet de même version s'ajoutent au démarrage (`kernel/projet.py`), puis le plugin
 s'efface de `sys.path` et de `sys.modules` (`cacher_le_plugin`).
-Les requêtes arrivent sur un tube dédié (une ligne JSON `{"code": …, "timeout_s": …}`), les
+Les requêtes arrivent sur un tube dédié (une ligne JSON `{"code": …, "timeout_s": …}`, plus `faits` : les faits du
+fil principal que lit `delegate()`, `kernel/pack.py`), les
 réponses repartent sur un autre (`{"sortie": …, "ok": …, "fini": …, "groupes": …}`, précédées des
 prolongations de la cellule, `kernel/cellule.py`) : stdin est fermé,
 donc `input()` lève EOFError au lieu de lire le protocole, et les `print` du
@@ -46,6 +47,7 @@ from kernel import cellule, tubes  # noqa: E402
 from kernel.output import (  # noqa: E402
     COMPLET_MAX, DANS_SORTIE, PLACE, PLACE_OK, Capture, borne, resume_traceback,
 )
+from kernel import pack  # noqa: E402
 from kernel.pack import PREFIXE_DANS_LE_NOYAU, prendre_lien  # noqa: E402
 from kernel.projet import ajouter as ajouter_projet  # noqa: E402
 
@@ -177,6 +179,8 @@ def boucle(fd_requetes: int, fd_reponses: int, limite: int) -> None:
         try:
             requete = json.loads(ligne)
             cellule.commencer(float(requete["timeout_s"]))
+            faits = requete.get("faits")
+            pack.faits_du_fil = faits if isinstance(faits, dict) else None
             reponse = executer(str(requete["code"]), numero, espace, limite)
         except KeyboardInterrupt:
             reponse = {"sortie": "KeyboardInterrupt\n", "ok": False}

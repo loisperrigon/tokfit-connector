@@ -40,7 +40,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
 from kernel import tubes
 from kernel.cellule import GROUPES, PROLONGE, PROLONGEE_MAX
@@ -321,7 +321,7 @@ class Noyau:
             tubes.tuer_groupe(groupe)
         return TRAVAUX_ARRETES.format(len(groupes)) if groupes else ""
 
-    def executer(self, code: str, timeout_s: int) -> Execution:
+    def executer(self, code: str, timeout_s: int, faits: Optional[Dict[str, Any]] = None) -> Execution:
         if self.ferme:
             return Execution(ARRETE, False)
         if self.processus is None:
@@ -339,7 +339,7 @@ class Noyau:
             debut = time.monotonic()
             self.debut, self.echeance = debut, debut + timeout_s
             try:
-                self.envoyer(code, timeout_s)
+                self.envoyer(code, timeout_s, faits)
                 reponse = self.lire(float(timeout_s))
             finally:
                 self.debut = None
@@ -401,9 +401,10 @@ class Noyau:
         except OSError:
             pass  # noyau mort : la lecture qui suit le dira
 
-    def envoyer(self, code: str, timeout_s: int) -> None:
+    def envoyer(self, code: str, timeout_s: int, faits: Optional[Dict[str, Any]] = None) -> None:
         assert self.requetes is not None
-        donnees = (json.dumps({"code": code, "timeout_s": timeout_s}, ensure_ascii=False) + "\n").encode("utf-8")
+        requete: Dict[str, Any] = {"code": code, "timeout_s": timeout_s, **({"faits": faits} if faits is not None else {})}
+        donnees = (json.dumps(requete, ensure_ascii=False) + "\n").encode("utf-8")
         try:
             while donnees:
                 donnees = donnees[os.write(self.requetes, donnees):]
