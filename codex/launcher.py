@@ -805,6 +805,9 @@ def main(argv: List[str], env: Dict[str, str]) -> int:
         return handoff(argv[1:], env)
     if argv in (["compte"], ["account"]):
         return show_account(env)
+    if argv == ["_agent-default"]:
+        sys.stdout.write(EXECUTOR_AGENT)
+        return 0
     if argv == ["_agent"]:
         print(install_executor(codex_home(env)))
         return 0

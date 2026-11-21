@@ -1,0 +1,254 @@
+"""Liaison du noyau avec le service : paquet reçu à l'ouverture de session, outils sauvés, compteurs.
+
+Même configuration que les hooks (relais d'une application hôte, options du
+plugin, fichier de configuration) : `link` de `hooks/completion.py`. Le paquet
+reste en mémoire ; rien n'est écrit sur le disque. Sans réponse valable, pas
+de paquet, le serveur ne propose pas l'outil jusqu'à ce que le paquet arrive
+(le serveur le redemande en arrière-plan, `kernel/server.py`, `rattraper`).
+
+Dans le processus du noyau, le lien arrive par une variable retirée dès le
+démarrage (`prendre_lien`) : les commandes que lance le code du modèle n'en
+héritent pas.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+import zlib
+from pathlib import Path
+from typing import Any, Collection, Dict, List, MutableMapping, NamedTuple, Optional, Tuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
+
+from completion import link, store_folder  # noqa: E402
+
+DELAI_S = 5.0
+# Délai d'une demande de paquet après la première : en arrière-plan, rien n'attend dessus.
+DELAI_RELANCE_S = 10.0
+# Raison rendue par `recevoir` quand le service refuse la clé (401, 403).
+REFUS = "clé refusée"
+# Attente maximale de la clé anonyme au démarrage du noyau (premier démarrage sans clé configurée).
+ATTENTE_CLE_S = 8.0
+TAILLE_MAX = 4 * 1024 * 1024
+MODULE_MAX = 256
+# Variable qui passe le lien au processus du noyau ; retirée par `prendre_lien`.
+VARIABLE_LIEN = "TOKFIT_NOYAU_LIEN"
+# Options du plugin passées au serveur (plugin.json) : jamais transmises au noyau.
+OPTIONS = ("CLAUDE_PLUGIN_OPTION_API_KEY", "CLAUDE_PLUGIN_OPTION_SERVICE_URL",
+           "ECONOMISEUR_RELAY_URL", "ECONOMISEUR_RELAY_TOKEN")  # publish: keep
+log = logging.getLogger("tokfit.kernel")
+
+# Dans le noyau, les modules du plugin sont renommés avec ce préfixe (`cacher_le_plugin` de worker.py) :
+# `kernel.pack` y devient `_tokfit_kernel.pack`.
+PREFIXE_DANS_LE_NOYAU = "_tokfit_"
+
+Lien = Tuple[str, str]
+_lien_du_noyau: Optional[Lien] = None
+
+
+class Illisible(ValueError):
+    """Corps de réponse illisible : compression invalide ou plus grand que TAILLE_MAX une fois décompressé."""
+
+
+class Paquet(NamedTuple):
+    amorce: str
+    modules: Dict[str, str]
+    catalogue: List[Dict[str, Any]]
+    description: str
+    fini: str
+    version: str
+
+
+def lien(env: Dict[str, str], refusees: Collection[str] = ()) -> Optional[Lien]:
+    """(adresse, clé) ; une option du plugin non posée (`${user_config.…}` laissé tel quel) compte comme absente,
+    une clé de `refusees` (refusée par le service) laisse place à la suivante (`link` de completion.py)."""
+    return link({nom: valeur for nom, valeur in env.items() if not valeur.startswith("${")}, refusees)
+
+
+def cle_attendue(env: Dict[str, str]) -> bool:
+    """Vrai quand un connecteur peut encore créer la clé anonyme (dossier des magasins de plugins présent)."""
+    return store_folder(env).is_dir()
+
+
+def attendre_lien(env: Dict[str, str], delai_s: float = ATTENTE_CLE_S, pas_s: float = 0.25) -> Optional[Lien]:
+    """Le lien, en attendant au plus `delai_s` la clé anonyme que le connecteur demande au même moment
+    (premier démarrage). Sans dossier des magasins de plugins (pas de connecteur), aucune attente."""
+    vers = lien(env)
+    fin = time.monotonic() + delai_s
+    while vers is None and cle_attendue(env) and time.monotonic() < fin:
+        time.sleep(pas_s)
+        vers = lien(env)
+    return vers
+
+
+def entree(valeur: object) -> bool:
+    return (isinstance(valeur, dict) and isinstance(valeur.get("module"), str) and isinstance(valeur.get("nom"), str)
+            and isinstance(valeur.get("ligne"), str) and isinstance(valeur.get("usage"), int))
+
+
+def lire(reponse: object) -> Optional[Paquet]:
+    """Le paquet d'une réponse de `/v1/content`, None s'il n'a pas la forme attendue."""
+    if not isinstance(reponse, dict) or not isinstance(reponse.get("version"), str):
+        return None
+    noyau = reponse.get("kernel")
+    if not isinstance(noyau, dict):
+        return None
+    amorce, modules, catalogue, description, fini = (
+        noyau.get(champ) for champ in ("bootstrap", "modules", "catalogue", "description", "finished"))
+    if not (isinstance(amorce, str) and isinstance(description, str) and isinstance(fini, str) and fini
+            and isinstance(modules, dict) and len(modules) <= MODULE_MAX
+            and all(isinstance(nom, str) and nom.isidentifier() and isinstance(source, str) for nom, source in modules.items())
+            and isinstance(catalogue, list) and all(entree(e) and e["module"] in modules for e in catalogue)):
+        return None
+    return Paquet(amorce, dict(modules), list(catalogue), description, fini, reponse["version"])
+
+
+def poster(vers: Lien, chemin: str, corps: object, delai_s: float = DELAI_S) -> object:
+    """POST JSON au service ; OSError (dont HTTPError) ou ValueError en cas d'échec."""
+    return demander(vers, chemin, corps, delai_s)
+
+
+def demander(vers: Lien, chemin: str, corps: object = None, delai_s: float = DELAI_S) -> object:
+    """GET au service sans `corps`, POST JSON avec ; OSError (dont HTTPError) ou ValueError en cas d'échec."""
+    class SansRedirection(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req: urllib.request.Request, fp: object, code: int, msg: str,
+                             headers: object, newurl: str) -> None:
+            return None
+    adresse, cle = vers
+    entetes = {"Authorization": "Bearer " + cle, "Accept-Encoding": "gzip"}
+    if corps is not None:
+        entetes["Content-Type"] = "application/json"
+    requete = urllib.request.Request(adresse + chemin, None if corps is None else json.dumps(corps).encode(), entetes)
+    with urllib.request.build_opener(SansRedirection()).open(requete, timeout=delai_s) as reponse:
+        return json.loads(corps_de(reponse))
+
+
+def corps_de(reponse: Any) -> bytes:
+    """Corps d'une réponse (ou d'une HTTPError), décompressé s'il arrive en gzip ; TAILLE_MAX au plus, sinon Illisible."""
+    brut: bytes = reponse.read(TAILLE_MAX)
+    if (reponse.headers.get("Content-Encoding") or "").strip().lower() != "gzip":
+        return brut
+    decompresseur = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        donnees = decompresseur.decompress(brut, TAILLE_MAX)
+    except zlib.error as erreur:
+        raise Illisible("gzip invalide") from erreur
+    if decompresseur.unconsumed_tail:
+        raise Illisible("corps trop grand")
+    return donnees
+
+
+def refus_du_service(erreur: urllib.error.HTTPError) -> str:
+    """Raison d'un 402 : code d'erreur du service et adresse où reprendre l'accès, s'ils se lisent."""
+    try:
+        detail = json.loads(corps_de(erreur))
+    except (OSError, ValueError):
+        detail = None
+    code = detail.get("error") if isinstance(detail, dict) else None
+    url = detail.get("url") if isinstance(detail, dict) else None
+    if not isinstance(code, str) or not code:
+        return "accès suspendu par le service (402)"
+    return f"accès suspendu par le service (402 {code}" + (f" : {url})" if isinstance(url, str) and url else ")")
+
+
+def recevoir(vers: Optional[Lien], delai_s: float = DELAI_S) -> Tuple[Optional[Paquet], str]:
+    """Le paquet, ou None et la raison (journalisée par l'appelant, jamais montrée au modèle)."""
+    if vers is None:
+        return None, "service non configuré"
+    try:
+        paquet = lire(poster(vers, "/v1/content", {"parts": ["kernel"]}, delai_s))
+    except urllib.error.HTTPError as erreur:
+        try:
+            if erreur.code == 402:
+                return None, refus_du_service(erreur)
+            return None, REFUS if erreur.code in (401, 403) else f"service en erreur ({erreur.code})"
+        finally:
+            erreur.close()
+    except Illisible:
+        return None, "réponse illisible"
+    except (OSError, ValueError) as erreur:
+        return None, f"service injoignable ou refus ({type(erreur).__name__})"
+    return (paquet, "") if paquet is not None else (None, "réponse illisible")
+
+
+def compter(vers: Lien, appels: Dict[str, int], delai_s: float = DELAI_S) -> bool:
+    """Envoie les appels par outil ; faux (journalisé) si le service ne les a pas pris."""
+    try:
+        poster(vers, "/v1/tools/usage", {"calls": appels}, delai_s)
+    except (OSError, ValueError) as erreur:
+        log.warning("compteurs d'outils non envoyés (%s)", type(erreur).__name__)
+        return False
+    return True
+
+
+def environnement_du_noyau(env: Dict[str, str], vers: Optional[Lien]) -> Dict[str, str]:
+    """Environnement du processus du noyau : sans les options du plugin, avec le lien à prendre au démarrage."""
+    propre = {nom: valeur for nom, valeur in env.items() if nom not in OPTIONS and nom != VARIABLE_LIEN}
+    if vers is not None:
+        propre[VARIABLE_LIEN] = json.dumps(list(vers))
+    return propre
+
+
+def prendre_lien(env: MutableMapping[str, str] = os.environ) -> None:
+    """Dans le processus du noyau : garde le lien en mémoire et le retire de l'environnement."""
+    global _lien_du_noyau
+    brut = env.pop(VARIABLE_LIEN, "")
+    try:
+        valeur = json.loads(brut) if brut else None
+    except ValueError:
+        log.warning("lien du noyau illisible")
+        valeur = None
+    if isinstance(valeur, list) and len(valeur) == 2 and all(isinstance(v, str) for v in valeur):
+        _lien_du_noyau = (valeur[0], valeur[1])
+
+
+# Faits du fil principal joints par le connecteur à son dernier appel (`facts` de l'outil, hooks/kernel.ts) :
+# modèle de la session, contexte, caches par famille. Posés par le worker à chaque cellule, absents ailleurs.
+faits_du_fil: Optional[Dict[str, Any]] = None
+
+
+def conseiller_relais(faits_du_modele: Dict[str, object]) -> object:
+    """Demande au service qui doit faire un travail (`POST /v1/handoff`) : sa réponse, ou la raison d'un échec.
+
+    `faits_du_modele` : les faits que l'amorce du service a demandés au modèle (noms et sens servis avec elle) ;
+    seuls les nombres et les booléens partent, jamais un texte. Les faits du fil passent devant."""
+    if _lien_du_noyau is None:
+        return "service not configured"
+    if faits_du_fil is None:
+        return "only the main conversation delegates"
+    comptes = {nom: valeur for nom, valeur in faits_du_modele.items()
+               if isinstance(nom, str) and isinstance(valeur, (bool, int)) and not isinstance(valeur, float)}
+    try:
+        return poster(_lien_du_noyau, "/v1/handoff", {**comptes, **faits_du_fil, "surface": "claude"})
+    except urllib.error.HTTPError as erreur:
+        try:
+            return f"service ({erreur.code})"
+        finally:
+            erreur.close()
+    except (OSError, ValueError) as erreur:
+        return f"service unreachable ({type(erreur).__name__})"
+
+
+def sauver_outil(module: str, fonction: str, test: str) -> str:
+    """Envoie au service une fonction et son test (rien d'autre) ; rend le verdict lu par le modèle."""
+    if _lien_du_noyau is None:
+        return "refused: service not configured"
+    try:
+        reponse = poster(_lien_du_noyau, "/v1/tools", {"module": module, "function": fonction, "test": test})
+    except urllib.error.HTTPError as erreur:
+        try:
+            detail = json.loads(corps_de(erreur)).get("error")
+        except (OSError, ValueError, AttributeError):
+            detail = None
+        finally:
+            erreur.close()
+        return f"refused: {detail}" if isinstance(detail, str) else f"refused: service ({erreur.code})"
+    except (OSError, ValueError) as erreur:
+        return f"refused: service unreachable ({type(erreur).__name__})"
+    cle = reponse.get("key") if isinstance(reponse, dict) else None
+    return f"saved: {cle}" if isinstance(cle, str) else "refused: unreadable service response"

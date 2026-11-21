@@ -200,6 +200,15 @@ install_codex() {
   # Tout est d'abord réuni et contrôlé à part : un téléchargement raté n'installe rien.
   stage=$(mktemp -d "$bin/.$NAME.XXXXXX")
   trap 'rm -rf -- "$stage"' EXIT INT TERM
+  if [ -n "$REPO" ] && [ -z "$here" ] && [ -z "${TOKFIT_SOURCE:-}" ] && [ -z "${TOKFIT_RAW_URL:-}" ]; then
+    if codex plugin marketplace upgrade --help >/dev/null 2>&1; then
+      fetch codex/native_bootstrap.py "$stage/bootstrap.py"
+      python3 -I "$stage/bootstrap.py" --install "$bin" "https://github.com/$REPO.git"
+      printf '%s : installé dans Codex. Les mises à jour passent par la marketplace tokfit-distribution.\n' "$NAME"
+      return
+    fi
+    printf '%s : ce Codex utilise une copie fixe. Relance cette installation pour la mettre à jour.\n' "$NAME"
+  fi
   fetch codex/launcher.py "$stage/launcher"
   head -c 2 "$stage/launcher" | grep -q '^#!' || fail "le lanceur reçu n'est pas un script : rien n'est installé."
   package="$stage/package"

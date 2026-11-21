@@ -1,0 +1,18 @@
+name: Validation macOS du connecteur
+on:
+  push:
+    branches: [validation/native-0.7.37]
+permissions:
+  contents: read
+jobs:
+  validation:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g @anthropic-ai/claude-code@2.1.330
+      - run: claude plugin validate --strict claude-code
+      - run: claude plugin test claude-code
