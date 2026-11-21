@@ -9,7 +9,8 @@
 #   - codex : le lanceur `tokfit codex …` est posé dans ~/.local/bin.
 #
 #   sh install.sh                             détecte Claude Code et Codex, une seule saisie de clé
-#   sh install.sh claude|codex                installe uniquement le client choisi
+#   sh install.sh --list                      affiche les clients pris en charge
+#   sh install.sh codex claude                installe les clients nommés, une fois chacun
 #   TOKFIT_KEY=ek_… sh install.sh codex   sans question (automatisation, essais)
 #   TOKFIT_KEY= sh install.sh             sans question ni clé : essai sans inscription
 #   curl -fsSL <dépôt public>/install.sh | sh -s codex   sans clone : plugin et
@@ -31,9 +32,10 @@
 # <source> --config api_key=ek_…` (clé gardée dans le trousseau par Claude
 # Code, mais tapée dans la ligne de commande). Le plugin lit les deux ; sa
 # configuration passe avant ce fichier.
-set -eu
+set -efu
 
 NAME=tokfit
+CLIENTS="claude codex"
 # Adresse officielle du service et dépôt public du connecteur : vides dans le
 # dépôt de travail, posés par connector/publish.py dans la copie publique.
 # Vides, TOKFIT_URL est obligatoire et le script se lance depuis un clone.
@@ -47,15 +49,33 @@ fail() {
   exit 1
 }
 
-target="${1:-auto}"
-if [ "$target" = auto ]; then
-  target=""
-  if command -v claude >/dev/null 2>&1; then target=claude; fi
-  if command -v codex >/dev/null 2>&1; then
-    if [ "$target" = claude ]; then target=both; else target=codex; fi
-  fi
-  [ -n "$target" ] || fail "Claude Code et Codex introuvables. Installe au moins un des deux."
+# Les noms de CLIENTS sont à la fois les commandes détectées et les suffixes
+# des fonctions check_<client> et install_<client>. Seuls ces noms passent au dispatch.
+if [ "$#" -eq 1 ] && [ "$1" = --list ]; then
+  printf '%s\n' $CLIENTS
+  exit 0
 fi
+if [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = auto ]; }; then
+  set --
+  for client in $CLIENTS; do
+    if command -v "$client" >/dev/null 2>&1; then set -- "$@" "$client"; fi
+  done
+  [ "$#" -gt 0 ] || fail "aucun client compatible détecté ($CLIENTS)."
+elif [ "$#" -eq 1 ] && [ "$1" = both ]; then
+  set -- claude codex  # Compatibilité avec les installations 0.7.35.
+fi
+selected=""
+for requested do
+  found=""
+  for client in $CLIENTS; do
+    if [ "$requested" = "$client" ]; then found=$client; break; fi
+  done
+  [ -n "$found" ] || fail "cible inconnue : $requested (clients disponibles : $CLIENTS)."
+  case " $selected " in
+    *" $found "*) ;;
+    *) selected="${selected:+$selected }$found" ;;
+  esac
+done
 # Dossier du script, seulement s'il est lancé comme fichier install.sh : par `curl … | sh`,
 # $0 est « sh » et le dossier courant n'est jamais une source de confiance.
 here=""
@@ -74,23 +94,28 @@ raw="${TOKFIT_RAW_URL:-${REPO:+https://raw.githubusercontent.com/$REPO/main}}"
 config="${TOKFIT_CONFIG:-$HOME/.config/$NAME/config.json}"
 bin="${TOKFIT_BIN:-$HOME/.local/bin}"
 
-case "$target" in
-  claude|codex|both) ;;
-  *) fail "cible inconnue : $target (claude ou codex)." ;;
-esac
-if [ "$target" != codex ]; then
-    command -v claude >/dev/null 2>&1 || fail "Claude Code introuvable (commande claude) : installe-le d'abord."
-    [ -n "$market" ] || fail "source du plugin inconnue (TOKFIT_SOURCE) : lance le script depuis un clone du dépôt."
-fi
-if [ "$target" != claude ]; then
-    command -v codex >/dev/null 2>&1 || fail "Codex CLI introuvable (commande codex) : installe-le d'abord."
-    python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null \
-      || fail "Python 3.9 ou plus récent introuvable (commande python3)."
-    if [ -z "$here" ]; then
-      [ -n "$raw" ] || fail "source du lanceur inconnue (TOKFIT_RAW_URL) : lance le script depuis un clone du dépôt."
-      command -v curl >/dev/null 2>&1 || fail "curl introuvable : installe-le, ou lance le script depuis un clone du dépôt."
-    fi
-fi
+check_claude() {
+  [ -n "$market" ] || fail "source du plugin inconnue (TOKFIT_SOURCE) : lance le script depuis un clone du dépôt."
+}
+check_codex() {
+  needs_config=true
+  python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null \
+    || fail "Python 3.9 ou plus récent introuvable (commande python3)."
+  if [ -z "$here" ]; then
+    [ -n "$raw" ] || fail "source du lanceur inconnue (TOKFIT_RAW_URL) : lance le script depuis un clone du dépôt."
+    command -v curl >/dev/null 2>&1 || fail "curl introuvable : installe-le, ou lance le script depuis un clone du dépôt."
+  fi
+}
+# Un exécutable comme exemple-cli fournit check_exemple_cli et install_exemple_cli.
+adapter() {
+  suffix=$(printf '%s' "$2" | tr '-' '_')
+  "${1}_$suffix"
+}
+needs_config=false
+for client in $selected; do
+  command -v "$client" >/dev/null 2>&1 || fail "commande $client introuvable : installe ce CLI d’abord."
+  adapter check "$client"
+done
 
 case "$url" in
   https://?* | http://127.0.0.1 | http://127.0.0.1:* | http://127.0.0.1/* | http://localhost | http://localhost:* | http://localhost/*) ;;
@@ -132,7 +157,7 @@ fi
 
 # Fichier écrit avec une clé ; sans clé, seulement pour une autre adresse que l'officielle (ou pour
 # le lanceur Codex, qui n'en a pas), et jamais par-dessus un fichier existant (il peut porter une clé).
-if [ -n "$key" ] || { [ ! -e "$config" ] && { [ "$url" != "$DEFAULT_URL" ] || [ "$target" != claude ]; }; }; then
+if [ -n "$key" ] || { [ ! -e "$config" ] && { [ "$url" != "$DEFAULT_URL" ] || [ "$needs_config" = true ]; }; }; then
   umask 077
   dir=$(dirname -- "$config")
   mkdir -p -- "$dir"
@@ -164,17 +189,12 @@ fetch() { # chemin dans le dépôt, destination : copie du clone, sinon téléch
   fi
 }
 
-claude_status=0
-if [ "$target" != codex ]; then
-  if claude plugin install "$NAME" --marketplace "$market"; then
-    printf '%s : connecteur installé dans Claude Code, disponible à la prochaine session.\n' "$NAME"
-  else
-    claude_status=$?
-    printf '%s : installation Claude Code en échec.\n' "$NAME" >&2
-  fi
-fi
+install_claude() {
+  claude plugin install "$NAME" --marketplace "$market"
+  printf '%s : connecteur installé dans Claude Code, disponible à la prochaine session.\n' "$NAME"
+}
 
-if [ "$target" != claude ]; then
+install_codex() {
   mkdir -p -- "$bin"
   umask 022
   # Tout est d'abord réuni et contrôlé à part : un téléchargement raté n'installe rien.
@@ -236,5 +256,17 @@ INSTALL_PACKAGE
     *":$bin:"*) ;;
     *) printf '%s : ajoute %s à ton PATH pour taper « %s codex ».\n' "$NAME" "$bin" "$NAME" ;;
   esac
-fi
-exit "$claude_status"
+}
+# Une installation qui échoue garde son statut et ses nettoyages, et les autres
+# clients sont essayés. Le sous-shell n'est pas une condition (set -e y agit).
+status=0
+set +e
+for client in $selected; do
+  (set -e; adapter install "$client")
+  result=$?
+  if [ "$result" -ne 0 ]; then
+    printf '%s : installation %s en échec.\n' "$NAME" "$client" >&2
+    status=$result
+  fi
+done
+exit "$status"
