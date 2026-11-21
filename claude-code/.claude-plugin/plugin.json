@@ -1,6 +1,6 @@
 {
   "name": "tokfit",
-  "version": "0.7.34",
+  "version": "0.7.35",
   "description": "Same Claude Code, smaller bill: leaner sessions (context, prompt cache, command output) with the model you chose. About 25% cheaper on Terminal-Bench 4.0.",
   "author": { "name": "Lois Perrigon" },
   "icon": "./icon.png",

@@ -43,6 +43,7 @@ sur la sortie d'erreur. Python 3.9+, bibliothèque standard seule.
 """
 from __future__ import annotations
 
+from contextlib import closing
 import datetime
 import hashlib
 import json
@@ -52,7 +53,9 @@ import re
 import shutil
 import shlex
 import signal
+import sqlite3
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -62,6 +65,8 @@ import urllib.request
 
 # Nom du connecteur, comme NAME du plugin Claude Code (nom de production dans la copie publique).
 NAME = "tokfit"
+# L’adresse officielle est posée par publish.py dans la copie publique.
+DEFAULT_URL = "https://api.tokfit.fr"
 # Attente maximale d'une décision (TIMEOUT_MS du plugin, ROUTE_MOD_TIMEOUT_S du service).
 TIMEOUT_S = 6.0
 USAGE_TIMEOUT_S = 10.0
@@ -228,7 +233,7 @@ def link(env: Dict[str, str], ask: bool = False) -> Optional[Link]:
         return None
     if not isinstance(data, dict):
         return None
-    url, key = str(data.get("url") or "").strip().rstrip("/"), str(data.get("key") or "").strip()
+    url, key = str(data.get("url") or DEFAULT_URL).strip().rstrip("/"), str(data.get("key") or "").strip()
     if not ADDRESS.fullmatch(url):
         return None
     if not key:
@@ -236,38 +241,66 @@ def link(env: Dict[str, str], ask: bool = False) -> Optional[Link]:
     return (url, key) if KEY.fullmatch(key) else None
 
 
-def anonymous_key(file: Path, url: str, ask: bool) -> Optional[str]:
-    """Clé anonyme rangée pour `url` ; sinon, avec `ask`, demandée au service et rangée (droits 600)."""
+def anonymous_state(file: Path, url: str) -> Tuple[Optional[str], bool]:
+    """Retourne la clé de cette adresse, et si une nouvelle demande est possible."""
     try:
         kept = json.loads(file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        # Pas encore de clé anonyme (ou fichier abîmé) : elle sera demandée.
         kept = None
     kept = kept if isinstance(kept, dict) and kept.get("url") == url else {}
     key = str(kept.get("key") or "")
-    if KEY.fullmatch(key):
-        return key
     failed = kept.get("failed_at")
-    if not ask or (isinstance(failed, (int, float)) and time.time() - failed < ANONYMOUS_RETRY_S):
+    return (key if KEY.fullmatch(key) else None,
+            not isinstance(failed, (int, float)) or time.time() - failed >= ANONYMOUS_RETRY_S)
+
+
+def anonymous_key(file: Path, url: str, ask: bool) -> Optional[str]:
+    """Une seule émission par installation, même si le lanceur et le MCP démarrent ensemble."""
+    key, retry = anonymous_state(file, url)
+    if key or not ask or not retry:
+        return key
+    try:
+        file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Un verrou SQLite borné et libéré par l'OS en cas de crash, sur Windows aussi.
+        # Aucune donnée, pas même la clé, dans ce fichier de coordination.
+        with closing(sqlite3.connect(str(file) + ".lock", timeout=ANONYMOUS_TIMEOUT_S + 1)) as lock:
+            lock.execute("BEGIN IMMEDIATE")
+            key, retry = anonymous_state(file, url)
+            if key or not retry:
+                return key
+            reply = post((url, ""), "/v1/keys/anonymous", {}, ANONYMOUS_TIMEOUT_S)
+            try:
+                value = str(json.loads(reply[1]).get("key") or "") if reply and reply[0] == 201 else ""
+            except (ValueError, AttributeError):
+                value = ""
+            entry: Json = {"url": url, "key": value} if KEY.fullmatch(value) else {"url": url, "failed_at": time.time()}
+            out = tempfile.NamedTemporaryFile(mode="w", dir=file.parent, delete=False, encoding="utf-8")
+            temporary = Path(out.name)
+            try:
+                with out:
+                    json.dump(entry, out)
+                os.replace(temporary, file)
+            finally:
+                temporary.unlink(missing_ok=True)
+            return value if KEY.fullmatch(value) else None
+    except (OSError, sqlite3.Error):
+        # Dossier inutilisable ou attente dépassée : laisser Codex continuer sans compte.
         return None
-    reply = post((url, ""), "/v1/keys/anonymous", {}, ANONYMOUS_TIMEOUT_S)
+
+
+def show_account(env: Dict[str, str]) -> int:
+    """Lien de cet appareil à la demande de la personne, comme la commande du plugin Claude."""
+    to = link(env, ask=True)
+    reply = post(to, "/v1/dashboard/link", {}, TIMEOUT_S) if to else None
     try:
-        key = str(json.loads(reply[1]).get("key") or "") if reply is not None and reply[0] == 201 else ""
+        message = json.loads(reply[1]).get("text") if reply and reply[0] == 200 else None
     except (ValueError, AttributeError):
-        # Réponse illisible : comptée comme un échec.
-        key = ""
-    entry: Json = {"url": url, "key": key} if KEY.fullmatch(key) else {"url": url, "failed_at": time.time()}
-    try:
-        file.parent.mkdir(parents=True, exist_ok=True)
-        temporary = file.with_name(f".{file.name}.{os.getpid()}")
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as out:
-            json.dump(entry, out)
-        os.replace(temporary, file)
-    except OSError:
-        # Dossier en lecture seule : la clé sert pour ce lancement, le suivant en redemandera une.
-        pass
-    return key if KEY.fullmatch(key) else None
+        message = None
+    if isinstance(message, str) and message.strip():
+        print(re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", " ", message).strip())
+        return 0
+    print(f"{NAME} : lien du tableau de bord indisponible.", file=sys.stderr)
+    return 1
 
 
 def trial_notice(reply: Reply) -> None:
@@ -711,7 +744,8 @@ def run_codex(args: List[str], env: Dict[str, str]) -> int:
     # Same local mechanisms as a host/ACP launch; old services decline the
     # versioned handshake and leave Codex's native transport unchanged.
     to = link(env)
-    for runtime in (Path(__file__).parent / "runtime", Path(__file__).parent.parent / "runtime"):
+    base = Path(__file__).parent
+    for runtime in (base / "tokfit-codex" / "runtime", base / "runtime", base.parent / "runtime"):
         if (runtime / "relay.py").is_file():
             sys.path.insert(0, str(runtime.parent))
             if not to:
@@ -727,7 +761,33 @@ def run_codex(args: List[str], env: Dict[str, str]) -> int:
         signal.signal(signal.SIGINT, previous)
 
 
+def run_mcp(env: Dict[str, str]) -> int:
+    """Start one isolated kernel per native MCP connection, using this installation's identity."""
+    server = Path(__file__).resolve().parent / "tokfit-codex" / "kernel" / "server.py"
+    if not server.is_file():
+        print(f"{NAME} : noyau absent ; relance l'installation Codex.", file=sys.stderr)
+        return 1
+    child = env.copy()
+    url_var, key_var = "ECONOMISEUR_RELAY_URL", "ECONOMISEUR_RELAY_TOKEN"  # publish: keep
+    if child.get(url_var) or child.get(key_var):
+        sys.path.insert(0, str(server.parents[1]))
+        from runtime.completion import relay_address
+        if not child.get(key_var) or not relay_address(child.get(url_var, "")):
+            print(f"{NAME} : configuration du relais incomplète.", file=sys.stderr)
+            return 1
+    else:
+        identity = link(env, ask=True)
+        if not identity:
+            print(f"{NAME} : accès au service indisponible.", file=sys.stderr)
+            return 1
+        child[url_var], child[key_var] = identity
+    # The kernel's host link has precedence over Claude's plugin options and store.
+    os.execve(sys.executable, [sys.executable, "-I", "-X", "utf8", str(server)], child)
+
+
 def main(argv: List[str], env: Dict[str, str]) -> int:
+    if argv == ["_mcp"]:
+        return run_mcp(env)
     if argv == ["_hook"]:
         try:
             event = json.loads(sys.stdin.read(65_537))
@@ -743,11 +803,13 @@ def main(argv: List[str], env: Dict[str, str]) -> int:
         return 0
     if argv[:1] == ["handoff"]:
         return handoff(argv[1:], env)
+    if argv in (["compte"], ["account"]):
+        return show_account(env)
     if argv == ["_agent"]:
         print(install_executor(codex_home(env)))
         return 0
     if argv[:1] != ["codex"]:
-        print(f"usage : {NAME} codex [options et message de codex] | {NAME} handoff {HANDOFF_ARGS}",
+        print(f"usage : {NAME} codex [options et message de codex] | {NAME} compte | {NAME} handoff {HANDOFF_ARGS}",
               file=sys.stderr)
         return 2
     args = argv[1:]

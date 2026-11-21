@@ -39,7 +39,8 @@ MODULE_MAX = 256
 # Variable qui passe le lien au processus du noyau ; retirée par `prendre_lien`.
 VARIABLE_LIEN = "TOKFIT_NOYAU_LIEN"
 # Options du plugin passées au serveur (plugin.json) : jamais transmises au noyau.
-OPTIONS = ("CLAUDE_PLUGIN_OPTION_API_KEY", "CLAUDE_PLUGIN_OPTION_SERVICE_URL")
+OPTIONS = ("CLAUDE_PLUGIN_OPTION_API_KEY", "CLAUDE_PLUGIN_OPTION_SERVICE_URL",
+           "ECONOMISEUR_RELAY_URL", "ECONOMISEUR_RELAY_TOKEN")  # publish: keep
 log = logging.getLogger("tokfit.kernel")
 
 # Dans le noyau, les modules du plugin sont renommés avec ce préfixe (`cacher_le_plugin` de worker.py) :

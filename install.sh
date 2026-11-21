@@ -4,11 +4,12 @@
 # lui-même une clé anonyme au service au premier lancement. Avec une clé (celle
 # de l'abonnement), elle est écrite dans ~/.config/tokfit/config.json
 # (droits 600, hors de tout dépôt), puis
-#   - claude (défaut) : le plugin est installé dans Claude Code (CLI et onglet
+#   - claude : le plugin est installé dans Claude Code (CLI et onglet
 #     Code de Claude Desktop, qui lisent la même configuration) ;
 #   - codex : le lanceur `tokfit codex …` est posé dans ~/.local/bin.
 #
-#   sh install.sh [claude|codex]               demande la clé (saisie masquée ; vide : essai)
+#   sh install.sh                             détecte Claude Code et Codex, une seule saisie de clé
+#   sh install.sh claude|codex                installe uniquement le client choisi
 #   TOKFIT_KEY=ek_… sh install.sh codex   sans question (automatisation, essais)
 #   TOKFIT_KEY= sh install.sh             sans question ni clé : essai sans inscription
 #   curl -fsSL <dépôt public>/install.sh | sh -s codex   sans clone : plugin et
@@ -39,19 +40,33 @@ NAME=tokfit
 DEFAULT_URL="https://api.tokfit.fr"
 REPO="loisperrigon/tokfit-connector"
 RUNTIME="__init__.py relay.py output.py process.py cursor.py completion.py"
+KERNEL="__init__.py autoupdate.py cellule.py compte.py kernel.py output.py pack.py projet.py server.py tubes.py worker.py"
 
 fail() {
   printf '%s : %s\n' "$NAME" "$1" >&2
   exit 1
 }
 
-target="${1:-claude}"
+target="${1:-auto}"
+if [ "$target" = auto ]; then
+  target=""
+  if command -v claude >/dev/null 2>&1; then target=claude; fi
+  if command -v codex >/dev/null 2>&1; then
+    if [ "$target" = claude ]; then target=both; else target=codex; fi
+  fi
+  [ -n "$target" ] || fail "Claude Code et Codex introuvables. Installe au moins un des deux."
+fi
 # Dossier du script, seulement s'il est lancé comme fichier install.sh : par `curl … | sh`,
 # $0 est « sh » et le dossier courant n'est jamais une source de confiance.
 here=""
 case "$0" in
   install.sh | */install.sh)
-    [ -f "$0" ] && here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd) ;;
+    if [ -f "$0" ]; then
+      source_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+      if [ -f "$source_dir/.claude-plugin/marketplace.json" ] && [ -f "$source_dir/codex/launcher.py" ]; then
+        here="$source_dir"
+      fi
+    fi ;;
 esac
 url="${TOKFIT_URL:-$DEFAULT_URL}"
 market="${TOKFIT_SOURCE:-${here:-$REPO}}"
@@ -60,19 +75,22 @@ config="${TOKFIT_CONFIG:-$HOME/.config/$NAME/config.json}"
 bin="${TOKFIT_BIN:-$HOME/.local/bin}"
 
 case "$target" in
-  claude)
+  claude|codex|both) ;;
+  *) fail "cible inconnue : $target (claude ou codex)." ;;
+esac
+if [ "$target" != codex ]; then
     command -v claude >/dev/null 2>&1 || fail "Claude Code introuvable (commande claude) : installe-le d'abord."
-    [ -n "$market" ] || fail "source du plugin inconnue (TOKFIT_SOURCE) : lance le script depuis un clone du dépôt." ;;
-  codex)
+    [ -n "$market" ] || fail "source du plugin inconnue (TOKFIT_SOURCE) : lance le script depuis un clone du dépôt."
+fi
+if [ "$target" != claude ]; then
     command -v codex >/dev/null 2>&1 || fail "Codex CLI introuvable (commande codex) : installe-le d'abord."
     python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null \
       || fail "Python 3.9 ou plus récent introuvable (commande python3)."
     if [ -z "$here" ]; then
       [ -n "$raw" ] || fail "source du lanceur inconnue (TOKFIT_RAW_URL) : lance le script depuis un clone du dépôt."
       command -v curl >/dev/null 2>&1 || fail "curl introuvable : installe-le, ou lance le script depuis un clone du dépôt."
-    fi ;;
-  *) fail "cible inconnue : $target (claude ou codex)." ;;
-esac
+    fi
+fi
 
 case "$url" in
   https://?* | http://127.0.0.1 | http://127.0.0.1:* | http://127.0.0.1/* | http://localhost | http://localhost:* | http://localhost/*) ;;
@@ -85,6 +103,8 @@ esac
 
 if [ -n "${TOKFIT_KEY+set}" ]; then
   key="$TOKFIT_KEY"
+elif [ -f "$config" ]; then
+  key=""  # Une installation existante garde son compte, même quand on ajoute le second client.
 elif [ -r /dev/tty ] && { true </dev/tty; } 2>/dev/null; then
   # `true`, pas `:` : une redirection ratée sur `:` (commande spéciale) arrête tout le script.
   printf 'Clé %s (ek_…, saisie masquée ; vide : essai sans inscription) : ' "$NAME" >/dev/tty
@@ -112,7 +132,7 @@ fi
 
 # Fichier écrit avec une clé ; sans clé, seulement pour une autre adresse que l'officielle (ou pour
 # le lanceur Codex, qui n'en a pas), et jamais par-dessus un fichier existant (il peut porter une clé).
-if [ -n "$key" ] || { [ ! -e "$config" ] && { [ "$url" != "$DEFAULT_URL" ] || [ "$target" = codex ]; }; }; then
+if [ -n "$key" ] || { [ ! -e "$config" ] && { [ "$url" != "$DEFAULT_URL" ] || [ "$target" != claude ]; }; }; then
   umask 077
   dir=$(dirname -- "$config")
   mkdir -p -- "$dir"
@@ -126,7 +146,13 @@ if [ -n "$key" ] || { [ ! -e "$config" ] && { [ "$url" != "$DEFAULT_URL" ] || [ 
     printf '{"url": "%s"}\n' "$url" >"$tmp"
   fi
   chmod 600 "$tmp"
-  mv -f -- "$tmp" "$config"
+  if [ -n "$key" ]; then
+    mv -f -- "$tmp" "$config"
+  else
+    # L'autre CLI peut avoir inscrit la clé pendant la préparation du fichier anonyme.
+    ln -- "$tmp" "$config" 2>/dev/null || [ -f "$config" ] || fail "configuration impossible : $config"
+    rm -f -- "$tmp"
+  fi
   trap - EXIT INT TERM
 fi
 
@@ -138,7 +164,17 @@ fetch() { # chemin dans le dépôt, destination : copie du clone, sinon téléch
   fi
 }
 
-if [ "$target" = codex ]; then
+claude_status=0
+if [ "$target" != codex ]; then
+  if claude plugin install "$NAME" --marketplace "$market"; then
+    printf '%s : connecteur installé dans Claude Code, disponible à la prochaine session.\n' "$NAME"
+  else
+    claude_status=$?
+    printf '%s : installation Claude Code en échec.\n' "$NAME" >&2
+  fi
+fi
+
+if [ "$target" != claude ]; then
   mkdir -p -- "$bin"
   umask 022
   # Tout est d'abord réuni et contrôlé à part : un téléchargement raté n'installe rien.
@@ -146,28 +182,59 @@ if [ "$target" = codex ]; then
   trap 'rm -rf -- "$stage"' EXIT INT TERM
   fetch codex/launcher.py "$stage/launcher"
   head -c 2 "$stage/launcher" | grep -q '^#!' || fail "le lanceur reçu n'est pas un script : rien n'est installé."
-  mkdir -- "$stage/runtime"
+  package="$stage/package"
+  mkdir -p -- "$package/runtime" "$package/kernel" "$package/hooks"
   for file in $RUNTIME; do
-    fetch "runtime/$file" "$stage/runtime/$file"
-    chmod 644 "$stage/runtime/$file"
+    fetch "runtime/$file" "$package/runtime/$file"
   done
+  for file in $KERNEL; do
+    fetch "claude-code/kernel/$file" "$package/kernel/$file"
+  done
+  # Le noyau importe completion depuis hooks, où Claude Code reçoit ce même module.
+  cp -- "$package/runtime/completion.py" "$package/hooks/completion.py"
+  fetch codex/register_mcp.py "$package/register_mcp.py"
+  # Versions immuables : une session en cours peut encore ouvrir son worker après une mise à jour.
+  # Une réinstallation identique réutilise le même dossier. La bascule du lien est atomique sur POSIX.
+  python3 -I - "$bin" "$stage" <<'INSTALL_PACKAGE'
+import hashlib
+import os
+from pathlib import Path
+import sys
+
+bin_dir, stage = (Path(p).resolve() for p in sys.argv[1:])
+package = stage / "package"
+releases = bin_dir / ".tokfit-codex-releases"
+link = bin_dir / "tokfit-codex"
+if releases.is_symlink() or (link.is_symlink() and link.resolve().parent != releases) or (link.exists() and not link.is_symlink()):
+    sys.exit(f"Installation impossible : le chemin de tokfit est déjà occupé dans {bin_dir}.")
+digest = hashlib.sha256()
+for path in sorted(package.rglob("*.py")):
+    data = path.read_bytes()
+    compile(data, str(path), "exec")
+    digest.update(str(path.relative_to(package)).encode() + b"\0" + hashlib.sha256(data).digest())
+releases.mkdir(exist_ok=True)
+release = releases / digest.hexdigest()
+try:
+    package.rename(release)
+except OSError:
+    if not release.is_dir() or release.is_symlink():
+        raise
+pending = stage / "current"
+pending.symlink_to(release.relative_to(bin_dir))
+os.replace(pending, link)
+INSTALL_PACKAGE
   chmod 755 "$stage/launcher"
-  mkdir -p -- "$bin/runtime"
-  for file in $RUNTIME; do
-    mv -f -- "$stage/runtime/$file" "$bin/runtime/$file"
-  done
   mv -f -- "$stage/launcher" "$bin/$NAME"
   rm -rf -- "$stage"
   trap - EXIT INT TERM
   printf '%s : lanceur installé (%s) ; lance « %s codex \"ta demande\" ».\n' "$NAME" "$bin/$NAME" "$NAME"
   # Agent d'exécution léger de Codex (tokfit_executor), à qui le modèle de la session délègue un travail décidé.
   "$bin/$NAME" _agent || printf '%s : agent d’exécution non installé.\n' "$NAME"
+  python3 -I "$bin/tokfit-codex/register_mcp.py" "$(cd -- "$bin" && pwd)/$NAME" ||
+    fail "le lanceur est installé, mais Codex n’a pas enregistré les outils ; relance l’installation après avoir corrigé le problème indiqué."
   case ":$PATH:" in
     *":$bin:"*) ;;
     *) printf '%s : ajoute %s à ton PATH pour taper « %s codex ».\n' "$NAME" "$bin" "$NAME" ;;
   esac
-  exit 0
 fi
-
-claude plugin install "$NAME" --marketplace "$market"
-printf '%s : connecteur installé ; il agit dès la prochaine session Claude Code.\n' "$NAME"
+exit "$claude_status"
