@@ -123,16 +123,25 @@ le plugin Claude reste prioritaire dans Claude.
 - **Mettre Claude à jour** : `claude plugin update tokfit`, puis ouvre une
   nouvelle session. Claude Code prend aussi en charge les mises à jour
   automatiques de la marketplace.
-- **Mettre Codex à jour** : relance l’installateur avec `codex` puis ouvre une
-  nouvelle session. Pour mettre les deux à jour, relance aussi la mise à jour
-  du plugin Claude.
+- **Mettre Codex à jour.** Depuis la version 0.7.37, l’installateur téléchargé
+  active les mises à jour au démarrage sur les CLI compatibles. Si tu utilisais
+  une ancienne version, relance une fois la commande d’installation ci-dessus.
+  Pour vérifier la version, utilise `codex plugin list -m tokfit-distribution --json`.
+  Pour chercher une mise à jour immédiatement, utilise
+  `codex plugin marketplace upgrade tokfit-distribution`. Les sessions ouvertes
+  terminent avec leur version. Une installation depuis un clone, une source
+  personnalisée ou un ancien CLI se met à jour en relançant son installateur.
 - **Retirer Claude** : `claude plugin uninstall tokfit`. Tu peux continuer à
   utiliser tokfit dans Codex.
 - **Retirer Codex** : ferme d’abord ses sessions tokfit. Dans `codex mcp list`,
   repère l’entrée qui lance ta commande `tokfit _mcp`. Retire uniquement cette
-  entrée avec `codex mcp remove NOM` (`outils` ou `tokfit-outils`). Supprime
-  le lanceur `tokfit`, son lien `tokfit-codex` et son dossier
-  `.tokfit-codex-releases` dans le répertoire d’installation (par défaut
+  entrée avec `codex mcp remove NOM`. Si le plugin natif est installé, exécute
+  `codex plugin remove tokfit-runtime@tokfit-distribution`, puis
+  `codex plugin marketplace remove tokfit-distribution`. Si tu utilises plusieurs
+  dossiers Codex, répète ces étapes dans ceux que tu veux désinstaller. Quand
+  tu retires le dernier, supprime le lanceur `tokfit` et ses fichiers présents
+  (`.tokfit-codex-managed`, `tokfit-codex`, `.tokfit-codex-releases`)
+  dans le répertoire d’installation (par défaut
   `~/.local/bin`). Dans `$CODEX_HOME/agents` (par défaut `~/.codex/agents`),
   retire `tokfit-executor.toml` si sa première ligne est
   `# tokfit executor agent`. Garde la configuration commune tant que tu
