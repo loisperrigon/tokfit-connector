@@ -1,0 +1,16 @@
+{
+  "name": "tokfit-distribution",
+  "plugins": [
+    {
+      "name": "tokfit-runtime",
+      "policy": {
+        "authentication": "ON_INSTALL",
+        "installation": "AVAILABLE"
+      },
+      "source": {
+        "path": "./codex-runtime",
+        "source": "local"
+      }
+    }
+  ]
+}

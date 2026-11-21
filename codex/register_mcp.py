@@ -104,7 +104,7 @@ def register(launcher: Path) -> str:
         name = server_name(layers, launcher, data_home / "open-codex" / "mods", profile_names)
         if not name:
             return "Configuration Codex existante conservée."
-        names = ["ECONOMISEUR_RELAY_URL", "ECONOMISEUR_RELAY_TOKEN"]  # publish: keep
+        names = ["CODEX_HOME", "ECONOMISEUR_RELAY_URL", "ECONOMISEUR_RELAY_TOKEN"]  # publish: keep
         config_name = "TOKFIT_CONFIG"
         value = {"command": str(launcher), "args": ["_mcp"], "env_vars": names,
                  "tools": {"agir": {"approval_mode": "prompt"}}}
