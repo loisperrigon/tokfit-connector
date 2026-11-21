@@ -1,9 +1,11 @@
 # tokfit
 
-Consommer moins avec le même abonnement. tokfit choisit, à chaque message,
-le modèle et le niveau de réflexion de ton Claude Code (et de ton Codex) : le
-moins cher qui suffit, le plus fort quand la tâche le demande. Un tableau de
-bord chiffre l'économie, chaque chiffre étant marqué `measured` ou `estimated`.
+tokfit aide Claude Code et Codex à consommer moins. Tu peux les utiliser en même
+temps et retrouver leurs économies sur le même tableau de bord. L’installation
+détecte les outils présents sur ton ordinateur.
+
+**Pour commencer**, colle le [message d’installation](INSTALL-PROMPT.md) dans
+Claude Code ou Codex, ou utilise la commande ci-dessous.
 
 ## Ce qu'il fait (Claude Code)
 
@@ -71,47 +73,70 @@ des sessions, tirées au sort. Pour en couper un toi-même :
   nombres d'appels partent. Seule exception, voulue : une fonction générique
   qu'il range pour la réutiliser (`sauve_outil`) est gardée par le service,
   rattachée à ta clé, jamais le code de ton projet.
-- Le connecteur n'écrit rien sur ta machine, hors son fichier de configuration.
+- La configuration, les clés des installations et le cache Python restent sur ta machine.
 - Si le service est lent (plus de 6 s) ou en panne, ton réglage en cours est
   gardé, sans message.
 - Pour Codex, rien de la réponse d'un modèle d'OpenAI n'est envoyé.
 
 ## Installation
 
-Sans clé, l'essai démarre tout seul au premier lancement (clé anonyme, rien à
-remplir). Après l'abonnement, la clé tokfit (`ek_…`) remise une fois.
-
-Claude Code :
+Sur macOS ou Linux, ou dans l’environnement shell où tu utilises tes CLI :
 
 ```sh
-claude plugin install tokfit --marketplace <source>                       # essai
-claude plugin install tokfit --marketplace <source> --config api_key=ek_… # abonné
+curl -fsSL https://raw.githubusercontent.com/loisperrigon/tokfit-connector/main/install.sh | sh
 ```
 
-Une ligne, sans rien cloner (la clé est demandée, saisie masquée ; vide : essai) :
+Si Claude Code et Codex sont présents, cette commande installe tokfit dans les
+deux. Si tu ajoutes l’autre outil plus tard, relance la commande. Pour choisir
+explicitement depuis un clone, utilise `sh install.sh claude`, `sh install.sh codex`
+ou `sh install.sh both`. L’installation Codex utilise Python 3.9 ou ultérieur.
+Pour Claude Code seul, y compris sous Windows, tu peux aussi utiliser directement
+`claude plugin install tokfit --marketplace loisperrigon/tokfit-connector`.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/loisperrigon/tokfit-connector/main/install.sh | sh -s claude
-curl -fsSL https://raw.githubusercontent.com/loisperrigon/tokfit-connector/main/install.sh | sh -s codex   # lanceur : `tokfit codex …`
-```
+Ouvre ensuite une nouvelle conversation :
 
-Pour les non-techniciens : [INSTALL-PROMPT.md](INSTALL-PROMPT.md) est un prompt à coller dans
-Claude Code ou Codex, qui fait toute l'installation (la landing propose un bouton « Copier »).
+- **Claude Code** charge le plugin automatiquement. Tape `/tokfit` pour voir son
+  état ou ouvrir ton tableau de bord.
+- **Codex** peut appeler les outils `agir` (travail local en Python, avec
+  approbation) et `compte` (bilan) dans les conversations ordinaires. Pour que
+  tokfit puisse également choisir le modèle et l’effort au démarrage et relever
+  les compteurs, commence ta conversation avec `tokfit codex "ma demande"`.
+- **Claude et Codex ensemble** peuvent travailler en parallèle. Chaque session
+  a son propre noyau Python. Si les deux modifient le même dossier, elles voient
+  les mêmes fichiers.
 
-Depuis un clone : `sh install.sh` (Claude Code) ou `sh install.sh codex`.
+### Utiliser le même abonnement
 
-Mises à jour : automatiques. Au premier lancement, le plugin active la mise à jour
-automatique de sa marketplace (comme « Enable auto-update » dans `/plugin`) ; un
-choix déjà fait n'est pas touché. Les nouvelles versions s'installent en arrière-plan
-et s'appliquent à la session suivante (ou tout de suite avec `/reload-plugins`).
-Dans l'application de bureau Claude, qui lance Claude Code avec `DISABLE_AUTOUPDATER=1`,
-les plugins ne se mettent plus à jour seuls : ajouter `"FORCE_AUTOUPDATE_PLUGINS": "1"` dans
-l'objet `env` de `~/.claude/settings.json` (le prompt d'installation le fait).
-Depuis une version antérieure à 0.7.8 : une seule mise à jour à la main
-(`claude plugin update tokfit`), ensuite plus rien à faire.
+Tu peux démarrer sans clé. Laisse la saisie vide. Claude et Codex reçoivent
+chacun une identité d’installation. Pour réunir leurs historiques, ouvre
+`/tokfit` dans Claude, puis `tokfit compte` dans un terminal pour Codex.
+Ouvre chacun des deux liens, connecte-toi au même compte tokfit et confirme
+le rattachement. L’abonnement couvre ensuite les deux installations.
 
-La clé est écrite dans `~/.config/tokfit/config.json` (mode 600) ; la variable
-`TOKFIT_CONFIG` désigne un autre fichier.
+Si tu possèdes déjà une clé tokfit, saisis-la une fois dans l’installateur.
+Les deux outils lisent le même fichier privé `~/.config/tokfit/config.json`,
+ou le fichier désigné par `TOKFIT_CONFIG`. Une clé réglée explicitement dans
+le plugin Claude reste prioritaire dans Claude.
+
+### Mettre à jour ou retirer un seul connecteur
+
+- **Mettre Claude à jour** : `claude plugin update tokfit`, puis ouvre une
+  nouvelle session. Claude Code prend aussi en charge les mises à jour
+  automatiques de la marketplace.
+- **Mettre Codex à jour** : relance l’installateur avec `codex` puis ouvre une
+  nouvelle session. Pour mettre les deux à jour, relance aussi la mise à jour
+  du plugin Claude.
+- **Retirer Claude** : `claude plugin uninstall tokfit`. Tu peux continuer à
+  utiliser tokfit dans Codex.
+- **Retirer Codex** : ferme d’abord ses sessions tokfit. Dans `codex mcp list`,
+  repère l’entrée qui lance ta commande `tokfit _mcp`. Retire uniquement cette
+  entrée avec `codex mcp remove NOM` (`outils` ou `tokfit-outils`). Supprime
+  le lanceur `tokfit`, son lien `tokfit-codex` et son dossier
+  `.tokfit-codex-releases` dans le répertoire d’installation (par défaut
+  `~/.local/bin`). Dans `$CODEX_HOME/agents` (par défaut `~/.codex/agents`),
+  retire `tokfit-executor.toml` si sa première ligne est
+  `# tokfit executor agent`. Garde la configuration commune tant que tu
+  utilises tokfit dans Claude.
 
 ## Balises
 
