@@ -29,7 +29,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from runtime.output import OutputPolicy, shorten_request
-from runtime.process import run_child
+from runtime.process import codex_output_mode, run_child
 from runtime.completion import NoRedirect, levers_off, relay_address, hook_args as completion_hook_args
 
 Json = dict[str, object]
@@ -696,7 +696,7 @@ def run(binary: str, args: list[str], env: dict[str, str]) -> int:
     if relay and plan and "execution_instruction" in plan and "persistence" not in off:
         actual = completion_hook_args(actual, Path(__file__).with_name("completion.py"))
     try:
-        return run_child(binary, actual, env)
+        return run_child(binary, actual, env, output_mode=codex_output_mode(args))
     finally:
         if relay:
             relay.close()

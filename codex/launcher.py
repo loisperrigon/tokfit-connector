@@ -617,8 +617,11 @@ def run_codex(args: List[str], env: Dict[str, str]) -> int:
     # versioned handshake and leave Codex's native transport unchanged.
     to = link(env)
     for runtime in (Path(__file__).parent / "runtime", Path(__file__).parent.parent / "runtime"):
-        if to and (runtime / "relay.py").is_file():
+        if (runtime / "relay.py").is_file():
             sys.path.insert(0, str(runtime.parent))
+            if not to:
+                from runtime.process import codex_output_mode, run_child
+                return run_child(binary, args, env, output_mode=codex_output_mode(args))
             from runtime.relay import run
             return run(binary, args, {**env, "ECONOMISEUR_RELAY_URL": to[0], "ECONOMISEUR_RELAY_TOKEN": to[1]})  # publish: keep
     # Ctrl-C va à Codex (même groupe de processus) : le lanceur attend sa fin.
