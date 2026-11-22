@@ -590,6 +590,7 @@ def steps_of(lines: Iterable[str]) -> List[Step]:
             ordinal = item.get("ordinal")
             steps.append({
                 "step_id": step_id(session, ordinal if isinstance(ordinal, int) else rank), "session_id": session,
+                "engine": "codex",
                 "model": model, **({"effort": effort} if effort in EFFORTS else {}),
                 # Chez OpenAI, input_tokens compte aussi le cache lu et écrit.
                 "input": max(0, number(last.get("input_tokens")) - read - write), "cache_read": read,
@@ -736,7 +737,7 @@ def handoff(args: List[str], env: Dict[str, str]) -> int:
     return 0
 
 
-def run_codex(args: List[str], env: Dict[str, str]) -> int:
+def run_codex(args: List[str], env: Dict[str, str], *, pinned: bool = False) -> int:
     binary = env.get("TOKFIT_CODEX") or shutil.which("codex", path=env.get("PATH"))
     if not binary:
         print(f"{NAME} : codex introuvable (installe Codex CLI d'abord).", file=sys.stderr)
@@ -752,7 +753,7 @@ def run_codex(args: List[str], env: Dict[str, str]) -> int:
                 from runtime.process import codex_output_mode, run_child
                 return run_child(binary, args, env, output_mode=codex_output_mode(args))
             from runtime.relay import run
-            return run(binary, args, {**env, "ECONOMISEUR_RELAY_URL": to[0], "ECONOMISEUR_RELAY_TOKEN": to[1]})  # publish: keep
+            return run(binary, args, {**env, "ECONOMISEUR_RELAY_URL": to[0], "ECONOMISEUR_RELAY_TOKEN": to[1]}, pinned=pinned)  # publish: keep
     # Ctrl-C va à Codex (même groupe de processus) : le lanceur attend sa fin.
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
@@ -822,7 +823,7 @@ def main(argv: List[str], env: Dict[str, str]) -> int:
         reference = user_model(args, (codex_home(env) / "config.toml").read_text(encoding="utf-8"))
     except OSError:
         reference = user_model(args, "")
-    code = run_codex(hook_args(decide(args, env), env), env)
+    code = run_codex(hook_args(decide(args, env), env), env, pinned=launch.keep_model)
     # Compteurs : toute conversation menée par ce lancement (neuve, reprise ou fork).
     counted = launch.mode in CONVERSATIONS
     if counted and link(env) is not None:

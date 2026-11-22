@@ -67,7 +67,11 @@ def refresh_executor(home: Path, previous: Path, target: Path) -> None:
 
 
 def activate(state: Path, cache: Path | None = None) -> Path:
+    # Chemins résolus : `current` se compare à `releases` après `resolve()` et un fichier du paquet doit être
+    # lui-même (pas un lien), ce qu'un préfixe en lien (/var → /private/var sous macOS) faisait refuser.
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    state = state.resolve()
+    cache = cache.resolve() if cache is not None else None
     with (state / "lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         current = state / "current"

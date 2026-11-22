@@ -14,6 +14,7 @@ export const BATCH_MAX = 50
 const QUEUE_MAX = 1000
 
 export type Step = {
+  engine?: 'claude'
   step_id: string
   session_id: string
   model: string
@@ -49,6 +50,8 @@ export type LeverFacts = {
   fanout?: true
   // Réflexion demandée en anglais dans une conversation qui ne l'est pas.
   lean_thinking?: true
+  prefix_applied?: true
+  persistence_applied?: true
   // Modèle que l'utilisateur a choisi pour la session (référence de la mesure, au service).
   reference_model?: string
   // Modèle fixé par l'utilisateur (routage coupé par lui ou son application, balise) : étape hors mesure.
@@ -90,6 +93,7 @@ export async function stepOf(session: string, agentId: string | undefined, turnI
   // Quota : la fenêtre la plus entamée, comme la relève le service.
   const used = limits.map(limit => limit.percentUsed).filter(value => Number.isFinite(value))
   return {
+    engine: 'claude',
     step_id: await stepId(session, agentId, turnId, index),
     session_id: session,
     model: usage.model,

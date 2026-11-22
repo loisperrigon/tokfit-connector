@@ -132,8 +132,8 @@ def store_folder(env: dict[str, str]) -> Path:
 
 
 def stored_key(env: dict[str, str], url: str, refused: Collection[str] = ()) -> str | None:
-    """The anonymous key the connector keeps in its plugin store (hooks/key.ts) for the service at `url`, if any;
-    as in key.ts, an entry kept for another address, or a malformed key, is never used."""
+    """Read the anonymous key for this URL, falling back from the current official URL to its predecessor."""
+    legacy_key = None
     for path in sorted(store_folder(env).glob("tokfit_*.json")):
         try:
             with path.open("rb") as file:
@@ -144,9 +144,13 @@ def stored_key(env: dict[str, str], url: str, refused: Collection[str] = ()) -> 
         if not isinstance(entry, dict) or not isinstance(entry.get("url"), str):
             continue
         key = entry.get("key")
-        if entry["url"].rstrip("/") == url and isinstance(key, str) and ANONYMOUS_KEY.fullmatch(key) and key not in refused:
+        if not isinstance(key, str) or not ANONYMOUS_KEY.fullmatch(key) or key in refused:
+            continue
+        if entry["url"].rstrip("/") == url:
             return key
-    return None
+        if legacy_key is None and entry["url"] == "https://tokfit.dodoia.re" and url == "https://api.tokfit.fr":
+            legacy_key = key
+    return legacy_key
 
 
 def link(env: dict[str, str], refused: Collection[str] = ()) -> tuple[str, str] | None:

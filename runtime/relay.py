@@ -17,7 +17,9 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -41,9 +43,75 @@ HOP = frozenset({"connection", "transfer-encoding", "content-length", "host", "k
 LOG = logging.getLogger("tokfit.runtime")
 
 
+UPSTREAM_IDLE_LIMIT = 4
+UPSTREAM_IDLE_SECONDS = 30
+IDENTITY_HEADERS = frozenset({"authorization", "chatgpt-account-id", "openai-organization",
+                              "openai-project", "cookie", "api-key", "x-api-key"})
+
+
+def connection_key(destination: str, headers: dict[str, str]) -> bytes:
+    identity = sorted((k.lower(), v) for k, v in headers.items() if k.lower() in IDENTITY_HEADERS)
+    return hashlib.sha256(json.dumps([destination, identity]).encode()).digest()
+
+
+class IdleConnections:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.entries: list[tuple[float, bytes, http.client.HTTPConnection]] = []
+        self.closed = False
+
+    def _expire(self) -> None:
+        now = time.monotonic()
+        while self.entries and self.entries[0][0] <= now:
+            self.entries.pop(0)[2].close()
+
+    def expire(self) -> None:
+        with self.lock:
+            self._expire()
+
+    def take(self, key: bytes) -> http.client.HTTPConnection | None:
+        with self.lock:
+            self._expire()
+            for index in reversed(range(len(self.entries))):
+                if self.entries[index][1] != key:
+                    continue
+                _, _, connection = self.entries.pop(index)
+                sock = connection.sock
+                try:
+                    # Idle readable sockets contain EOF or unsolicited data.
+                    if sock is not None and not (isinstance(sock, ssl.SSLSocket) and sock.pending()):
+                        readable, _, errors = select.select([sock], [], [sock], 0)
+                        if not readable and not errors:
+                            return connection
+                except (OSError, ValueError):
+                    pass  # The socket closed while becoming idle.
+                connection.close()
+        return None
+
+    def put(self, key: bytes, connection: http.client.HTTPConnection) -> None:
+        with self.lock:
+            if self.closed:
+                connection.close()
+                return
+            if len(self.entries) == UPSTREAM_IDLE_LIMIT:
+                self.entries.pop(0)[2].close()
+            self.entries.append((time.monotonic() + UPSTREAM_IDLE_SECONDS, key, connection))
+
+    def close(self) -> None:
+        with self.lock:
+            self.closed = True
+            for _, _, connection in self.entries:
+                connection.close()
+            self.entries.clear()
+
+
 class BoundedServer(ThreadingHTTPServer):
     daemon_threads = True
     slots = threading.BoundedSemaphore(16)
+    connections: IdleConnections
+
+    def service_actions(self) -> None:
+        self.connections.expire()
 
     def process_request(self, request: socket.socket | tuple[bytes, socket.socket], client_address: tuple[str, int]) -> None:
         if not self.slots.acquire(blocking=False):
@@ -323,21 +391,140 @@ class CaptureEntry:
                             "truncated": self.size >= MAX_CAPTURE, "seconds": round(time.time() - self.started, 3)})
 
 
+# Native local actions covered by the persistent kernel. Keep orchestration,
+# integrations and user-facing tools in the model's catalogue.
+KERNEL_SOCKET_ENV = "ECONOMISEUR_CODEX_KERNEL_SOCKET"  # publish: keep
+KERNEL_SOCKET_PATH = "/_tokfit_kernel/"
+KERNEL_REPLACED = frozenset({"exec_command", "write_stdin", "shell", "shell_command", "apply_patch", "view_image"})
+KERNEL_NAME = re.compile(r"mcp__[a-zA-Z0-9_]{1,100}__agir")
+KERNEL_BLOCK = re.compile(r"### `(mcp__[a-zA-Z0-9_]+__agir)`(?: \(`[^\n`]+`\))?\n")
+CODE_MODE_SECTION = re.compile(r"(?m)(?=^#{1,3} )")
+NATIVE_SECTION = re.compile(r"### `([a-z_]+)`\n")
+
+
+def kernel_tool(tool: Json, ready: set[str]) -> bool:
+    name = tool.get("name")
+    if tool.get("type") != "namespace" or not isinstance(name, str):
+        return False
+    if re.sub(r"[^A-Za-z0-9_]", "_", name) + "__agir" not in ready:
+        return False
+    entries = tool.get("tools")
+    if not isinstance(entries, list):
+        return False
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("name") == "agir":
+            parameters = entry.get("parameters")
+            if isinstance(parameters, dict):
+                properties = parameters.get("properties")
+                code = properties.get("code") if isinstance(properties, dict) else None
+                if isinstance(code, dict) and code.get("type") == "string":
+                    return True
+    return False
+
+
+def code_mode_sections(tool: Json) -> list[str]:
+    description = tool.get("description")
+    if (tool.get("type"), tool.get("name")) != ("custom", "exec") or not isinstance(description, str):
+        return []
+    if not description.startswith("Run JavaScript code to orchestrate/compose tool calls") or "ALL_TOOLS" not in description:
+        return []
+    return CODE_MODE_SECTION.split(description)
+
+
+def kernel_nested(sections: list[str], ready: set[str]) -> bool:
+    for section in sections:
+        match = KERNEL_BLOCK.match(section)
+        if match and match[1] in ready and f"declare const tools: {{ {match[1]}(args:" in section:
+            return True
+    return False
+
+
+def tool_lists(body: Json) -> list[tuple[Json, list[Json]]]:
+    owners = [body]
+    items = body.get("input")
+    if isinstance(items, list):
+        owners.extend(item for item in items if isinstance(item, dict)
+                      and (item.get("type"), item.get("role")) == ("additional_tools", "developer"))
+    lists: list[tuple[Json, list[Json]]] = []
+    for owner in owners:
+        tools = owner.get("tools")
+        if not isinstance(tools, list) or not all(isinstance(tool, dict) for tool in tools):
+            continue
+        lists.append((owner, tools))
+        for tool in tools:
+            if (tool.get("type"), tool.get("name")) != ("namespace", "functions"):
+                continue
+            members = tool.get("tools")
+            if isinstance(members, list) and all(isinstance(member, dict) for member in members):
+                lists.append((tool, members))
+    return lists
+
+
+def kernel_context(body: Json, ready: set[str]) -> bool:
+    if body.get("tool_choice", "auto") not in ("auto", "required", "none"):
+        return False
+    lists = tool_lists(body)
+    visible = any(kernel_tool(tool, ready) or kernel_nested(code_mode_sections(tool), ready)
+                  for _, tools in lists for tool in tools)
+    deferred = None if visible else min(ready)
+    if deferred and not any(code_mode_sections(tool) for _, tools in lists for tool in tools):
+        return False
+    changed = False
+    emptied: set[int] = set()
+    for owner, tools in reversed(lists):
+        filtered: list[Json] = []
+        for tool in tools:
+            if id(tool) in emptied:
+                continue
+            name = tool.get("name")
+            if isinstance(name, str) and name in KERNEL_REPLACED and tool.get("type") in ("function", "custom"):
+                continue
+            parts = code_mode_sections(tool)
+            if parts:
+                kept = []
+                for part in parts:
+                    match = NATIVE_SECTION.match(part)
+                    if not (match and match[1] in KERNEL_REPLACED and f"declare const tools: {{ {match[1]}(" in part):
+                        kept.append(part)
+                description = "".join(kept).replace(
+                    "for example `await tools.exec_command(...)`", "with a tool name from its declaration"
+                )
+                if deferred:
+                    description = (f"Use `tools.{deferred}` for shell commands and local file work. "
+                                   "Find its signature with ALL_TOOLS.\n\n" + description)
+                if description != tool["description"]:
+                    tool = {**tool, "description": description}
+            filtered.append(tool)
+        if filtered != tools:
+            owner["tools"] = filtered
+            if not filtered:
+                emptied.add(id(owner))
+            changed = True
+    items = body.get("input")
+    if emptied and isinstance(items, list):
+        body["input"] = [item for item in items if id(item) not in emptied]
+    return changed
+
 class Relay:
     def __init__(self, upstream: str, policy: Callable[[Json], Json | None], counted: Callable[[Json], object],
                  session_id: str, off: tuple[str, ...] = (), ttl: int = 1800, prewarm: bool = False,
-                 capture: Path | None = None) -> None:
+                 capture: Path | None = None, pinned: bool = False,
+                 kernel_access: Callable[[], bool] | None = None) -> None:
         self.upstream = upstream.rstrip("/")
         parsed = urlsplit(self.upstream)
         if upstream != "auto" and (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password):
             raise ValueError("Invalid upstream")
         self.policy, self.counted, self.session_id, self.off = policy, counted, session_id, off
-        self.ttl, self.prewarm = ttl, prewarm
+        self.ttl, self.prewarm, self.pinned = ttl, prewarm, pinned
         self.session = Session()
         self.main_key: object = None
         self.ping_lock = threading.Lock()
         self.plan_lock = threading.Lock()
         self.plan_loaded = False
+        self.kernel_access = kernel_access
+        self.kernel_enabled = False
+        self.kernel_lock = threading.Lock()
+        self.ready_kernels: dict[str, int] = {}
         self.instruction: str | None = None
         self.execution_instruction: str | None = None
         self.output_policy: OutputPolicy | None = None
@@ -352,6 +539,7 @@ class Relay:
             except OSError:
                 LOG.warning("Diagnostic capture unavailable")
         self.server = BoundedServer(("127.0.0.1", 0), self.handler())
+        self.server.connections = IdleConnections()
         self.server.daemon_threads = True
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -362,6 +550,7 @@ class Relay:
 
     def close(self) -> None:
         self.session.begin()
+        self.server.connections.close()
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=3)
@@ -378,19 +567,26 @@ class Relay:
         cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
         return cls(parsed.hostname or "", parsed.port, timeout=timeout)
 
-    def prepare(self, data: bytes) -> bytes:
+    def prepare(self, data: bytes, *, kernel_only: bool = False) -> bytes:
         try:
             body = json.loads(data)
             if not isinstance(body, dict) or not isinstance(body.get("model"), str):
                 return data
             with self.plan_lock:
                 if not self.plan_loaded:
+                    capabilities = ["prefix_replay", "thinking_instruction", "tool_output",
+                                    "grouped_subagents", "execution_instruction"]
+                    if self.kernel_access:
+                        capabilities.append("kernel_tool")
                     plan = self.policy({"engine": "codex", "session_id": self.session_id, "model": body["model"],
-                                        "event": "launch", "capabilities": ["prefix_replay", "thinking_instruction",
-                                        "tool_output", "grouped_subagents", "execution_instruction"], "off": list(self.off),
+                                        "event": "launch", "capabilities": capabilities, "off": list(self.off),
                                         "context_tokens": 0, "idle_s": 0, "pings": 0})
                     self.plan_loaded = True
                     if plan:
+                        levers = plan.get("levers")
+                        kernel = levers.get("kernel") if isinstance(levers, dict) else None
+                        self.kernel_enabled = ("kernel" not in self.off and isinstance(kernel, dict)
+                                               and kernel.get("state") == "enabled")
                         instruction = plan.get("thinking_instruction")
                         if "thinking" not in self.off and isinstance(instruction, str) and 0 < len(instruction) <= 4096:
                             self.instruction = instruction
@@ -404,9 +600,16 @@ class Relay:
                         if "fanout" not in self.off and isinstance(wait, int) and not isinstance(wait, bool) and 0 < wait <= 3000:
                             self.fanout_ms = wait
             changed = False
+            if self.kernel_enabled and self.kernel_access:
+                with self.kernel_lock:
+                    ready = set(self.ready_kernels)
+                if ready and self.kernel_access():
+                    changed = kernel_context(body, ready)
+            if kernel_only:
+                return json.dumps(body).encode() if changed else data
             instructions = [value for value in (self.instruction, self.execution_instruction) if value]
             if instructions:
-                changed = thinking(body, "\n\n".join(instructions))
+                changed |= thinking(body, "\n\n".join(instructions))
             if self.output_policy:
                 short = shorten_request(body, self.output_policy)
                 changed |= short is not body
@@ -450,6 +653,35 @@ class Relay:
             def do_POST(self) -> None:
                 self.forward()
 
+            def kernel_socket(self, name: str) -> None:
+                if not KERNEL_NAME.fullmatch(name):
+                    self.send_error(400)
+                    return
+                with relay.kernel_lock:
+                    accepted = sum(relay.ready_kernels.values()) < 4
+                    if accepted:
+                        relay.ready_kernels[name] = relay.ready_kernels.get(name, 0) + 1
+                if not accepted:
+                    self.send_error(429)
+                    return
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    # A live MCP catalogue holds this TCP connection until
+                    # it stops offering agir or its native child exits.
+                    self.connection.settimeout(None)
+                    self.rfile.read(1)
+                except OSError as error:
+                    LOG.debug("Codex MCP catalogue connection closed (%s)", type(error).__name__)
+                finally:
+                    with relay.kernel_lock:
+                        count = relay.ready_kernels[name] - 1
+                        if count:
+                            relay.ready_kernels[name] = count
+                        else:
+                            del relay.ready_kernels[name]
+
             def forward(self) -> None:
                 self.close_connection = True
                 prefix = "/" + relay.token + "/"
@@ -457,6 +689,9 @@ class Relay:
                     self.send_error(403)
                     return
                 target = "/" + self.path[len(prefix):]
+                if self.command == "GET" and target.startswith(KERNEL_SOCKET_PATH) and relay.kernel_access:
+                    self.kernel_socket(target.removeprefix(KERNEL_SOCKET_PATH))
+                    return
                 if target.split("?", 1)[0] not in ("/responses", "/models", "/responses/compact"):
                     self.send_error(404)
                     return
@@ -481,7 +716,10 @@ class Relay:
                 data = b"" if oversized else self.rfile.read(length)
                 if not oversized and len(data) != length:
                     return
-                real_request = self.command == "POST" and target.split("?", 1)[0] == "/responses"
+                route = target.split("?", 1)[0]
+                real_request = self.command == "POST" and route == "/responses"
+                if self.command == "POST" and route == "/responses/compact" and not oversized:
+                    data = relay.prepare(data, kernel_only=True)
                 if oversized and real_request:
                     relay.session.begin()
                     real_request = False
@@ -511,7 +749,9 @@ class Relay:
                 destination = relay.upstream_for(headers)
                 parsed = urlsplit(destination)
                 path = parsed.path.rstrip("/") + target
-                upstream = relay.connection(destination)
+                identity = connection_key(destination, headers)
+                upstream = relay.server.connections.take(identity) or relay.connection(destination)
+                reusable = False
                 events = Events()
                 try:
                     if oversized:
@@ -552,13 +792,17 @@ class Relay:
                             events.feed(chunk)
                     if is_response and response.status == 200 and events.completed:
                         relay.rest(generation, data, headers, events.completed)
+                    reusable = 200 <= response.status < 300 and not response.will_close and response.length in (0, None)
                 except (OSError, http.client.HTTPException):
                     LOG.warning("Upstream transport interrupted")
                 finally:
                     if captured:
                         captured.close()
                     release()
-                    upstream.close()
+                    if reusable:
+                        relay.server.connections.put(identity, upstream)
+                    else:
+                        upstream.close()
 
         return Handler
 
@@ -631,7 +875,8 @@ class Relay:
                 # Count even if real work returned during the network request.
                 self.counted({"session_id": self.session_id, "step_id": "warm-%s-%d-%d" %
                               (self.session_id, generation, pings), "model": snapshot.body["model"],
-                              "subagent": False, "ping": True, **usage(events.completed)})
+                              "engine": "codex", "subagent": False, "ping": True, "pinned": self.pinned,
+                              **usage(events.completed)})
                 pings += 1
                 refreshed = time.time()
             except (OSError, ValueError, http.client.HTTPException):
@@ -640,6 +885,34 @@ class Relay:
             finally:
                 connection.close()
                 self.ping_lock.release()
+
+
+def hosted_kernel_access(env: dict[str, str]) -> Callable[[], bool] | None:
+    bridge = env.get("OPEN_CODEX_BRIDGE")
+    pane = env.get("OPEN_CODEX_PANE")
+    if not bridge or not pane:
+        return None
+
+    def allowed() -> bool:
+        # The same live ACP permission that the host verifies on every call
+        # to the managed MCP. The launch preference alone is insufficient.
+        try:
+            info = json.loads(Path(bridge).read_bytes())
+            url = urlsplit(info["url"])
+            if (url.scheme, url.hostname, url.path) != ("http", "127.0.0.1", "/hook") or url.port is None:
+                return False
+            conn = http.client.HTTPConnection("127.0.0.1", url.port, timeout=1)
+            try:
+                body = json.dumps({"event": "CodexToolAccess", "pane": pane, "token": info["token"]})
+                conn.request("POST", "/hook", body, {"Content-Type": "application/json"})
+                response = conn.getresponse()
+                return response.status == 200 and json.loads(response.read(256)).get("ok") is True
+            finally:
+                conn.close()
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, http.client.HTTPException):
+            return False
+
+    return allowed
 
 
 def configured(args: list[str], env: dict[str, str]) -> str | None:
@@ -670,7 +943,7 @@ def configured(args: list[str], env: dict[str, str]) -> str | None:
     return env.get("TOKFIT_UPSTREAM", "auto")
 
 
-def run(binary: str, args: list[str], env: dict[str, str]) -> int:
+def run(binary: str, args: list[str], env: dict[str, str], *, pinned: bool = False) -> int:
     """Supervise the CLI and its in-memory relay in one process lifetime."""
     policy_url, token = env.get("ECONOMISEUR_RELAY_URL", ""), env.get("ECONOMISEUR_RELAY_TOKEN", "")  # publish: keep
     upstream = configured(args, env) if policy_url and token and relay_address(policy_url) else None
@@ -689,12 +962,15 @@ def run(binary: str, args: list[str], env: dict[str, str]) -> int:
                 relay = Relay(upstream,
                               lambda facts: post(policy_url.rstrip("/") + "/v1/optimizations", token, facts),
                               lambda step: post(policy_url.rstrip("/") + "/v1/usage", token, {"steps": [step]}),
-                              session, off, capture=capture)
+                              session, off, capture=capture, pinned=pinned,
+                              kernel_access=hosted_kernel_access(env))
         except (OSError, ValueError):
             LOG.warning("Local optimization transport unavailable")
     actual = ["-c", "openai_base_url=" + json.dumps(relay.url), *args] if relay else args
     if relay and plan and "execution_instruction" in plan and "persistence" not in off:
         actual = completion_hook_args(actual, Path(__file__).with_name("completion.py"))
+    if relay and relay.kernel_access:
+        env = {**env, KERNEL_SOCKET_ENV: relay.url + KERNEL_SOCKET_PATH}
     try:
         return run_child(binary, actual, env, output_mode=codex_output_mode(args))
     finally:

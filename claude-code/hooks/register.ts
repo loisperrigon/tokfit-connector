@@ -284,6 +284,8 @@ type State = {
   lean: boolean
   // Sections du prompt système passées dans le contexte du premier message (prefix.ts).
   prefix: Prefix
+  prefixApplied?: boolean
+  persistenceApplied?: boolean
   // Fichiers relus après une compaction du connecteur (rereads.ts).
   rereads: Rereads
   // Message du plan de session absent, déjà montré ou non (state.ts).
@@ -478,6 +480,8 @@ function leverFacts(s: State, step: TurnStepInput, before: StepFacts): StepFacts
   const reread = main ? stepped(s.rereads) : undefined
   const tried = main ? s.compactTry : undefined
   if (main) s.compactTry = undefined
+  const prefixApplied = main && s.prefixApplied
+  if (main) s.prefixApplied = false
   return {
     ...before, ...(trimmed ? { trimmed_chars: trimmed } : {}), ...(compactedFrom !== undefined ? { compacted_from: compactedFrom } : {}),
     ...(tried !== undefined ? { compact_try: tried } : {}),
@@ -486,6 +490,8 @@ function leverFacts(s: State, step: TurnStepInput, before: StepFacts): StepFacts
     // Modèle fixé par l'utilisateur, pour ce message et les sous-agents qu'il lance : hors mesure.
     // Une session témoin (routage coupé par le tirage du service) ne l'est pas.
     ...(s.cut || s.tags.model !== undefined ? { pinned: true as const } : {}),
+    ...(prefixApplied ? { prefix_applied: true as const } : {}),
+    ...(main && s.persistenceApplied ? { persistence_applied: true as const } : {}),
     ...kernelFacts(s.kernel, step.agentId),
   }
 }
@@ -502,7 +508,7 @@ async function counted($: EngineInterface, s: State, step: TurnStepInput, result
   if (step.agentId !== undefined) {
     s.loops.set(step.agentId, { turnId: result.turnId, at, tokens, model: usage.model })
   } else {
-    s.warm.main = { model: usage.model, effort: step.effort }
+    s.warm.main = { model: usage.model, effort: step.effort, pinned: levers.pinned === true }
     if (MODELS.includes(name)) {
       s.lastCall.set(name, { at, tokens })
       s.compacted = false
@@ -1068,6 +1074,7 @@ export const register: Register = (on, options) => {
   // client relié au service seulement.
   on('prompt.compose', async ($, e, next) => {
     const result = await next(e)
+    s.persistenceApplied = false
     try {
       const to = await link($, s.options)
       if (!to) return result
@@ -1076,9 +1083,10 @@ export const register: Register = (on, options) => {
       const kernelPlan = !off.has('kernel') && plan.kernel && (await kernelReady($, s.kernel)) ? plan.kernel : undefined
       if (kernelPlan) composedCut(s.kernel, result.sections, kernelPlan)
       const sections = kernelPlan ? composed(result.sections, kernelPlan) : result.sections
+      s.persistenceApplied = plan.persistence !== undefined && !off.has('persistence')
       return { sections: [...sections,
         ...(plan.thinking !== undefined && !off.has('thinking') ? [section('thinking', plan.thinking)] : []),
-        ...(plan.persistence !== undefined && !off.has('persistence') ? [section('execution', plan.persistence)] : []),
+        ...(s.persistenceApplied && plan.persistence !== undefined ? [section('execution', plan.persistence)] : []),
         ...(plan.feedback !== undefined ? [section('feedback', plan.feedback)] : [])] }
     } catch {
       // Configuration illisible : prompt inchangé.
@@ -1226,6 +1234,7 @@ export const register: Register = (on, options) => {
       if (!plan) return result
       const own = await carried($, s.prefix, plan.context)
       if (own.length === 0) return result
+      s.prefixApplied = true
       return { ...result, blocks: [...result.blocks.filter(block => !own.some(found => found.name === block.name)), ...own] }
     } catch {
       return result

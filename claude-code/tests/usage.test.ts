@@ -35,6 +35,7 @@ describe('remontée par lots', () => {
       step_id: expect.stringMatching(/^[a-f0-9]{32}$/), session_id: SESSION, model: 'claude-sonnet-5-5', effort: 'low',
       input: 10, cache_read: 50_000, cache_write: 2_000, output: 800, quota_percent: 40,
       reference_model: 'claude-opus-5-5',
+      engine: 'claude',
     })
     expect(new Set(steps.map(s => s.step_id)).size).toBe(3)
   })

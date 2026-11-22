@@ -1,13 +1,13 @@
 {
   "files": {
-    "launcher.py": "2ef32a5573239d725b573c92052cf3052528a748e11b1e43e753e33a40db8bbe",
-    "tokfit-codex/hooks/completion.py": "f3553dcf056e16720deadd6e54667b1351e947541ef095eab89a0824813d3c41",
+    "launcher.py": "84dc07be8e0d8200909870831dbc6c0290d7c170e1186ab8eb16d479e8883772",
+    "tokfit-codex/hooks/completion.py": "28c86ac7ecd1c5214b13230c86517865fb0c7cd826c1d2feb754b26cbf495e4d",
     "tokfit-codex/kernel/__init__.py": "f90acf592fdb362fbce04e27b06e3cabd25c7e62bcd70a5a07f1aab40047f8dd",
     "tokfit-codex/kernel/autoupdate.py": "e9b1a7ceb4597c9bdf072aac5be4eb420952d6025e3f00ad30b67cbed2b7d0bf",
     "tokfit-codex/kernel/cellule.py": "4fc8c2bad355d59ba8bb9d3015540bcca1dad7073476a79126d84b7f88d6fcdc",
     "tokfit-codex/kernel/compte.py": "6f27fcf7c701f28175913fcc9708218992a21f951e69899f4bd169e770864e2e",
     "tokfit-codex/kernel/kernel.py": "4141d535aa4395bf9d33dece1e901abf356d43b06e22be85b73dd00aa091456e",
-    "tokfit-codex/kernel/output.py": "defbd749e1d16ba46f10754e9e09e400fe2ed503d08dfec547b84fc23c0e2cbe",
+    "tokfit-codex/kernel/output.py": "379b5967cf646faf0aff4312955cb7868487176a2d9739afba1e51839d442a58",
     "tokfit-codex/kernel/pack.py": "3cda981bc6227036e843f7e1db44194ac7a2d6f85de0bc8775bc5c28cbd50a13",
     "tokfit-codex/kernel/projet.py": "f478647506d37a38118e461f61c97abaa7705a48707d6e14810c972e3952fe85",
     "tokfit-codex/kernel/server.py": "0943ebafea9d8519e3c912c527a403150846ffedc7222d9f219e122b611a3b8f",
@@ -15,11 +15,11 @@
     "tokfit-codex/kernel/worker.py": "6c03fdd010efca98f71d863af49488730e77f2247fc81c354c92c0cda5d3ec37",
     "tokfit-codex/register_mcp.py": "93fdae7ac2d79b5992327ef04ae0573698862ce494177a25822e33fbb4ee8a52",
     "tokfit-codex/runtime/__init__.py": "d11f0914055826ac8ccbd4dacac925a16ffb64d0ad4e00586fac21ea296783cc",
-    "tokfit-codex/runtime/completion.py": "f3553dcf056e16720deadd6e54667b1351e947541ef095eab89a0824813d3c41",
+    "tokfit-codex/runtime/completion.py": "28c86ac7ecd1c5214b13230c86517865fb0c7cd826c1d2feb754b26cbf495e4d",
     "tokfit-codex/runtime/cursor.py": "fa9c398592284b552ee2ba477680f31fadbb78bbae90e09e36c6dcbee0eec1c0",
     "tokfit-codex/runtime/output.py": "20640161fe87e3ce3fe9766687ebbb6dd2fc93ab97dd7b17371e1e9031631542",
     "tokfit-codex/runtime/process.py": "37a0c6b083d985e5e8871143192ba4cd5722764cd1b6cf72922de0c8f3f788ec",
-    "tokfit-codex/runtime/relay.py": "f4c2bd16ac1698cc6b9c6f28bf67d066ed6823d7c6b56759be08f008b1c83799"
+    "tokfit-codex/runtime/relay.py": "ca335982bad2e127259dfe09ce5f9c3cf3698a56ce0befb93337a573e9b04ab4"
   },
-  "version": "0.7.37"
+  "version": "0.7.40"
 }

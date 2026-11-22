@@ -112,21 +112,25 @@ def ligne_de(texte: str, position: int) -> int:
 
 
 def erreurs_du_milieu(texte: str, debut: int, fin: int, place: int) -> Tuple[List[str], int]:
-    """Lignes d'erreur (ERREUR) entièrement comprises entre `debut` et `fin`, dans l'ordre, tant qu'elles tiennent
+    """Lignes d'erreur distinctes (ERREUR) entièrement comprises entre `debut` et `fin`, dans l'ordre, qui tiennent
     dans `place` caractères ; et la position où finit la dernière gardée (`debut` sans ligne gardée)."""
     gardees: List[str] = []
+    vues = set()
     taille = 0
     position = 0
     apres = debut
     for ligne in texte.splitlines(True):
         commence, position = position, position + len(ligne)
-        if commence < debut or position > fin or not ERREUR.search(ligne):
-            continue
-        ligne = ligne if ligne.endswith("\n") else ligne + "\n"
-        if taille + len(ligne) > place:
+        if position > fin or taille == place:
             break
-        gardees.append(ligne)
-        taille += len(ligne)
+        if commence < debut or ligne in vues or len(ligne) > place - taille or not ERREUR.search(ligne):
+            continue
+        affichee = ligne if ligne.endswith("\n") else ligne + "\n"
+        if taille + len(affichee) > place:
+            continue
+        vues.add(ligne)
+        gardees.append(affichee)
+        taille += len(affichee)
         apres = position
     return gardees, apres
 
@@ -137,7 +141,7 @@ def tronque(texte: str, maximum: int = MAX_SORTIE, indice: str = "", premiere_li
     égales. Les numéros de ligne de la marque partent de `premiere_ligne` (morceau d'une sortie plus longue)."""
     if len(texte) <= maximum:
         return texte
-    indice_erreurs = f"{indice}; error lines kept"
+    indice_erreurs = f"{indice}; distinct error lines kept"
     decalage = premiere_ligne - 1
     pire = (texte.count("\n") + premiere_ligne,) * 2  # numéros de ligne les plus longs : place de la marque au plus juste
     place = max(maximum - len(marqueur(len(texte), indice_erreurs, pire)) - len(FIN_ERREURS), 2)

@@ -49,7 +49,7 @@ describe('fork-ping', () => {
     const pings = steps.filter(s => s.ping === true)
     expect(pings).toHaveLength(1)
     expect(pings[0]).toEqual({ step_id: expect.any(String), session_id: SESSION, model: 'claude-sonnet-5-5', effort: 'low',
-      input: 4, cache_read: 52_000, cache_write: 300, output: 2, ping: true })
+      input: 4, cache_read: 52_000, cache_write: 300, output: 2, ping: true, engine: 'claude' })
   })
 
   // Un fork part au niveau de la session (vu en vrai : fil routé en high,

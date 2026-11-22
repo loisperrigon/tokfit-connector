@@ -35,6 +35,25 @@ describe('clé anonyme', () => {
     expect(w.written).toEqual([])
   })
 
+  test('le domaine officiel garde la clé anonyme de son ancienne adresse', async ($, on) => {
+    const url = 'https://api.tokfit.fr'
+    const w = world(on, { config: JSON.stringify({ url }), messages: [user('x')],
+      store: { [STORE_ENTRY]: { url: 'https://tokfit.dodoia.re', key: ANONYMOUS_KEY } } })
+    await step($, 0)
+    expect(w.anonymousCalls()).toEqual([])
+    expect(w.routes()[0]).toMatchObject({ url: `${url}/v1/route`, headers: { authorization: `Bearer ${ANONYMOUS_KEY}` } })
+    expect(w.written).toEqual([])
+  })
+
+  test('la clé de l’ancien domaine ne part pas vers une adresse personnalisée', async ($, on) => {
+    const oldKey = 'ek_' + 'o'.repeat(43)
+    const w = world(on, { config: JSON.stringify({ url: 'https://api.tokfit.fr/custom' }), messages: [user('x')],
+      store: { [STORE_ENTRY]: { url: 'https://tokfit.dodoia.re', key: oldKey } } })
+    await step($, 0)
+    expect(w.anonymousCalls()).toHaveLength(1)
+    expect(JSON.stringify(w.sent)).not.toContain(oldKey)
+  })
+
   test('clé rangée pour un autre service : jamais envoyée ici, une clé est demandée', async ($, on) => {
     const other = 'ek_' + 'o'.repeat(43)
     const w = world(on, { config: ADDRESS_ONLY, messages: [user('x')], store: { [STORE_ENTRY]: { url: 'https://autre.test', key: other } } })

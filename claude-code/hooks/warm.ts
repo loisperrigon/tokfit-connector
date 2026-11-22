@@ -24,7 +24,7 @@ const IDLE_COMPACT_SINCE: readonly number[] = [2, 1, 299]
 const IDLE_COMPACT_TOKENS = 200_000
 
 // Réglage de la dernière étape du fil principal : celui que la relance reprend.
-export type MainSetting = { model: string; effort: unknown }
+export type MainSetting = { model: string; effort: unknown; pinned?: boolean }
 
 export type Warm = {
   // Change à chaque pas du fil principal : une chaîne plus ancienne s'arrête.
@@ -130,7 +130,7 @@ async function counted($: EngineInterface, w: Warm, q: Queue, usage: ModelUsage,
   const main = w.main
   if (!main) return
   const step = await stepOf(await $.session.id(), 'ping', `ping-${w.restedAt}`, w.pings, sent ?? main.effort,
-    { ...usage, model: main.model }, [], { subagent: false, idleS: undefined, ping: true })
+    { ...usage, model: main.model }, [], { subagent: false, idleS: undefined, ping: true }, main.pinned ? { pinned: true } : {})
   add(q, step)
 }
 

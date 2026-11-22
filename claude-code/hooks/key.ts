@@ -59,7 +59,9 @@ async function kept($: EngineInterface, url: string): Promise<string | null> {
     const entry = await $.store.get(STORE_ENTRY)
     if (typeof entry !== 'object' || entry === null) return null
     const { url: from, key } = entry as { url?: unknown; key?: unknown }
-    return from === url && typeof key === 'string' && KEY.test(key) ? key : null
+    // Les deux domaines officiels servent le même compte. Garder l'entrée d'origine pour les anciennes versions.
+    const migrated = from === 'https://tokfit.dodoia.re' && url === 'https://api.tokfit.fr'
+    return (from === url || migrated) && typeof key === 'string' && KEY.test(key) ? key : null
   } catch {
     // Magasin illisible : comme vide, une clé sera demandée.
     return null

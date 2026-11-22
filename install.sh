@@ -194,6 +194,13 @@ install_claude() {
   printf '%s : connecteur installé dans Claude Code, disponible à la prochaine session.\n' "$NAME"
 }
 
+codex_path_hint() {
+  case ":$PATH:" in
+    *":$bin:"*) ;;
+    *) printf '%s : ajoute %s à ton PATH pour taper « %s codex ».\n' "$NAME" "$bin" "$NAME" ;;
+  esac
+}
+
 install_codex() {
   mkdir -p -- "$bin"
   umask 022
@@ -205,6 +212,7 @@ install_codex() {
       fetch codex/native_bootstrap.py "$stage/bootstrap.py"
       python3 -I "$stage/bootstrap.py" --install "$bin" "https://github.com/$REPO.git"
       printf '%s : installé dans Codex. Les mises à jour passent par la marketplace tokfit-distribution.\n' "$NAME"
+      codex_path_hint
       return
     fi
     printf '%s : ce Codex utilise une copie fixe. Relance cette installation pour la mettre à jour.\n' "$NAME"
@@ -261,10 +269,7 @@ INSTALL_PACKAGE
   "$bin/$NAME" _agent || printf '%s : agent d’exécution non installé.\n' "$NAME"
   python3 -I "$bin/tokfit-codex/register_mcp.py" "$(cd -- "$bin" && pwd)/$NAME" ||
     fail "le lanceur est installé, mais Codex n’a pas enregistré les outils ; relance l’installation après avoir corrigé le problème indiqué."
-  case ":$PATH:" in
-    *":$bin:"*) ;;
-    *) printf '%s : ajoute %s à ton PATH pour taper « %s codex ».\n' "$NAME" "$bin" "$NAME" ;;
-  esac
+  codex_path_hint
 }
 # Une installation qui échoue garde son statut et ses nettoyages, et les autres
 # clients sont essayés. Le sous-shell n'est pas une condition (set -e y agit).
