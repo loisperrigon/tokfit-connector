@@ -1,0 +1,25 @@
+name: Validation Claude Code 0.7.45
+on:
+  push:
+    branches: [validation/claude-0.7.45]
+permissions:
+  contents: read
+jobs:
+  install-and-run:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: npm install -g @anthropic-ai/claude-code@2.1.330
+      - run: claude plugin validate --strict claude-code
+      - run: python validation/claude-install.py
