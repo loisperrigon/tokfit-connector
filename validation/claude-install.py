@@ -22,13 +22,13 @@ POWERSHELL = (
 
 
 class FakeTokfit(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:
-        kernel = {"bootstrap": "", "modules": {}, "catalogue": [], "description": "Fixture", "finished": "Finished"}
-        self.reply({"version": "fixture", "kernel": kernel})
-
     def do_POST(self) -> None:
-        self.rfile.read(int(self.headers.get("content-length", "0")))
-        self.reply({})
+        body = json.loads(self.rfile.read(int(self.headers.get("content-length", "0"))))
+        if self.path == "/v1/content" and body == {"parts": ["kernel"]}:
+            kernel = {"bootstrap": "", "modules": {}, "catalogue": [], "description": "Fixture", "finished": "Finished"}
+            self.reply({"version": "fixture", "kernel": kernel})
+        else:
+            self.reply({})
 
     def reply(self, body: dict[str, object]) -> None:
         data = json.dumps(body).encode()
