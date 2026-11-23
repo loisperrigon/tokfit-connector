@@ -57,7 +57,20 @@ export function localBridge(value: string): boolean {
 }
 
 // Issue d'une décision postée sur le pont de l'application ; jamais bloquant, jamais levé.
-export async function report($: EngineInterface, seen: Seen, route: RouteReport): Promise<void> {
+export function report($: EngineInterface, seen: Seen, route: RouteReport): Promise<void> {
+  return bridgeReport($, seen, { event: 'RouteStatus', route })
+}
+
+export async function reportLoaded($: EngineInterface, seen: Seen): Promise<void> {
+  if (!await host($, seen)) {
+    $.ui.status('tokfit')
+    return
+  }
+  const run = await $.env.get('OPEN_CODEX_TOKFIT_RUN').catch(() => undefined)
+  if (run) await bridgeReport($, seen, { event: 'TokfitStatus', tokfit: { run, reason: 'claude_loaded' } })
+}
+
+async function bridgeReport($: EngineInterface, seen: Seen, payload: object): Promise<void> {
   try {
     const at = await host($, seen)
     if (!at) return
@@ -66,7 +79,7 @@ export async function report($: EngineInterface, seen: Seen, route: RouteReport)
     await $.http.fetch(bridge.url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token: bridge.token, pane: at.pane, event: 'RouteStatus', route }),
+      body: JSON.stringify({ token: bridge.token, pane: at.pane, ...payload }),
     })
   } catch {
     // Application fermée ou relancée : le voyant reprendra au prochain message.

@@ -31,7 +31,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from runtime.output import OutputPolicy, shorten_request
-from runtime.process import codex_output_mode, run_child
+from runtime.process import codex_output_mode, report_tokfit, run_child
 from runtime.completion import NoRedirect, levers_off, relay_address, hook_args as completion_hook_args
 
 Json = dict[str, object]
@@ -567,6 +567,16 @@ class Relay:
         cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
         return cls(parsed.hostname or "", parsed.port, timeout=timeout)
 
+    def available_kernels(self) -> set[str]:
+        if not self.kernel_enabled or not self.kernel_access:
+            return set()
+        with self.kernel_lock:
+            registered = bool(self.ready_kernels)
+        if not registered or not self.kernel_access():
+            return set()
+        with self.kernel_lock:
+            return set(self.ready_kernels)
+
     def prepare(self, data: bytes, *, kernel_only: bool = False) -> bytes:
         try:
             body = json.loads(data)
@@ -599,12 +609,8 @@ class Relay:
                         wait = plan.get("fanout_wait_ms")
                         if "fanout" not in self.off and isinstance(wait, int) and not isinstance(wait, bool) and 0 < wait <= 3000:
                             self.fanout_ms = wait
-            changed = False
-            if self.kernel_enabled and self.kernel_access:
-                with self.kernel_lock:
-                    ready = set(self.ready_kernels)
-                if ready and self.kernel_access():
-                    changed = kernel_context(body, ready)
+            ready = self.available_kernels()
+            changed = bool(ready) and kernel_context(body, ready)
             if kernel_only:
                 return json.dumps(body).encode() if changed else data
             instructions = [value for value in (self.instruction, self.execution_instruction) if value]
@@ -690,7 +696,14 @@ class Relay:
                     return
                 target = "/" + self.path[len(prefix):]
                 if self.command == "GET" and target.startswith(KERNEL_SOCKET_PATH) and relay.kernel_access:
-                    self.kernel_socket(target.removeprefix(KERNEL_SOCKET_PATH))
+                    name = target.removeprefix(KERNEL_SOCKET_PATH)
+                    if name.startswith("ready/"):
+                        candidate = name.removeprefix("ready/")
+                        self.send_response(204 if candidate in relay.available_kernels() else 404)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                    else:
+                        self.kernel_socket(name)
                     return
                 if target.split("?", 1)[0] not in ("/responses", "/models", "/responses/compact"):
                     self.send_error(404)
@@ -971,6 +984,7 @@ def run(binary: str, args: list[str], env: dict[str, str], *, pinned: bool = Fal
         actual = completion_hook_args(actual, Path(__file__).with_name("completion.py"))
     if relay and relay.kernel_access:
         env = {**env, KERNEL_SOCKET_ENV: relay.url + KERNEL_SOCKET_PATH}
+    report_tokfit(env, "codex_relay" if relay else "codex_native")
     try:
         return run_child(binary, actual, env, output_mode=codex_output_mode(args))
     finally:

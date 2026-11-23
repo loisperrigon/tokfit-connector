@@ -11,6 +11,8 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -18,9 +20,21 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from runtime.completion import levers_off, relay_address
 from runtime.relay import post
-from runtime.process import run_child
+from runtime.process import report_tokfit, run_child
 
 LOG = logging.getLogger(__name__)
+PLUGIN_DIR_OPTION = re.compile(r"^\s+(?:-\w,\s+)?--plugin-dir(?:\s|=|$)", re.MULTILINE)
+
+
+def supports_plugin_dir(binary: str, env: dict[str, str]) -> bool:
+    """Probe the actual executable before adding an option older CLIs may reject."""
+    try:
+        help_text = subprocess.run([binary, "--help"], env=env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   text=True, errors="replace", timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return help_text.returncode == 0 and PLUGIN_DIR_OPTION.search(help_text.stdout) is not None
 
 
 def write_file(path: Path, text: str) -> None:
@@ -55,7 +69,15 @@ def run(binary: str, args: list[str], env: dict[str, str]) -> int:
     actual = args
     url, token = env.get("ECONOMISEUR_RELAY_URL"), env.get("ECONOMISEUR_RELAY_TOKEN")  # publish: keep
     off = levers_off(env)
-    if url and token and relay_address(url) and "thinking" not in off:
+    reason = "cursor_native"
+    if "thinking" in off:
+        reason = "cursor_disabled"
+    elif url and token and relay_address(url):
+        if not supports_plugin_dir(binary, env):
+            report_tokfit(env, "cursor_unsupported")
+            if not env.get("OPEN_CODEX_PANE") and sys.stderr.isatty():
+                print("tokfit : option de plugin non détectée. Cursor démarre en mode natif.", file=sys.stderr)
+            return run_child(binary, args, env)
         plan = post(url.rstrip("/") + "/v1/optimizations", token, {
             "engine": "cursor", "model": "unknown", "session_id": env.get("OPEN_CODEX_PANE") or str(uuid.uuid4()),
             "event": "launch", "capabilities": ["thinking_instruction"], "off": off,
@@ -63,11 +85,14 @@ def run(binary: str, args: list[str], env: dict[str, str]) -> int:
         instruction = plan.get("thinking_instruction") if plan and plan.get("version") == 1 else None
         levers = plan.get("levers") if plan else None
         thinking = levers.get("thinking") if isinstance(levers, dict) else None
-        if isinstance(thinking, dict) and thinking.get("state") == "enabled" and isinstance(instruction, str) and 0 < len(instruction) <= 8192:
+        if (isinstance(thinking, dict) and thinking.get("state") == "enabled"
+                and isinstance(instruction, str) and 0 < len(instruction) <= 8192):
             try:
                 actual = ["--plugin-dir", str(plugin(instruction, env)), *args]
+                reason = "cursor_plugin"
             except (OSError, ValueError):
                 LOG.warning("Cursor policy plugin unavailable; keeping native configuration")
+    report_tokfit(env, reason)
     return run_child(binary, actual, env)
 
 

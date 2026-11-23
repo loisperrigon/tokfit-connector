@@ -1,12 +1,15 @@
 """One process lifetime for a native CLI, including terminal hangup."""
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import signal
 import subprocess
 import sys
+from pathlib import Path
 from typing import IO
+from urllib.parse import urlsplit
 
 
 # Full native Codex 0.171 messages. Scope the presentation change to chat
@@ -133,3 +136,33 @@ def run_child(binary: str, args: list[str], env: dict[str, str], *, output_mode:
         finally:
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
+
+
+def report_tokfit(env: dict[str, str], reason: str) -> None:
+    """Report a fixed launch outcome to Alfie's local bridge, outside ACP."""
+    bridge, pane, run = (env.get(name) for name in
+                         ("OPEN_CODEX_BRIDGE", "OPEN_CODEX_PANE", "OPEN_CODEX_TOKFIT_RUN"))
+    if not (bridge and pane and run):
+        return
+    try:
+        data = json.loads(Path(bridge).read_bytes())
+        if not isinstance(data, dict):
+            return
+        url = data.get("url")
+        token = data.get("token")
+        if not isinstance(url, str) or not isinstance(token, str) or not token:
+            return
+        address = urlsplit(url)
+        if (address.scheme, address.netloc, address.path) != (
+                "http", f"127.0.0.1:{address.port}", "/hook"):
+            return
+        conn = http.client.HTTPConnection("127.0.0.1", address.port, timeout=0.3)
+        try:
+            payload = {"event": "TokfitStatus", "pane": pane, "token": token,
+                       "tokfit": {"run": run, "reason": reason}}
+            conn.request("POST", "/hook", json.dumps(payload), {"Content-Type": "application/json"})
+            conn.getresponse().close()
+        finally:
+            conn.close()
+    except (OSError, ValueError, http.client.HTTPException):
+        return

@@ -40,7 +40,7 @@ import { chosen, holdout, levers } from './experiments'
 import type { Holdout } from './experiments'
 import { compacted, observed, rereads, stepped } from './rereads'
 import type { Rereads } from './rereads'
-import { host, report, status } from './host'
+import { host, report, reportLoaded, status } from './host'
 import type { Line, RouteReport, Seen } from './host'
 import { SYNC_MS, adopt, animate, badge, refresh, statusText } from './badge'
 import type { Gain } from './badge'
@@ -606,9 +606,18 @@ const CALL_ROWS = 64
 
 async function requested($: EngineInterface, e: AgentSpawnInput): Promise<{ model?: string; effort?: string }> {
   if (e.tool_use_id === '' || e.workflow !== undefined) return {}
-  const rows = await $.session.messages({ last: CALL_ROWS, ...(e.parentAgentId === undefined ? {} : { agentId: e.parentAgentId }) })
+  const scope = e.parentAgentId === undefined ? {} : { agentId: e.parentAgentId }
+  const bounded = { ...scope, last: CALL_ROWS }
+  let rows
+  try {
+    rows = await $.session.messages(bounded)
+  } catch (error) {
+    // Les anciens moteurs lisent cette même conversation sans l'option `last`.
+    if (!String(error).includes('(not last)')) throw error
+    rows = await $.session.messages(scope)
+  }
   if ('deny' in rows) return {}
-  for (const row of [...rows].reverse()) {
+  for (const row of rows.slice(-CALL_ROWS).reverse()) {
     const call = row.toolUses.find(use => use.tool_use_id === e.tool_use_id && use.tool === 'Agent')
     if (!call) continue
     const { model, effort } = call.input
@@ -914,6 +923,7 @@ export const register: Register = (on, options) => {
   // sessions de la machine, relus tant que la session vit.
   on('session.start', async ($, e, next) => {
     const result = await next(e)
+    void reportLoaded($, s.seen).catch(() => { /* Un affichage indisponible ne retient pas le démarrage. */ })
     startAccess($, options, sources)
     follow($, s)
     return result
@@ -1186,18 +1196,24 @@ export const register: Register = (on, options) => {
     }
   })
 
-  // Boucles dont le modèle se voit offrir `agir` (kernel.ts, `offered`) : un sous-agent dont la définition ferme
-  // la liste des outils sans lui garde ses outils intégrés. Rien n'est retiré ici : la réponse du moteur.
-  on('tool.offer', { tool: KERNEL_MATCH }, async ($, e, next) => {
+  // Le nom exact `tool.offer` empêche le chargement du module quand le moteur ignore cet événement.
+  // Le filtre de namespace est accepté sur ces versions. Sans preuve d'offre dans une boucle,
+  // le sous-agent garde ses outils intégrés, même si le noyau reste utilisable dans le fil principal.
+  on('tool.*', async ($, e, next) => {
+    if (String(next.event) !== 'tool.offer' || typeof e !== 'object' || e === null ||
+        !('tool' in e) || typeof e.tool !== 'string' || !isKernelTool(e.tool)) return next(e)
     const result = await next(e)
     try {
       await sessionOf($, s.kernel)
-      if (result.isOffered) offeredTo(s.kernel, e.agentId)
+      if (typeof result === 'object' && result !== null && 'isOffered' in result && result.isOffered === true) {
+        const agentId = 'agentId' in e && typeof e.agentId === 'string' ? e.agentId : undefined
+        offeredTo(s.kernel, agentId)
+      }
     } catch {
       // Session illisible : boucle non retenue, le levier n'y refuse rien.
     }
     return result
-  }).catch(($, e, next) => next(e))
+  })
 
   // Outil retiré que le modèle appelle quand même (chargé par ToolSearch) : refusé
   // avec la consigne de passer par `python`, dans une boucle qui a `agir`. Seul un vrai appel compte (pas une
