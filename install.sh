@@ -192,6 +192,65 @@ fetch() { # chemin dans le dépôt, destination : copie du clone, sinon téléch
 install_claude() {
   claude plugin install "$NAME" --marketplace "$market"
   printf '%s : connecteur installé dans Claude Code, disponible à la prochaine session.\n' "$NAME"
+  claude_autoupdate
+}
+
+# Python utilisable sans effet de bord : sous macOS, /usr/bin/python3 sans les outils en ligne de
+# commande n'est qu'un relais qui ouvre une fenêtre d'installation.
+have_python() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  if [ "$(uname -s)" = Darwin ] && [ "$(command -v python3)" = /usr/bin/python3 ]; then
+    xcode-select -p >/dev/null 2>&1 || return 1
+  fi
+  python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null
+}
+
+# Claude Code ne met à jour un plugin d'une marketplace tierce en arrière-plan (application de bureau
+# comprise) qu'avec FORCE_AUTOUPDATE_PLUGINS dans "env" de ses réglages. Les autres réglages restent
+# tels quels ; un fichier illisible n'est jamais réécrit : l'étape est alors expliquée.
+claude_autoupdate() {
+  settings="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+  manual="ajoute \"FORCE_AUTOUPDATE_PLUGINS\": \"1\" dans \"env\" de $settings pour que tokfit se mette à jour tout seul"
+  if [ ! -e "$settings" ]; then
+    mkdir -p -- "$(dirname -- "$settings")"
+    printf '{\n  "env": {\n    "FORCE_AUTOUPDATE_PLUGINS": "1"\n  }\n}\n' >"$settings"
+  elif ! have_python; then
+    printf '%s : %s (Python 3.9+ introuvable pour le faire à ta place).\n' "$NAME" "$manual"
+    return 0
+  elif ! python3 -I - "$settings" <<'AUTOUPDATE'
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+path = Path(sys.argv[1])
+try:
+    settings = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, ValueError) as error:
+    sys.exit(f"tokfit : réglages de Claude Code illisibles ({error}), laissés tels quels.")
+env = settings.get("env", {}) if isinstance(settings, dict) else None
+if not isinstance(env, dict):
+    sys.exit("tokfit : réglages de Claude Code inattendus (env n'est pas un objet), laissés tels quels.")
+if env.get("FORCE_AUTOUPDATE_PLUGINS") == "1":
+    sys.exit(0)
+settings["env"] = {**env, "FORCE_AUTOUPDATE_PLUGINS": "1"}
+handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=".settings.")
+try:
+    with os.fdopen(handle, "w", encoding="utf-8") as out:
+        json.dump(settings, out, indent=2, ensure_ascii=False)
+        out.write("\n")
+    os.chmod(temporary, path.stat().st_mode & 0o7777)
+    os.replace(temporary, path)
+except BaseException:
+    os.unlink(temporary)
+    raise
+AUTOUPDATE
+  then
+    printf '%s : %s.\n' "$NAME" "$manual"
+    return 0
+  fi
+  printf '%s : mises à jour automatiques du plugin activées (%s).\n' "$NAME" "$settings"
 }
 
 codex_path_hint() {
@@ -274,6 +333,7 @@ INSTALL_PACKAGE
 # Une installation qui échoue garde son statut et ses nettoyages, et les autres
 # clients sont essayés. Le sous-shell n'est pas une condition (set -e y agit).
 status=0
+installed=""
 set +e
 for client in $selected; do
   (set -e; adapter install "$client")
@@ -281,6 +341,30 @@ for client in $selected; do
   if [ "$result" -ne 0 ]; then
     printf '%s : installation %s en échec.\n' "$NAME" "$client" >&2
     status=$result
+  else
+    installed="$installed $client"
   fi
 done
+set -e
+
+# Bilan : le service est-il joignable d'ici, et que faire maintenant dans chaque outil installé.
+if [ -n "$installed" ]; then
+  if ! command -v curl >/dev/null 2>&1; then
+    printf '%s : curl introuvable, service non vérifié (%s/health).\n' "$NAME" "$url"
+  elif curl -fsS --max-time 10 -o /dev/null "$url/health" 2>/dev/null; then
+    printf '%s : service tokfit joignable (%s).\n' "$NAME" "$url"
+  else
+    printf '%s : service injoignable pour l’instant (%s/health) : tes outils marchent comme avant, tokfit reprend dès qu’il le joint.\n' "$NAME" "$url"
+  fi
+  printf '\nEnsuite :\n'
+  case "$installed" in
+    *" claude"*) printf '  - Claude Code : ouvre une nouvelle session, /tokfit affiche ton tableau de bord.\n' ;;
+  esac
+  case "$installed" in
+    *" codex"*) printf '  - Codex : ouvre une nouvelle session, l’outil agir est prêt.\n' ;;
+  esac
+  if [ ! -f "$config" ] || ! grep -q '"key"' "$config" 2>/dev/null; then
+    printf '  - Essai sans compte : /tokfit dans Claude Code, ou « tokfit compte » dans ton terminal pour Codex, rattache tes appareils à un même compte.\n'
+  fi
+fi
 exit "$status"
