@@ -22,17 +22,22 @@ POWERSHELL = (
 
 
 class FakeTokfit(BaseHTTPRequestHandler):
+    available = True
+
     def do_POST(self) -> None:
         body = json.loads(self.rfile.read(int(self.headers.get("content-length", "0"))))
+        if not self.available:
+            self.reply({}, status=503)
+            return
         if self.path == "/v1/content" and body == {"parts": ["kernel"]}:
             kernel = {"bootstrap": "", "modules": {}, "catalogue": [], "description": "Fixture", "finished": "Finished"}
             self.reply({"version": "fixture", "kernel": kernel})
         else:
             self.reply({})
 
-    def reply(self, body: dict[str, object]) -> None:
+    def reply(self, body: dict[str, object], status: int = 200) -> None:
         data = json.dumps(body).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -54,7 +59,7 @@ def service() -> Iterator[int]:
             thread.join()
 
 
-def verify_mcp(root: Path, env: dict[str, str]) -> None:
+def verify_mcp(root: Path, env: dict[str, str], available: bool = True) -> None:
     kernel = root / "kernel"
     if POWERSHELL is not None:
         command = [str(POWERSHELL), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -91,6 +96,11 @@ def verify_mcp(root: Path, env: dict[str, str]) -> None:
         try:
             call("initialize", {"protocolVersion": "2024-11-05"})
             tools = {tool["name"] for tool in call("tools/list", {})["tools"]}
+            if not available:
+                assert "agir" not in tools, tools
+                assert call("ping", {}) == {}
+                print("MCP remains responsive and omits agir when Tokfit is unavailable", flush=True)
+                return
             assert "agir" in tools, tools
             code = "marker = 'TOKFIT-NATIVE-42'\nprint(marker)"
             if WINDOWS:
@@ -143,6 +153,8 @@ def main() -> None:
         plugin = installed["plugins"][PLUGIN][0]
         assert plugin["version"] == "0.7.45", plugin["version"]
         verify_mcp(Path(plugin["installPath"]), env)
+        FakeTokfit.available = False
+        verify_mcp(Path(plugin["installPath"]), env, available=False)
         run("plugin", "disable", PLUGIN)
         run("plugin", "uninstall", PLUGIN)
         assert instructions.read_bytes() == b"Original instructions.\n"
