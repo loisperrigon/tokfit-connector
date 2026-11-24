@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "outils": {
+      "command": "python3",
+      "args": ["${PLUGIN_ROOT}/codex-runtime/launcher.py", "_mcp_antigravity"]
+    }
+  }
+}

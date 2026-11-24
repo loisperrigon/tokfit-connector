@@ -172,20 +172,29 @@ class Compteur:
         self.envoyer(delai_s)
 
 
-def schema_outil(description: str) -> Dict[str, Any]:
+def schema_outil(paquet: Paquet, antigravity: bool) -> Dict[str, Any]:
+    properties: Dict[str, Any] = {
+        "code": {"type": "string", "description": "Python code; the value of the last expression is shown."},
+        "timeout_s": {"type": "integer", "description": TIMEOUT_TEXTE, "minimum": 1, "maximum": TIMEOUT_MAX},
+    }
+    if antigravity:
+        # Older packs have the same persistent Python API but only a Claude-specific guide.
+        description = paquet.native_tools_description or (
+            "Runs Python in a persistent kernel. find_tool('keywords') lists matching helper signatures."
+        )
+    else:
+        description = paquet.description
+        properties.update({
+            AGENT: {"type": "string", "description": "Filled in by the connector: do not set it."},
+            DOSSIER: {"type": "string", "description": "Filled in by the connector: do not set it."},
+            FAITS: {"type": "object", "description": "Filled in by the connector: do not set it."},
+        })
     return {
         "name": OUTIL,
         "description": description,
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "code": {"type": "string", "description": "Python code; the value of the last expression is shown."},
-                "timeout_s": {"type": "integer", "description": TIMEOUT_TEXTE,
-                              "minimum": 1, "maximum": TIMEOUT_MAX},
-                AGENT: {"type": "string", "description": "Filled in by the connector: do not set it."},
-                DOSSIER: {"type": "string", "description": "Filled in by the connector: do not set it."},
-                FAITS: {"type": "object", "description": "Filled in by the connector: do not set it."},
-            },
+            "properties": properties,
             "required": ["code"],
         },
     }
@@ -243,7 +252,8 @@ class Poste:
 
 
 class Serveur:
-    def __init__(self, env: Dict[str, str], paquet: Optional[Paquet], vers: Optional[Lien] = None) -> None:
+    def __init__(self, env: Dict[str, str], paquet: Optional[Paquet], vers: Optional[Lien] = None,
+                 *, antigravity: bool = False) -> None:
         self.max_sortie = entier(env, "TOKFIT_KERNEL_MAX_OUTPUT", MAX_SORTIE)
         self.noyaux_max = entier(env, "TOKFIT_KERNEL_MAX_AGENTS", NOYAUX_MAX)
         self.env = env
@@ -252,10 +262,10 @@ class Serveur:
         self.refusees: set[str] = set()
         self.paquet = paquet
         self.compteur = Compteur(vers)
-        self.description = paquet.description if paquet is not None else ""
+        self.antigravity = antigravity
         self.amorce = code_amorce(paquet) if paquet is not None else None
         self.cwd = os.getcwd()
-        # Paquet, description et amorce arrivent d'un autre fil (`installer`) : lus et écrits sous `etat`.
+        # Paquet et amorce arrivent d'un autre fil (`installer`) : lus et écrits sous `etat`.
         self.etat = threading.Lock()
         # Levé quand le client a fini d'ouvrir la session : une annonce n'est jamais écrite avant.
         self.initialise = threading.Event()
@@ -327,8 +337,8 @@ class Serveur:
         """Les outils proposés maintenant : `agir` avec le paquet (sur un système où le noyau tourne, POSIX ou
         Windows), `compte` avec le lien (paquet reçu ou non)."""
         with self.etat:
-            description, amorce = self.description, self.amorce
-        outils = [schema_outil(description)] if amorce is not None and NOYAU_POSSIBLE else []
+            paquet = self.paquet
+        outils = [schema_outil(paquet, self.antigravity)] if paquet is not None and NOYAU_POSSIBLE else []
         if self.lien() is not None:
             outils.append(schema_compte())
         return outils
@@ -340,7 +350,7 @@ class Serveur:
         """Le paquet reçu après l'ouverture : `agir` est proposé dès l'appel suivant à `tools/list`."""
         amorce = code_amorce(paquet)
         with self.etat:
-            self.paquet, self.description, self.amorce = paquet, paquet.description, amorce
+            self.paquet, self.amorce = paquet, amorce
 
     def annoncer(self, sortie: "Sortie") -> None:
         """Dit au client que la liste des outils a changé, s'il a fini d'ouvrir la session (sinon son premier
@@ -388,7 +398,12 @@ class Serveur:
             paquet = self.paquet
         if params.get("name") != OUTIL or self.amorce is None or paquet is None:
             return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32602, "message": "unknown tool"}}
-        arguments = params.get("arguments") or {}
+        arguments = params.get("arguments", {})
+        if not isinstance(arguments, dict):
+            return self.texte(ident, "`arguments` must be an object", erreur=True)
+        if self.antigravity:
+            # ACP has no hook that supplies a trusted agent, working directory or routing facts.
+            arguments = {key: arguments[key] for key in ("code", "timeout_s") if key in arguments}
         code = arguments.get("code")
         if not isinstance(code, str):
             return self.texte(ident, "missing `code` argument (text)", erreur=True)
@@ -522,7 +537,7 @@ def main() -> None:
     ouverte, attente = reprise(os.environ)
     env = dict(os.environ)
     ensure_auto_update(env)
-    serveur = Serveur(env, None, lien(env))
+    serveur = Serveur(env, None, lien(env), antigravity=sys.argv[1:] == ["--antigravity"])
     if ouverte:
         serveur.initialise.set()
     sortie = Sortie()

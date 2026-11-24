@@ -233,7 +233,7 @@ def post(url: str, token: str, body: Json) -> Json | None:
         error.close()
         LOG.debug("Policy request refused (%s)", error.code)
         return None
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException, RecursionError):
         LOG.debug("Policy request failed")
         return None
 

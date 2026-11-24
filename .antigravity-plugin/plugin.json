@@ -1,0 +1,9 @@
+{
+  "author": {
+    "name": "Lois Perrigon"
+  },
+  "description": "A compact Python tool for Antigravity.",
+  "displayName": "Tokfit",
+  "name": "tokfit",
+  "version": "0.7.47"
+}

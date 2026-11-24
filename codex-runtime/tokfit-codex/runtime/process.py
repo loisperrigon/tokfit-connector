@@ -8,7 +8,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
-from typing import IO
+from typing import Callable, IO
 from urllib.parse import urlsplit
 
 
@@ -104,7 +104,9 @@ def forward_chat(source: IO[bytes], output: IO[bytes], mode: str) -> None:
         at_start = complete
 
 
-def run_child(binary: str, args: list[str], env: dict[str, str], *, output_mode: str | None = None) -> int:
+def run_child(binary: str, args: list[str], env: dict[str, str], *,
+              output_mode: str | None = None,
+              pipe: Callable[[subprocess.Popen[bytes]], None] | None = None) -> int:
     previous = {signal.SIGINT: signal.signal(signal.SIGINT, signal.SIG_IGN)}
     child: subprocess.Popen[bytes] | None = None
 
@@ -116,13 +118,17 @@ def run_child(binary: str, args: list[str], env: dict[str, str], *, output_mode:
             signum = getattr(signal, name, None)
             if signum is not None:
                 previous[signum] = signal.signal(signum, stopped)
-        child = subprocess.Popen([binary, *args], env=env, stdout=subprocess.PIPE if output_mode else None)
-        if child.stdout is not None and output_mode:
-            with child.stdout:
-                try:
+        child = subprocess.Popen([binary, *args], env=env,
+                                 stdin=subprocess.PIPE if pipe else None,
+                                 stdout=subprocess.PIPE if output_mode or pipe else None)
+        try:
+            if pipe:
+                pipe(child)
+            elif child.stdout is not None and output_mode:
+                with child.stdout:
                     forward_chat(child.stdout, sys.stdout.buffer, output_mode)
-                except BrokenPipeError:
-                    return 1  # The client has disconnected; reap the server below.
+        except BrokenPipeError:
+            return 1  # The client has disconnected; reap the server below.
         return child.wait()
     finally:
         try:

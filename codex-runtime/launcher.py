@@ -221,13 +221,15 @@ def codex_home(env: Dict[str, str]) -> Path:
     return Path(env.get("CODEX_HOME") or Path(env.get("HOME", "~")).expanduser() / ".codex")
 
 
-def link(env: Dict[str, str], ask: bool = False) -> Optional[Link]:
+def link(env: Dict[str, str], ask: bool = False, *, default_config: bool = False) -> Optional[Link]:
     """(adresse, clé) du fichier de configuration, ou la clé anonyme rangée à côté (demandée au service
     avec `ask`) ; None s'il manque ou s'il est douteux."""
-    home = env.get("HOME", "")
+    home = env.get("HOME", "") or (str(Path.home()) if default_config else "")
     path = env.get("TOKFIT_CONFIG") or (f"{home}/.config/{NAME}/config.json" if home else "")
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8")) if path else None
+    except FileNotFoundError:
+        data = {} if default_config and not env.get("TOKFIT_CONFIG") else None
     except (OSError, ValueError):
         # Fichier absent ou illisible : le lanceur reste inerte.
         return None
@@ -762,11 +764,15 @@ def run_codex(args: List[str], env: Dict[str, str], *, pinned: bool = False) -> 
         signal.signal(signal.SIGINT, previous)
 
 
-def run_mcp(env: Dict[str, str]) -> int:
+def run_mcp(env: Dict[str, str], *, antigravity: bool = False) -> int:
     """Start one isolated kernel per native MCP connection, using this installation's identity."""
+    if antigravity and env.get("OPEN_CODEX_PANE"):
+        # Alfie registers its own guarded MCP server for this conversation.
+        return 0
     server = Path(__file__).resolve().parent / "tokfit-codex" / "kernel" / "server.py"
     if not server.is_file():
-        print(f"{NAME} : noyau absent ; relance l'installation Codex.", file=sys.stderr)
+        client = "Antigravity" if antigravity else "Codex"
+        print(f"{NAME} : noyau absent ; relance l'installation {client}.", file=sys.stderr)
         return 1
     child = env.copy()
     url_var, key_var = "ECONOMISEUR_RELAY_URL", "ECONOMISEUR_RELAY_TOKEN"  # publish: keep
@@ -777,18 +783,23 @@ def run_mcp(env: Dict[str, str]) -> int:
             print(f"{NAME} : configuration du relais incomplète.", file=sys.stderr)
             return 1
     else:
-        identity = link(env, ask=True)
+        identity = link(env, ask=True, default_config=antigravity)
         if not identity:
             print(f"{NAME} : accès au service indisponible.", file=sys.stderr)
             return 1
         child[url_var], child[key_var] = identity
     # The kernel's host link has precedence over Claude's plugin options and store.
-    os.execve(sys.executable, [sys.executable, "-I", "-X", "utf8", str(server)], child)
+    args = [sys.executable, "-I", "-X", "utf8", str(server)]
+    if antigravity:
+        args.append("--antigravity")
+    os.execve(sys.executable, args, child)
 
 
 def main(argv: List[str], env: Dict[str, str]) -> int:
     if argv == ["_mcp"]:
         return run_mcp(env)
+    if argv == ["_mcp_antigravity"]:
+        return run_mcp(env, antigravity=True)
     if argv == ["_hook"]:
         try:
             event = json.loads(sys.stdin.read(65_537))

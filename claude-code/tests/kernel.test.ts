@@ -45,7 +45,7 @@ async function check($: Engine, tool: string, id = 'tu-9', agentId?: string): Pr
 
 // Le moteur offre `agir` au modèle d'un sous-agent (avant sa première requête) : sa définition ne ferme pas ses outils.
 async function offer($: Engine, agentId: string, subagentType = 'general-purpose'): Promise<void> {
-  await $.tool.offer({ tool: PYTHON, provider: OURS, agentId, subagentType })
+  await $.tool.offer({ tool: PYTHON, provider: OURS, for: 'list', agentId, subagentType })
 }
 
 // Pièce jointe `auto_mode` du moteur, telle que Claude Code 2.1.323 la rend en bypassPermissions
@@ -313,7 +313,7 @@ describe('sous-agent sans agir : ses outils intégrés restent', () => {
 
   test('un fork garde la liste de la boucle qui le lance', async ($, on) => {
     world(on, connected())
-    await $.tool.offer({ tool: PYTHON, provider: OURS })
+    await $.tool.offer({ tool: PYTHON, provider: OURS, for: 'list' })
     const main = await spawn($, 'SOUSTACHE-FORK vérifie', { fork: true })
     expect(await check($, 'Read', 'tu-1', main.agentId)).toEqual({ decision: 'deny', reason: REFUSAL })
     // Fork d'un sous-agent sans agir : outils intégrés gardés.

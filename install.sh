@@ -6,9 +6,10 @@
 # (droits 600, hors de tout dépôt), puis
 #   - claude : le plugin est installé dans Claude Code (CLI et onglet
 #     Code de Claude Desktop, qui lisent la même configuration) ;
-#   - codex : le lanceur `tokfit codex …` est posé dans ~/.local/bin.
+#   - codex : le lanceur `tokfit codex …` est posé dans ~/.local/bin ;
+#   - agy : le plugin natif Tokfit est installé dans Antigravity CLI.
 #
-#   sh install.sh                             détecte Claude Code et Codex, une seule saisie de clé
+#   sh install.sh                             détecte les CLI, une seule saisie de clé
 #   sh install.sh --list                      affiche les clients pris en charge
 #   sh install.sh codex claude                installe les clients nommés, une fois chacun
 #   TOKFIT_KEY=ek_… sh install.sh codex   sans question (automatisation, essais)
@@ -35,7 +36,7 @@
 set -efu
 
 NAME=tokfit
-CLIENTS="claude codex"
+CLIENTS="claude codex agy"
 # Adresse officielle du service et dépôt public du connecteur : vides dans le
 # dépôt de travail, posés par connector/publish.py dans la copie publique.
 # Vides, TOKFIT_URL est obligatoire et le script se lance depuis un clone.
@@ -105,6 +106,14 @@ check_codex() {
     [ -n "$raw" ] || fail "source du lanceur inconnue (TOKFIT_RAW_URL) : lance le script depuis un clone du dépôt."
     command -v curl >/dev/null 2>&1 || fail "curl introuvable : installe-le, ou lance le script depuis un clone du dépôt."
   fi
+}
+check_agy() {
+  [ -n "$market" ] || fail "source du plugin Antigravity inconnue (TOKFIT_SOURCE)."
+  if [ -d "$market" ] && [ ! -f "$market/.antigravity-plugin/plugin.json" ]; then
+    fail "ce dossier ne contient pas le plugin Antigravity ; utilise la copie publique du connecteur."
+  fi
+  python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null \
+    || fail "Python 3.9 ou plus récent introuvable (commande python3)."
 }
 # Un exécutable comme exemple-cli fournit check_exemple_cli et install_exemple_cli.
 adapter() {
@@ -196,6 +205,15 @@ install_claude() {
     return "$plugin_status"
   }
   printf '%s : plugin Claude Code disponible à la prochaine session. Pour actualiser une installation existante, ouvre /plugin.\n' "$NAME"
+}
+
+install_agy() {
+  case "$market" in
+    https://github.com/*.git) source=${market%.git} ;;
+    *) source=$market ;;
+  esac
+  agy plugin install "$source"
+  printf '%s : ouvre une nouvelle session Antigravity pour utiliser agir.\n' "$NAME"
 }
 
 codex_path_hint() {
