@@ -108,6 +108,12 @@ Ouvre ensuite une nouvelle conversation :
   a son propre noyau Python. Si les deux modifient le même dossier, elles voient
   les mêmes fichiers.
 
+Pour une installation manuelle dans l’application Antigravity ou son IDE,
+place une copie de ce dépôt dans `~/.gemini/config/plugins/tokfit` pour tous
+tes projets, ou `.agents/plugins/tokfit` à la racine d’un seul projet.
+Antigravity doit pouvoir lancer `python3`. La procédure de chargement dépend
+de l’application utilisée. [Documentation Antigravity](https://antigravity.google/docs/plugins).
+
 ### Utiliser le même abonnement
 
 Tu peux démarrer sans clé. Laisse la saisie vide. Claude et Codex reçoivent
