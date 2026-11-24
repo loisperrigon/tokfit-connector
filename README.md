@@ -101,9 +101,12 @@ Ouvre ensuite une nouvelle conversation :
   tokfit puisse également choisir le modèle et l’effort au démarrage et relever
   les compteurs, commence ta conversation avec `tokfit codex "ma demande"`.
 - **Antigravity CLI** peut appeler `agir` avec un schéma compact et découvrir
-  les fonctions Python à la demande via `find_tool`. Les autorisations MCP
-  suivent tes réglages Antigravity. `agy plugin list --json` affiche la
-  version de Tokfit et l’état du plugin.
+  les fonctions Python à la demande via `find_tool`. Quand `agir` est prêt,
+  Tokfit refuse l’exécution des outils natifs. Les définitions de ces outils
+  restent visibles dans le catalogue de l’agent par défaut. Si tu désactives
+  le MCP Tokfit, Antigravity reprend ses outils natifs. Les autorisations MCP
+  suivent tes réglages Antigravity. `agy plugin list --json` affiche la version
+  et l’état du plugin.
 - **Claude et Codex ensemble** peuvent travailler en parallèle. Chaque session
   a son propre noyau Python. Si les deux modifient le même dossier, elles voient
   les mêmes fichiers.
