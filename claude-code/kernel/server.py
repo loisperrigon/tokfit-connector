@@ -56,6 +56,7 @@ from typing import Any, Callable, Dict, List, MutableMapping, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kernel.autoupdate import ensure_auto_update  # noqa: E402
+from kernel.antigravity_ready import OWNER, PLUGINS, Readiness  # noqa: E402
 from kernel.compte import compte, schema as schema_compte  # noqa: E402
 from kernel.cellule import PROLONGEE_MAX  # noqa: E402
 from kernel.kernel import TIMEOUT_MAX, Noyau  # noqa: E402
@@ -67,6 +68,7 @@ from kernel.pack import (  # noqa: E402
 NOM = "outils"
 # Nom neutre de l'outil d'action, affiché dans l'interface : il ne dit rien de la méthode (choix de Lois du 15/11/2026).
 OUTIL = "agir"
+ANTIGRAVITY_READY_FILE = "TOKFIT_ANTIGRAVITY_READY_FILE"  # publish: keep
 # Le noyau tourne sous POSIX et sous Windows (tubes et interruption : `kernel/tubes.py`) ; gardé pour couper
 # `agir` sur un système où il ne tournerait pas (les essais le posent à faux).
 NOYAU_POSSIBLE = os.name in ("posix", "nt")
@@ -263,6 +265,9 @@ class Serveur:
         self.paquet = paquet
         self.compteur = Compteur(vers)
         self.antigravity = antigravity
+        owner, root = env.get(OWNER, ""), env.get(PLUGINS)
+        self.native_readiness = (Readiness(root, int(owner))
+                                 if antigravity and root and owner.isdecimal() and len(owner) < 12 else None)
         self.amorce = code_amorce(paquet) if paquet is not None else None
         self.cwd = os.getcwd()
         # Paquet et amorce arrivent d'un autre fil (`installer`) : lus et écrits sous `etat`.
@@ -296,11 +301,27 @@ class Serveur:
         if methode == "tools/list":
             self.attendre_depart()
             self.initialise.set()
-            return self.resultat(ident, {"tools": self.outils()})
+            outils = self.outils()
+            self.antigravity_ready(any(outil["name"] == OUTIL for outil in outils))
+            return self.resultat(ident, {"tools": outils})
         if methode == "tools/call":
             self.attendre_depart()
             return self.appel(ident, message.get("params") or {})
         return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32601, "message": f"unknown method: {methode}"}}
+
+    def antigravity_ready(self, listed: bool) -> None:
+        if self.native_readiness is not None:
+            self.native_readiness.update(listed)
+        filename = self.env.get(ANTIGRAVITY_READY_FILE) if self.antigravity else None
+        if filename:
+            path = Path(filename)
+            try:
+                if listed:
+                    path.write_text(str(os.getpid()), encoding="ascii")
+                elif path.exists() and path.read_text(encoding="ascii") == str(os.getpid()):
+                    path.unlink(missing_ok=True)
+            except OSError:
+                logging.warning("Antigravity kernel readiness is unavailable")
 
     @staticmethod
     def en_parallele(message: Dict[str, Any]) -> bool:
@@ -417,12 +438,18 @@ class Serveur:
                     poste.demarre = True
                     prefixe += poste.noyau.demarrer()
                 execution = poste.noyau.executer(code, delai, faits_de(arguments))
+        except OSError:
+            self.antigravity_ready(False)
+            raise
         finally:
             self.rendre(poste)
         if execution.usage:
             self.compteur.ajouter(execution.usage)
+        self.antigravity_ready(execution.ok or execution.cell_response)
         texte = (prefixe + execution.sortie) if prefixe else execution.sortie
         reponse = self.texte(ident, texte if texte.strip() else "(no output)", erreur=not execution.ok)
+        if not execution.ok and execution.cell_response:
+            reponse["result"]["_meta"] = {"workspace-kernel/cell-response": True}
         # Images de `look` : blocs image du résultat MCP, après la sortie texte (le modèle les voit).
         reponse["result"]["content"].extend({"type": "image", "data": image["data"], "mimeType": image["mimeType"]}
                                             for image in execution.images or [])
@@ -585,7 +612,10 @@ def main() -> None:
         serveur.fermer()
         for appel in appels:
             appel.join(ARRET_S)
+        serveur.antigravity_ready(False)
         serveur.arreter()
+        if serveur.native_readiness is not None:
+            serveur.native_readiness.close()
         serveur.compteur.finir(ARRET_S)
 
 

@@ -144,11 +144,10 @@ def run_child(binary: str, args: list[str], env: dict[str, str], *,
                 signal.signal(signum, handler)
 
 
-def report_tokfit(env: dict[str, str], reason: str) -> None:
-    """Report a fixed launch outcome to Alfie's local bridge, outside ACP."""
-    bridge, pane, run = (env.get(name) for name in
-                         ("OPEN_CODEX_BRIDGE", "OPEN_CODEX_PANE", "OPEN_CODEX_TOKFIT_RUN"))
-    if not (bridge and pane and run):
+def _bridge_post(env: dict[str, str], payload: dict[str, object]) -> None:
+    """Post a structured status event to Alfie's local bridge, outside ACP."""
+    bridge, pane = env.get("OPEN_CODEX_BRIDGE"), env.get("OPEN_CODEX_PANE")
+    if not (bridge and pane):
         return
     try:
         data = json.loads(Path(bridge).read_bytes())
@@ -164,11 +163,23 @@ def report_tokfit(env: dict[str, str], reason: str) -> None:
             return
         conn = http.client.HTTPConnection("127.0.0.1", address.port, timeout=0.3)
         try:
-            payload = {"event": "TokfitStatus", "pane": pane, "token": token,
-                       "tokfit": {"run": run, "reason": reason}}
-            conn.request("POST", "/hook", json.dumps(payload), {"Content-Type": "application/json"})
+            body = {"pane": pane, "token": token, **payload}
+            conn.request("POST", "/hook", json.dumps(body), {"Content-Type": "application/json"})
             conn.getresponse().close()
         finally:
             conn.close()
     except (OSError, ValueError, http.client.HTTPException):
         return
+
+
+def report_tokfit(env: dict[str, str], reason: str) -> None:
+    """Report a fixed launch outcome to Alfie's local bridge, outside ACP."""
+    run = env.get("OPEN_CODEX_TOKFIT_RUN")
+    if not run:
+        return
+    _bridge_post(env, {"event": "TokfitStatus", "tokfit": {"run": run, "reason": reason}})
+
+
+def report_route(env: dict[str, str], route: dict[str, object]) -> None:
+    """Report a routing decision outcome to Alfie's local bridge, outside ACP."""
+    _bridge_post(env, {"event": "RouteStatus", "route": route})

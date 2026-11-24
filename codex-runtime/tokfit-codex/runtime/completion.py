@@ -222,8 +222,14 @@ def ask(env: dict[str, str], facts: Json, to: tuple[str, str] | None = None) -> 
 
 
 def levers_off(env: dict[str, str]) -> list[str]:
-    """Levers turned off by the host app (its embedded copy's variable) and by the user."""
+    """Levers turned off by the host app (live file, then env) and by the user."""
     host = env.get("ECONOMISEUR_OFF", "")  # publish: keep
+    off_file = env.get("ECONOMISEUR_OFF_FILE", "")  # publish: keep
+    if off_file:
+        try:
+            host = Path(off_file).read_text(encoding="utf-8")
+        except OSError:
+            pass
     user = env.get("TOKFIT_OFF", "")
     return list(dict.fromkeys(word.strip() for word in f"{host},{user}".split(",") if word.strip()))
 

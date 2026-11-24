@@ -775,6 +775,14 @@ def run_mcp(env: Dict[str, str], *, antigravity: bool = False) -> int:
         print(f"{NAME} : noyau absent ; relance l'installation {client}.", file=sys.stderr)
         return 1
     child = env.copy()
+    root = child.get("PLUGIN_ROOT") if antigravity else None
+    if root:
+        sys.path.insert(0, str(server.parents[1]))
+        from kernel.antigravity_ready import OWNER, plugin_enabled
+        from runtime.completion import levers_off
+        if "kernel" in levers_off(env) or not plugin_enabled(Path(root), f"{NAME}_outils"):
+            return 0
+        child[OWNER] = str(os.getppid())
     url_var, key_var = "ECONOMISEUR_RELAY_URL", "ECONOMISEUR_RELAY_TOKEN"  # publish: keep
     if child.get(url_var) or child.get(key_var):
         sys.path.insert(0, str(server.parents[1]))
@@ -795,11 +803,29 @@ def run_mcp(env: Dict[str, str], *, antigravity: bool = False) -> int:
     os.execve(sys.executable, args, child)
 
 
+def antigravity_pretool(env: Dict[str, str]) -> int:
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "tokfit-codex"))
+    from kernel.antigravity_ready import PLUGINS, hook_available
+    from runtime.antigravity_tools import hook
+    from runtime.completion import levers_off
+
+    def available() -> bool:
+        if env.get("OPEN_CODEX_PANE") or "kernel" in levers_off(env):
+            return False
+        root = env.get(PLUGINS) or str(Path(__file__).resolve().parents[1])
+        return hook_available(root)
+
+    print(json.dumps(hook(sys.stdin, available)))
+    return 0
+
+
 def main(argv: List[str], env: Dict[str, str]) -> int:
     if argv == ["_mcp"]:
         return run_mcp(env)
     if argv == ["_mcp_antigravity"]:
         return run_mcp(env, antigravity=True)
+    if argv == ["_antigravity_pretool"]:
+        return antigravity_pretool(env)
     if argv == ["_hook"]:
         try:
             event = json.loads(sys.stdin.read(65_537))

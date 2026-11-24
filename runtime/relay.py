@@ -222,11 +222,11 @@ class Groups:
         return lambda: None
 
 
-def post(url: str, token: str, body: Json) -> Json | None:
+def post(url: str, token: str, body: Json, timeout: float = 3.0) -> Json | None:
     request = urllib.request.Request(url, json.dumps(body).encode(),
                                      {"Authorization": "Bearer " + token, "Content-Type": "application/json"})
     try:
-        with urllib.request.build_opener(NoRedirect()).open(request, timeout=3) as response:
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
             value = json.loads(response.read(MAX_EVENT))
             return value if isinstance(value, dict) else None
     except urllib.error.HTTPError as error:
@@ -460,7 +460,30 @@ def tool_lists(body: Json) -> list[tuple[Json, list[Json]]]:
     return lists
 
 
-def kernel_context(body: Json, ready: set[str]) -> bool:
+DECLARATION = re.compile(
+    r"(?m)^exec tool declaration:\n```ts\ndeclare const tools: \{ (\w+)\("
+    r"([^\n]*(?:\n(?!```)[^\n]*)*)\n```$"
+)
+
+
+def defer_signature(match: re.Match[str]) -> str:
+    name, signature = match.groups()
+    if name.endswith("__agir") or "/*" in signature:
+        return match[0]
+    lines = signature.splitlines()
+    notes = []
+    for i, line in enumerate(lines):
+        if "//" in line:
+            if not line.lstrip().startswith("//") or i + 1 == len(lines):
+                return match[0]
+            field = re.match(r"\s*(\w+)\??:", lines[i + 1])
+            if not field:
+                return match[0]
+            notes.append(field[1] + ": " + line.strip()[2:].strip())
+    return "\n".join([f"Signature: ALL_TOOLS.find(t => t.name === '{name}').description", *notes])
+
+
+def kernel_context(body: Json, ready: set[str], defer_signatures: bool = False) -> bool:
     if body.get("tool_choice", "auto") not in ("auto", "required", "none"):
         return False
     lists = tool_lists(body)
@@ -489,6 +512,8 @@ def kernel_context(body: Json, ready: set[str]) -> bool:
                 description = "".join(kept).replace(
                     "for example `await tools.exec_command(...)`", "with a tool name from its declaration"
                 )
+                if defer_signatures:
+                    description = DECLARATION.sub(defer_signature, description)
                 if deferred:
                     description = (f"Use `tools.{deferred}` for shell commands and local file work. "
                                    "Find its signature with ALL_TOOLS.\n\n" + description)
@@ -522,6 +547,7 @@ class Relay:
         self.plan_lock = threading.Lock()
         self.plan_loaded = False
         self.kernel_access = kernel_access
+        self.catalogue_model: str | None = None
         self.kernel_enabled = False
         self.kernel_lock = threading.Lock()
         self.ready_kernels: dict[str, int] = {}
@@ -597,6 +623,8 @@ class Relay:
                         kernel = levers.get("kernel") if isinstance(levers, dict) else None
                         self.kernel_enabled = ("kernel" not in self.off and isinstance(kernel, dict)
                                                and kernel.get("state") == "enabled")
+                        if plan.get("defer_catalogue_signatures") is True:
+                            self.catalogue_model = body["model"]
                         instruction = plan.get("thinking_instruction")
                         if "thinking" not in self.off and isinstance(instruction, str) and 0 < len(instruction) <= 4096:
                             self.instruction = instruction
@@ -610,7 +638,7 @@ class Relay:
                         if "fanout" not in self.off and isinstance(wait, int) and not isinstance(wait, bool) and 0 < wait <= 3000:
                             self.fanout_ms = wait
             ready = self.available_kernels()
-            changed = bool(ready) and kernel_context(body, ready)
+            changed = bool(ready) and kernel_context(body, ready, body["model"] == self.catalogue_model)
             if kernel_only:
                 return json.dumps(body).encode() if changed else data
             instructions = [value for value in (self.instruction, self.execution_instruction) if value]

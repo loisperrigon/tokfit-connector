@@ -1,0 +1,16 @@
+{
+  "tokfit-native-tools": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I ./codex-runtime/launcher.py _antigravity_pretool",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}

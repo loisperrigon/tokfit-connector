@@ -111,6 +111,7 @@ class Execution(NamedTuple):
     usage: Optional[Dict[str, int]] = None
     # Images montrées par `look` (`{"data": base64, "mimeType": …}`), rendues en blocs image.
     images: Optional[List[Dict[str, str]]] = None
+    cell_response: bool = False
 
 
 def creer_shims(dossier: Path, secours: str = sys.executable) -> Path:
@@ -378,7 +379,7 @@ class Noyau:
                   if isinstance(image, dict) and isinstance(image.get("data"), str)
                   and isinstance(image.get("mimeType"), str)] if isinstance(brutes, list) else []
         return Execution(tronque(str(reponse["sortie"]), limite), ok,
-                         fini if ok and isinstance(fini, str) else None, appels or None, images or None)
+                         fini if ok and isinstance(fini, str) else None, appels or None, images or None, cell_response=True)
 
     def interrompre_jusqu_a(self, delai_s: float) -> Optional[dict[str, object]]:
         """Interrompt la cellule en cours, l'interruption renvoyée toutes les `INTERRUPTION_TOUS_S` ; sa

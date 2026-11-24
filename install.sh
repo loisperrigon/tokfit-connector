@@ -43,7 +43,7 @@ CLIENTS="claude codex agy"
 DEFAULT_URL="https://api.tokfit.fr"
 REPO="loisperrigon/tokfit-connector"
 RUNTIME="__init__.py relay.py output.py process.py cursor.py completion.py"
-KERNEL="__init__.py autoupdate.py cellule.py compte.py kernel.py output.py pack.py projet.py server.py tubes.py worker.py"
+KERNEL="__init__.py antigravity_ready.py autoupdate.py cellule.py compte.py kernel.py output.py pack.py projet.py server.py tubes.py worker.py"
 
 fail() {
   printf '%s : %s\n' "$NAME" "$1" >&2
