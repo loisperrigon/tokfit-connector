@@ -1,11 +1,10 @@
 # tokfit
 
-tokfit aide Claude Code et Codex à consommer moins. Tu peux les utiliser en même
-temps et retrouver leurs économies sur le même tableau de bord. L’installation
-détecte les outils présents sur ton ordinateur.
+Tokfit aide Claude Code, Codex et Antigravity CLI à consommer moins.
+L’installation détecte les outils présents sur ton ordinateur.
 
 **Pour commencer**, colle le [message d’installation](INSTALL-PROMPT.md) dans
-Claude Code ou Codex, ou utilise la commande ci-dessous.
+ton agent, ou utilise la commande ci-dessous.
 
 ## Ce qu'il fait (Claude Code)
 
@@ -86,10 +85,10 @@ Sur macOS ou Linux, ou dans l’environnement shell où tu utilises tes CLI :
 curl -fsSL https://raw.githubusercontent.com/loisperrigon/tokfit-connector/main/install.sh | sh
 ```
 
-Si Claude Code et Codex sont présents, cette commande installe tokfit dans les
-deux. Si tu ajoutes l’autre outil plus tard, relance la commande. Pour choisir
-explicitement depuis un clone, utilise `sh install.sh claude`, `sh install.sh codex`
-ou `sh install.sh both`. L’installation Codex utilise Python 3.9 ou ultérieur.
+Si plusieurs CLI sont présents, cette commande installe Tokfit dans chacun.
+Depuis un clone, choisis un seul CLI avec `sh install.sh claude`,
+`sh install.sh codex` ou `sh install.sh agy`. Codex et Antigravity utilisent
+Python 3.9 ou ultérieur, disponible sous la commande `python3`.
 Pour Claude Code seul, y compris sous Windows, tu peux aussi utiliser directement
 `claude plugin install tokfit --marketplace loisperrigon/tokfit-connector`.
 
@@ -101,6 +100,10 @@ Ouvre ensuite une nouvelle conversation :
   approbation) et `compte` (bilan) dans les conversations ordinaires. Pour que
   tokfit puisse également choisir le modèle et l’effort au démarrage et relever
   les compteurs, commence ta conversation avec `tokfit codex "ma demande"`.
+- **Antigravity CLI** peut appeler `agir` avec un schéma compact et découvrir
+  les fonctions Python à la demande via `find_tool`. Les autorisations MCP
+  suivent tes réglages Antigravity. `agy plugin list --json` affiche la
+  version de Tokfit et l’état du plugin.
 - **Claude et Codex ensemble** peuvent travailler en parallèle. Chaque session
   a son propre noyau Python. Si les deux modifient le même dossier, elles voient
   les mêmes fichiers.
@@ -114,7 +117,7 @@ Ouvre chacun des deux liens, connecte-toi au même compte tokfit et confirme
 le rattachement. L’abonnement couvre ensuite les deux installations.
 
 Si tu possèdes déjà une clé tokfit, saisis-la une fois dans l’installateur.
-Les deux outils lisent le même fichier privé `~/.config/tokfit/config.json`,
+Les CLI lisent le même fichier privé `~/.config/tokfit/config.json`,
 ou le fichier désigné par `TOKFIT_CONFIG`. Une clé réglée explicitement dans
 le plugin Claude reste prioritaire dans Claude.
 
@@ -131,6 +134,10 @@ le plugin Claude reste prioritaire dans Claude.
   `codex plugin marketplace upgrade tokfit-distribution`. Les sessions ouvertes
   terminent avec leur version. Une installation depuis un clone, une source
   personnalisée ou un ancien CLI se met à jour en relançant son installateur.
+- **Mettre Antigravity à jour** en relançant `sh install.sh agy` depuis un
+  clone à jour ou `agy plugin install https://github.com/loisperrigon/tokfit-connector`,
+  puis ouvre une nouvelle session.
+- **Retirer Antigravity** avec `agy plugin uninstall tokfit`.
 - **Retirer Claude** : `claude plugin uninstall tokfit`. Tu peux continuer à
   utiliser tokfit dans Codex.
 - **Retirer Codex** : ferme d’abord ses sessions tokfit. Dans `codex mcp list`,
