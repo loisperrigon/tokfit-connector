@@ -225,7 +225,7 @@ def levers_off(env: dict[str, str]) -> list[str]:
     """Levers turned off by the host app (its embedded copy's variable) and by the user."""
     host = env.get("ECONOMISEUR_OFF", "")  # publish: keep
     user = env.get("TOKFIT_OFF", "")
-    return [word.strip() for word in f"{host},{user}".split(",") if word.strip()]
+    return list(dict.fromkeys(word.strip() for word in f"{host},{user}".split(",") if word.strip()))
 
 
 def decide(event: Json, env: dict[str, str], engine: str) -> Json:

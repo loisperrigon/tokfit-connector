@@ -697,6 +697,14 @@ class Relay:
                 target = "/" + self.path[len(prefix):]
                 if self.command == "GET" and target.startswith(KERNEL_SOCKET_PATH) and relay.kernel_access:
                     name = target.removeprefix(KERNEL_SOCKET_PATH)
+                    if not name:
+                        data = json.dumps({"tool": min(relay.available_kernels(), default=None)}).encode()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
                     if name.startswith("ready/"):
                         candidate = name.removeprefix("ready/")
                         self.send_response(204 if candidate in relay.available_kernels() else 404)
@@ -979,7 +987,10 @@ def run(binary: str, args: list[str], env: dict[str, str], *, pinned: bool = Fal
                               kernel_access=hosted_kernel_access(env))
         except (OSError, ValueError):
             LOG.warning("Local optimization transport unavailable")
-    actual = ["-c", "openai_base_url=" + json.dumps(relay.url), *args] if relay else args
+    # Codex with ChatGPT authentication otherwise sends Zstandard frames.
+    # The local relay needs JSON to apply the tool policy before forwarding.
+    actual = ["-c", "openai_base_url=" + json.dumps(relay.url),
+              "-c", "features.enable_request_compression=false", *args] if relay else args
     if relay and plan and "execution_instruction" in plan and "persistence" not in off:
         actual = completion_hook_args(actual, Path(__file__).with_name("completion.py"))
     if relay and relay.kernel_access:
