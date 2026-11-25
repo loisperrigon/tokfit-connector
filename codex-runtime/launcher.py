@@ -815,7 +815,7 @@ def antigravity_pretool(env: Dict[str, str]) -> int:
         root = env.get(PLUGINS) or str(Path(__file__).resolve().parents[1])
         return hook_available(root)
 
-    print(json.dumps(hook(sys.stdin, available)))
+    print(json.dumps(hook(sys.stdin, available, "tokfit_outils/agir")))
     return 0
 
 

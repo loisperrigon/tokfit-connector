@@ -5,30 +5,29 @@ import json
 import logging
 import os
 from pathlib import Path
-import re
 import runpy
 import shlex
 import sys
 from typing import Callable, Mapping, TextIO, cast
 
-MCP_DISPATCH = frozenset({"call_mcp_tool", "search_tools"})
-MCP_TOOL = re.compile(r"mcp_[\w-]+_[\w-]+", re.ASCII)
-DENIAL = "Tokfit: use the MCP tool outils/agir for local actions."
+REPLACED_TOOLS = frozenset({"run_command", "write_file", "delete_file", "grep_search",
+                            "replace_file_content", "multi_replace_file_content"})
+DENIAL = "Tokfit: use the advertised MCP tool {tool} for this action."
 READY_FILE = "TOKFIT_ANTIGRAVITY_READY_FILE"
 LOG = logging.getLogger(__name__)
 
 
-def hook(source: TextIO, available: Callable[[], bool]) -> dict[str, str]:
+def hook(source: TextIO, available: Callable[[], bool], tool: str = "mcp_outils_agir") -> dict[str, str]:
     try:
         event = json.loads(source.read(1024 * 1024))
     except (ValueError, RecursionError):
         event = None
     call = event.get("toolCall") if isinstance(event, dict) else None
     name = call.get("name") if isinstance(call, dict) else None
-    if not isinstance(name, str) or name in MCP_DISPATCH or MCP_TOOL.fullmatch(name):
+    if not isinstance(name, str) or name not in REPLACED_TOOLS:
         return {"decision": "allow"}
     if available():
-        return {"decision": "deny", "reason": DENIAL}
+        return {"decision": "deny", "reason": DENIAL.format(tool=tool)}
     return {"decision": "allow"}
 
 
@@ -45,6 +44,9 @@ def overlay(original: Path, profile: Path) -> None:
     hooks = source / "hooks.json"
     groups = json.loads(hooks.read_text(encoding="utf-8")) if hooks.exists() else {}
     group = "tokfit-alfie-native-tools"
+    if isinstance(groups, dict) and isinstance(groups.get(group), dict) and groups[group].get("enabled") is False:
+        (config / "hooks.json").symlink_to(hooks.resolve())
+        return
     if not isinstance(groups, dict) or group in groups:
         raise ValueError("Cannot add the Antigravity hook to this configuration")
     command = shlex.join([sys.executable, "-I", str(Path(__file__).resolve())])
@@ -74,7 +76,12 @@ def hosted_kernel_available(env: Mapping[str, str]) -> bool:
         return False
     try:
         allowed = cast(Callable[[str, str, str], bool], runpy.run_path(gate)["allowed"])
-        return allowed(bridge, pane, "AntigravityToolAccess")
+        if not allowed(bridge, pane, "AntigravityToolAccess"):
+            return False
+        # Redirect once per proven call. If the client loses its MCP catalogue,
+        # the next native attempt can proceed under Antigravity’s own permissions.
+        Path(env[READY_FILE]).unlink()
+        return True
     except (OSError, KeyError, ImportError):
         LOG.debug("Antigravity host permission check unavailable")
         return False

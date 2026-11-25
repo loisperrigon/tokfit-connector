@@ -302,18 +302,19 @@ class Serveur:
             self.attendre_depart()
             self.initialise.set()
             outils = self.outils()
-            self.antigravity_ready(any(outil["name"] == OUTIL for outil in outils))
+            self.antigravity_ready(any(outil["name"] == OUTIL for outil in outils), catalog=True)
             return self.resultat(ident, {"tools": outils})
         if methode == "tools/call":
             self.attendre_depart()
             return self.appel(ident, message.get("params") or {})
         return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32601, "message": f"unknown method: {methode}"}}
 
-    def antigravity_ready(self, listed: bool) -> None:
+    def antigravity_ready(self, listed: bool, *, catalog: bool = False) -> None:
         if self.native_readiness is not None:
             self.native_readiness.update(listed)
         filename = self.env.get(ANTIGRAVITY_READY_FILE) if self.antigravity else None
-        if filename:
+        # A server-side list is not proof that the ACP conversation can call agir.
+        if filename and not (catalog and listed):
             path = Path(filename)
             try:
                 if listed:
