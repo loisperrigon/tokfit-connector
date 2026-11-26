@@ -42,7 +42,7 @@ CLIENTS="claude codex agy"
 # Vides, TOKFIT_URL est obligatoire et le script se lance depuis un clone.
 DEFAULT_URL="https://api.tokfit.fr"
 REPO="loisperrigon/tokfit-connector"
-RUNTIME="__init__.py relay.py output.py process.py cursor.py completion.py"
+RUNTIME="__init__.py relay.py finish.py output.py process.py cursor.py completion.py"
 KERNEL="__init__.py antigravity_ready.py autoupdate.py cellule.py compte.py kernel.py output.py pack.py projet.py server.py tubes.py worker.py"
 
 fail() {

@@ -65,6 +65,8 @@ from kernel.pack import (  # noqa: E402
     DELAI_RELANCE_S, DELAI_S, PREFIXE_DANS_LE_NOYAU, REFUS, Lien, Paquet, cle_attendue, compter, lien, recevoir,
 )
 
+from completion import FINISH_PREFIX, finish_tag  # noqa: E402
+
 NOM = "outils"
 # Nom neutre de l'outil d'action, affiché dans l'interface : il ne dit rien de la méthode (choix de Lois du 15/11/2026).
 OUTIL = "agir"
@@ -174,12 +176,12 @@ class Compteur:
         self.envoyer(delai_s)
 
 
-def schema_outil(paquet: Paquet, antigravity: bool) -> Dict[str, Any]:
+def schema_outil(paquet: Paquet, native_tools: bool, codex: bool = False) -> Dict[str, Any]:
     properties: Dict[str, Any] = {
         "code": {"type": "string", "description": "Python code; the value of the last expression is shown."},
         "timeout_s": {"type": "integer", "description": TIMEOUT_TEXTE, "minimum": 1, "maximum": TIMEOUT_MAX},
     }
-    if antigravity:
+    if native_tools:
         # Older packs have the same persistent Python API but only a Claude-specific guide.
         description = paquet.native_tools_description or (
             "Runs Python in a persistent kernel. find_tool('keywords') lists matching helper signatures."
@@ -191,6 +193,8 @@ def schema_outil(paquet: Paquet, antigravity: bool) -> Dict[str, Any]:
             DOSSIER: {"type": "string", "description": "Filled in by the connector: do not set it."},
             FAITS: {"type": "object", "description": "Filled in by the connector: do not set it."},
         })
+    if codex and paquet.codex_finish_instruction:
+        description += " " + paquet.codex_finish_instruction
     return {
         "name": OUTIL,
         "description": description,
@@ -255,7 +259,7 @@ class Poste:
 
 class Serveur:
     def __init__(self, env: Dict[str, str], paquet: Optional[Paquet], vers: Optional[Lien] = None,
-                 *, antigravity: bool = False) -> None:
+                 *, antigravity: bool = False, codex: bool = False) -> None:
         self.max_sortie = entier(env, "TOKFIT_KERNEL_MAX_OUTPUT", MAX_SORTIE)
         self.noyaux_max = entier(env, "TOKFIT_KERNEL_MAX_AGENTS", NOYAUX_MAX)
         self.env = env
@@ -265,6 +269,8 @@ class Serveur:
         self.paquet = paquet
         self.compteur = Compteur(vers)
         self.antigravity = antigravity
+        self.codex_client = codex
+        self.native_tools = antigravity or codex
         owner, root = env.get(OWNER, ""), env.get(PLUGINS)
         self.native_readiness = (Readiness(root, int(owner))
                                  if antigravity and root and owner.isdecimal() and len(owner) < 12 else None)
@@ -291,7 +297,12 @@ class Serveur:
             return None
         ident = message["id"]
         if methode == "initialize":
-            demande = (message.get("params") or {}).get("protocolVersion")
+            params = message.get("params") or {}
+            client = params.get("clientInfo") if isinstance(params, dict) else None
+            if isinstance(client, dict) and client.get("name") == "codex-mcp-client":
+                self.codex_client = True
+                self.native_tools = True
+            demande = params.get("protocolVersion")
             version = demande if demande in PROTOCOLES else PROTOCOLES[0]
             self.attendre_depart()
             return self.resultat(ident, {"protocolVersion": version, "capabilities": {"tools": {"listChanged": True}},
@@ -360,7 +371,7 @@ class Serveur:
         Windows), `compte` avec le lien (paquet reçu ou non)."""
         with self.etat:
             paquet = self.paquet
-        outils = [schema_outil(paquet, self.antigravity)] if paquet is not None and NOYAU_POSSIBLE else []
+        outils = [schema_outil(paquet, self.native_tools, self.codex_client)] if paquet is not None and NOYAU_POSSIBLE else []
         if self.lien() is not None:
             outils.append(schema_compte())
         return outils
@@ -423,8 +434,8 @@ class Serveur:
         arguments = params.get("arguments", {})
         if not isinstance(arguments, dict):
             return self.texte(ident, "`arguments` must be an object", erreur=True)
-        if self.antigravity:
-            # ACP has no hook that supplies a trusted agent, working directory or routing facts.
+        if self.native_tools:
+            # These clients do not supply trusted agent, working directory or routing facts.
             arguments = {key: arguments[key] for key in ("code", "timeout_s") if key in arguments}
         code = arguments.get("code")
         if not isinstance(code, str):
@@ -457,6 +468,14 @@ class Serveur:
         if execution.ok and execution.fini is not None:
             # Contrat avec le connecteur (hooks) : un bloc après la sortie (et ses images), préfixe exact, jamais avec isError.
             reponse["result"]["content"].append({"type": "text", "text": paquet.fini + execution.fini})
+            meta = params.get("_meta")
+            if self.codex_client and self.vers and isinstance(meta, dict) and len(execution.fini) <= 32768:
+                thread, item = meta.get("threadId"), meta.get("itemId")
+                if not (isinstance(thread, str) and 0 < len(thread) <= 256
+                        and isinstance(item, str) and 0 < len(item) <= 256):
+                    return reponse
+                tag = finish_tag(self.vers[1], thread, item, code, execution.fini)
+                reponse["result"]["content"].append({"type": "text", "text": FINISH_PREFIX + tag})
         return reponse
 
     def fermer(self) -> None:
@@ -565,7 +584,8 @@ def main() -> None:
     ouverte, attente = reprise(os.environ)
     env = dict(os.environ)
     ensure_auto_update(env)
-    serveur = Serveur(env, None, lien(env), antigravity=sys.argv[1:] == ["--antigravity"])
+    serveur = Serveur(env, None, lien(env), antigravity=sys.argv[1:] == ["--antigravity"],
+                      codex=sys.argv[1:] == ["--codex"])
     if ouverte:
         serveur.initialise.set()
     sortie = Sortie()

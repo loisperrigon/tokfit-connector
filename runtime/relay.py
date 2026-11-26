@@ -30,6 +30,7 @@ import urllib.request
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from runtime import finish
 from runtime.output import OutputPolicy, shorten_request
 from runtime.process import codex_output_mode, report_tokfit, run_child
 from runtime.completion import NoRedirect, levers_off, relay_address, hook_args as completion_hook_args
@@ -244,6 +245,7 @@ class Events:
         self.buffer = b""
         self.completed: Json | None = None
         self.disabled = False
+        self.finish_call: finish.Call | None = None
         self.output_types: list[Json] = []
 
     def feed(self, chunk: bytes) -> None:
@@ -265,7 +267,11 @@ class Events:
             if isinstance(value, dict):
                 if value.get("type") == "response.output_item.done" and isinstance(value.get("item"), dict):
                     if len(self.output_types) < 1024:
-                        self.output_types.append({"type": value["item"].get("type")})
+                        item = value["item"]
+                        self.output_types.append({"type": item.get("type"), **({"phase": "commentary"} if
+                            item.get("type") == "message" and item.get("phase") == "commentary" else {})})
+                        if item.get("type") in ("function_call", "custom_tool_call"):
+                            self.finish_call = finish.Call.read(item)
                     else:
                         self.disabled = True
                 if value.get("type") == "response.completed" and isinstance(value.get("response"), dict):
@@ -483,7 +489,8 @@ def defer_signature(match: re.Match[str]) -> str:
     return "\n".join([f"Signature: ALL_TOOLS.find(t => t.name === '{name}').description", *notes])
 
 
-def kernel_context(body: Json, ready: set[str], defer_signatures: bool = False) -> bool:
+def kernel_context(body: Json, ready: set[str], defer_signatures: bool = False,
+                   workflow: str | None = None) -> bool:
     if body.get("tool_choice", "auto") not in ("auto", "required", "none"):
         return False
     lists = tool_lists(body)
@@ -515,8 +522,14 @@ def kernel_context(body: Json, ready: set[str], defer_signatures: bool = False) 
                 if defer_signatures:
                     description = DECLARATION.sub(defer_signature, description)
                 if deferred:
-                    description = (f"Use `tools.{deferred}` for shell commands and local file work. "
-                                   "Find its signature with ALL_TOOLS.\n\n" + description)
+                    intro, separator, catalogue = description.partition("\n\n")
+                    description = (
+                        intro + "\n\n"
+                        f"For shell and local files, call the persistent Python kernel directly: "
+                        f"`text((await tools.{deferred}({{code: pythonSource}})).content)`. "
+                        "Set pythonSource to your Python code string. Helper signatures "
+                        "are available in ALL_TOOLS." + separator + catalogue
+                    )
                 if description != tool["description"]:
                     tool = {**tool, "description": description}
             filtered.append(tool)
@@ -528,13 +541,15 @@ def kernel_context(body: Json, ready: set[str], defer_signatures: bool = False) 
     items = body.get("input")
     if emptied and isinstance(items, list):
         body["input"] = [item for item in items if id(item) not in emptied]
+    if workflow and body.get("tool_choice", "auto") != "none":
+        changed |= thinking(body, workflow)
     return changed
 
 class Relay:
     def __init__(self, upstream: str, policy: Callable[[Json], Json | None], counted: Callable[[Json], object],
                  session_id: str, off: tuple[str, ...] = (), ttl: int = 1800, prewarm: bool = False,
                  capture: Path | None = None, pinned: bool = False,
-                 kernel_access: Callable[[], bool] | None = None) -> None:
+                 kernel_access: Callable[[], bool] | None = None, finish_key: str = "") -> None:
         self.upstream = upstream.rstrip("/")
         parsed = urlsplit(self.upstream)
         if upstream != "auto" and (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password):
@@ -547,12 +562,16 @@ class Relay:
         self.plan_lock = threading.Lock()
         self.plan_loaded = False
         self.kernel_access = kernel_access
+        self.finish_key = finish_key
+        self.finish_instruction: str | None = None
+        self.pending_finish: tuple[int, bytes, bytes, finish.Call, int] | None = None
         self.catalogue_model: str | None = None
         self.kernel_enabled = False
         self.kernel_lock = threading.Lock()
         self.ready_kernels: dict[str, int] = {}
         self.instruction: str | None = None
         self.execution_instruction: str | None = None
+        self.kernel_instruction: str | None = None
         self.output_policy: OutputPolicy | None = None
         self.fanout_ms = 0
         self.groups = Groups()
@@ -612,7 +631,7 @@ class Relay:
                 if not self.plan_loaded:
                     capabilities = ["prefix_replay", "thinking_instruction", "tool_output",
                                     "grouped_subagents", "execution_instruction"]
-                    if self.kernel_access:
+                    if self.kernel_access or self.finish_key:
                         capabilities.append("kernel_tool")
                     plan = self.policy({"engine": "codex", "session_id": self.session_id, "model": body["model"],
                                         "event": "launch", "capabilities": capabilities, "off": list(self.off),
@@ -623,6 +642,12 @@ class Relay:
                         kernel = levers.get("kernel") if isinstance(levers, dict) else None
                         self.kernel_enabled = ("kernel" not in self.off and isinstance(kernel, dict)
                                                and kernel.get("state") == "enabled")
+                        direct = plan.get("kernel_finish_instruction")
+                        if self.kernel_enabled and self.finish_key and isinstance(direct, str) and 0 < len(direct) <= 1024:
+                            self.finish_instruction = direct
+                        workflow = plan.get("kernel_instruction")
+                        if self.kernel_enabled and isinstance(workflow, str) and 0 < len(workflow) <= 2048:
+                            self.kernel_instruction = workflow
                         if plan.get("defer_catalogue_signatures") is True:
                             self.catalogue_model = body["model"]
                         instruction = plan.get("thinking_instruction")
@@ -638,7 +663,10 @@ class Relay:
                         if "fanout" not in self.off and isinstance(wait, int) and not isinstance(wait, bool) and 0 < wait <= 3000:
                             self.fanout_ms = wait
             ready = self.available_kernels()
-            changed = bool(ready) and kernel_context(body, ready, body["model"] == self.catalogue_model)
+            changed = bool(ready) and kernel_context(
+                body, ready, body["model"] == self.catalogue_model,
+                None if kernel_only else " ".join(x for x in (self.kernel_instruction, self.finish_instruction) if x),
+            )
             if kernel_only:
                 return json.dumps(body).encode() if changed else data
             instructions = [value for value in (self.instruction, self.execution_instruction) if value]
@@ -767,6 +795,10 @@ class Relay:
                     return
                 route = target.split("?", 1)[0]
                 real_request = self.command == "POST" and route == "/responses"
+                if self.command == "POST" and route == "/responses/compact":
+                    with relay.session.lock:
+                        relay.pending_finish = None
+                        relay.session.begin()
                 if self.command == "POST" and route == "/responses/compact" and not oversized:
                     data = relay.prepare(data, kernel_only=True)
                 if oversized and real_request:
@@ -788,17 +820,36 @@ class Relay:
                             is_response = key == relay.main_key
                     except (ValueError, UnicodeError):
                         is_response = False
-                generation = relay.session.begin() if is_response else -1
+                generation = -1
+                prior = None
+                if is_response:
+                    with relay.session.lock:
+                        prior, relay.pending_finish = relay.pending_finish, None
+                        generation = relay.session.begin()
                 headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
                 headers["Accept-Encoding"] = "identity"
                 if real_request:
                     data = relay.prepare(data)
+                destination = relay.upstream_for(headers)
+                identity = connection_key(destination, headers)
+                scope = (finish.context(request_body) if is_response and relay.finish_instruction
+                         and isinstance(request_body, dict) else None)
+                if prior and scope and prior[:3] == (generation - 1, identity, scope):
+                    reply = prior[3].reply(request_body, relay.finish_key)
+                    if reply and (relay.kernel_access is None or prior[3].tool in relay.available_kernels()):
+                        local = finish.response(reply)
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream")
+                        self.send_header("Content-Length", str(len(local)))
+                        self.end_headers()
+                        self.wfile.write(local)
+                        relay.rest(generation, data, headers, {"output": [{"type": "message"}],
+                                   "usage": {"input_tokens": prior[4]}})
+                        return
                 release = relay.grouped(data, headers) if real_request else lambda: None
                 captured = relay.capture.begin(data, is_response) if relay.capture and real_request else None
-                destination = relay.upstream_for(headers)
                 parsed = urlsplit(destination)
                 path = parsed.path.rstrip("/") + target
-                identity = connection_key(destination, headers)
                 upstream = relay.server.connections.take(identity) or relay.connection(destination)
                 reusable = False
                 events = Events()
@@ -835,10 +886,20 @@ class Relay:
                             break
                         if captured:
                             captured.feed(chunk)
-                        self.wfile.write(chunk)
-                        self.wfile.flush()
                         if is_response and response.status == 200:
                             events.feed(chunk)
+                            if (scope and events.finish_call and not events.disabled and events.completed
+                                    and events.completed.get("status") == "completed"
+                                    and [x["type"] for x in events.output_types if x["type"] != "reasoning"
+                                         and x.get("phase") != "commentary"]
+                                    == [events.finish_call.kind]):
+                                with relay.session.lock:
+                                    if relay.session.current(generation):
+                                        counts = events.completed.get("usage")
+                                        context_tokens = number(counts, "input_tokens") if isinstance(counts, dict) else 0
+                                        relay.pending_finish = (generation, identity, scope, events.finish_call, context_tokens)
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
                     if is_response and response.status == 200 and events.completed:
                         relay.rest(generation, data, headers, events.completed)
                     reusable = 200 <= response.status < 300 and not response.will_close and response.length in (0, None)
@@ -1012,7 +1073,7 @@ def run(binary: str, args: list[str], env: dict[str, str], *, pinned: bool = Fal
                               lambda facts: post(policy_url.rstrip("/") + "/v1/optimizations", token, facts),
                               lambda step: post(policy_url.rstrip("/") + "/v1/usage", token, {"steps": [step]}),
                               session, off, capture=capture, pinned=pinned,
-                              kernel_access=hosted_kernel_access(env))
+                              kernel_access=hosted_kernel_access(env), finish_key=token)
         except (OSError, ValueError):
             LOG.warning("Local optimization transport unavailable")
     # Codex with ChatGPT authentication otherwise sends Zstandard frames.

@@ -6,6 +6,8 @@ and continuation text; this adapter cannot grant permissions or change models.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -38,6 +40,16 @@ PRIVATE_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
 # Tailscale names: `*.ts.net`, or a short MagicDNS name (one label starting with a letter, so never a numeric
 # address such as 134744072 or 0x8080808).
 TAILSCALE_NAME = re.compile(r"[a-z][a-z0-9-]*|([a-z0-9-]+\.)+ts\.net")
+
+
+# The result travels through the native CLI, which can flatten MCP metadata into text.
+# Bind it to the exact Python cell and reply before the transport can end a turn.
+FINISH_PREFIX = "[workspace-kernel/finish-v1] "
+
+
+def finish_tag(key: str, thread_id: str, item_id: str, source: str, reply: str) -> str:
+    payload = json.dumps(["workspace-kernel/finish-v1", thread_id, item_id, source, reply], ensure_ascii=True).encode("ascii")
+    return hmac.new(key.encode(), payload, hashlib.sha256).hexdigest()
 
 
 def private_host(host: str) -> bool:
@@ -222,8 +234,14 @@ def ask(env: dict[str, str], facts: Json, to: tuple[str, str] | None = None) -> 
 
 
 def levers_off(env: dict[str, str]) -> list[str]:
-    """Levers turned off by the host app (its embedded copy's variable) and by the user."""
+    """Levers turned off by the host app (live file, then env) and by the user."""
     host = env.get("ECONOMISEUR_OFF", "")  # publish: keep
+    off_file = env.get("ECONOMISEUR_OFF_FILE", "")  # publish: keep
+    if off_file:
+        try:
+            host = Path(off_file).read_text(encoding="utf-8")
+        except OSError:
+            pass
     user = env.get("TOKFIT_OFF", "")
     return list(dict.fromkeys(word.strip() for word in f"{host},{user}".split(",") if word.strip()))
 

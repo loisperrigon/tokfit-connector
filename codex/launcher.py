@@ -711,7 +711,7 @@ def current_session(home: Path, cwd: str, now: float) -> Optional[Json]:
             model = payload["model"]
         elif item.get("type") == "event_msg" and payload.get("type") == "token_count" and isinstance(payload.get("info"), dict):
             last = payload["info"].get("last_token_usage")
-            if isinstance(last, dict):
+            if isinstance(last, dict) and number(last.get("input_tokens")) > 0:
                 context, cached = number(last.get("input_tokens")), number(last.get("cached_input_tokens"))
     if not MODEL_ID.fullmatch(model):
         return None
@@ -798,8 +798,7 @@ def run_mcp(env: Dict[str, str], *, antigravity: bool = False) -> int:
         child[url_var], child[key_var] = identity
     # The kernel's host link has precedence over Claude's plugin options and store.
     args = [sys.executable, "-I", "-X", "utf8", str(server)]
-    if antigravity:
-        args.append("--antigravity")
+    args.append("--antigravity" if antigravity else "--codex")
     os.execve(sys.executable, args, child)
 
 

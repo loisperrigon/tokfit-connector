@@ -63,6 +63,7 @@ class Paquet(NamedTuple):
     fini: str
     version: str
     native_tools_description: str = ""
+    codex_finish_instruction: str = ""
 
 
 def lien(env: Dict[str, str], refusees: Collection[str] = ()) -> Optional[Lien]:
@@ -107,8 +108,9 @@ def lire(reponse: object) -> Optional[Paquet]:
             and isinstance(catalogue, list) and all(entree(e) and e["module"] in modules for e in catalogue)):
         return None
     compact = noyau.get("native_tools_description")
+    finish = noyau.get("codex_finish_instruction")
     return Paquet(amorce, dict(modules), list(catalogue), description, fini, reponse["version"],
-                  compact if isinstance(compact, str) else "")
+                  compact if isinstance(compact, str) else "", finish if isinstance(finish, str) else "")
 
 
 def poster(vers: Lien, chemin: str, corps: object, delai_s: float = DELAI_S) -> object:

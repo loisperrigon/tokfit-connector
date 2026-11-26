@@ -1,7 +1,7 @@
 {
   "files": {
-    "launcher.py": "f1777ccf084af43c7972720d5aca6bdc2ae0c64c4ceda157de3298214aee69be",
-    "tokfit-codex/hooks/completion.py": "3ffc85b214334d6ae25e332b87131ffd313a507349fa0162110885e671d3ac14",
+    "launcher.py": "5cc63dda9f3fc54c9c9d3d70a29e903cd8092c3b54224c9773ccc696eef5a645",
+    "tokfit-codex/hooks/completion.py": "87a98873036fee30c9d87676c4537791a3c366b6f03abeb9c0f7bec657187bca",
     "tokfit-codex/kernel/__init__.py": "f90acf592fdb362fbce04e27b06e3cabd25c7e62bcd70a5a07f1aab40047f8dd",
     "tokfit-codex/kernel/antigravity_ready.py": "f67c66b18c5d5ddd23a1e31dd267c8a2e291fd9b058cca4845740879901d12d9",
     "tokfit-codex/kernel/autoupdate.py": "e9b1a7ceb4597c9bdf072aac5be4eb420952d6025e3f00ad30b67cbed2b7d0bf",
@@ -9,19 +9,20 @@
     "tokfit-codex/kernel/compte.py": "6f27fcf7c701f28175913fcc9708218992a21f951e69899f4bd169e770864e2e",
     "tokfit-codex/kernel/kernel.py": "3442e41f0fbcfbbecc0b3ac535876757aa381b8b153e0ce2abdeff9e67afe045",
     "tokfit-codex/kernel/output.py": "379b5967cf646faf0aff4312955cb7868487176a2d9739afba1e51839d442a58",
-    "tokfit-codex/kernel/pack.py": "b69b893acfc1dc7619c419bf5d9c310a118d60d5d0cd4d23064cf68297e4b34b",
+    "tokfit-codex/kernel/pack.py": "76321ad08ab1ffd40df3dd6a4683bacbf83244b6485b23ba0d936cb83735132a",
     "tokfit-codex/kernel/projet.py": "f478647506d37a38118e461f61c97abaa7705a48707d6e14810c972e3952fe85",
-    "tokfit-codex/kernel/server.py": "8f662f145bf7a665f79492ed43419caa85fae159610fee67e7d2beb9ba0fbc03",
+    "tokfit-codex/kernel/server.py": "9f4145e5a8d60bb6a433ec40567558de3cdf61bd2b313891278a2fa024b93f67",
     "tokfit-codex/kernel/tubes.py": "014824115c37e53965caccb159cfca086f13d78c98ddad4c63a97ae6a55561ed",
     "tokfit-codex/kernel/worker.py": "6c03fdd010efca98f71d863af49488730e77f2247fc81c354c92c0cda5d3ec37",
     "tokfit-codex/register_mcp.py": "93fdae7ac2d79b5992327ef04ae0573698862ce494177a25822e33fbb4ee8a52",
     "tokfit-codex/runtime/__init__.py": "d11f0914055826ac8ccbd4dacac925a16ffb64d0ad4e00586fac21ea296783cc",
     "tokfit-codex/runtime/antigravity_tools.py": "b71aeb93730a1c3f65023433651e4827df935dd8a10967149760ce00bdea1bf0",
-    "tokfit-codex/runtime/completion.py": "3ffc85b214334d6ae25e332b87131ffd313a507349fa0162110885e671d3ac14",
+    "tokfit-codex/runtime/completion.py": "87a98873036fee30c9d87676c4537791a3c366b6f03abeb9c0f7bec657187bca",
     "tokfit-codex/runtime/cursor.py": "9c6ced4faf20d0132e36883c292e23f9a7a8de273e472fe9f2fe55166a257951",
+    "tokfit-codex/runtime/finish.py": "c004aed67d184d9671938d2b95e1c778e0268b7524cc100fecdcd97551efcb74",
     "tokfit-codex/runtime/output.py": "20640161fe87e3ce3fe9766687ebbb6dd2fc93ab97dd7b17371e1e9031631542",
     "tokfit-codex/runtime/process.py": "48c20f0566c158f8c80490f4720d014429cb8b8090e29c72ff2a49fc1e0a2439",
-    "tokfit-codex/runtime/relay.py": "97443734427a10bb3efa6a81c8b6516e496044c06f532cc6a342d11f94f891fa"
+    "tokfit-codex/runtime/relay.py": "1125c3c8763c7c600d85904e6e65fc92f6de649d6bb49389452ec23c8f91c324"
   },
-  "version": "0.7.49"
+  "version": "0.7.50"
 }
