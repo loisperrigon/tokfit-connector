@@ -73,7 +73,7 @@ export type Options = {
   // Réponse de `$.model.fork` (relance du cache) ; par défaut, « ok » sur le cache du fil.
   fork?: () => ModelForkResult
   // Contexte rendu par `$.session.usage()` (tokens) ; par défaut 42 000.
-  contextTokens?: () => number
+  contextTokens?: () => number | undefined
   messages?: SessionMessage[]
   files?: Record<string, string>
   rateLimits?: { kind: string; percentUsed: number }[]
@@ -255,7 +255,7 @@ export function world(on: On, options: Options = {}): World {
   on('session.usage', async ($, e) => ({
     value: {
       startedAt: 0, rateLimits: options.rateLimits ?? [],
-      context: { tokens: options.contextTokens?.() ?? 42_000, window: 200_000, ...(e?.breakdown && options.breakdown ? { breakdown: options.breakdown } : {}) },
+      context: { ...withTokens(options.contextTokens ? options.contextTokens() : 42_000), window: 200_000, ...(e?.breakdown && options.breakdown ? { breakdown: options.breakdown } : {}) },
     },
   }))
   const show = (event: string, text: string | undefined): { value: undefined } => {
@@ -365,6 +365,11 @@ function bodyText(body: string | { readonly base64: string } | undefined): strin
   if (body === undefined) return '{}'
   if (typeof body === 'string') return body
   return new TextDecoder().decode(Uint8Array.from(atob(body.base64), char => char.charCodeAt(0)))
+}
+
+// Contexte de la dernière réponse ; absent juste après une compaction, comme dans le moteur.
+function withTokens(tokens: number | undefined): { tokens?: number } {
+  return tokens === undefined ? {} : { tokens }
 }
 
 // Ce qui s'est affiché d'autre que la ligne d'état d'une décision aboutie.

@@ -31,7 +31,7 @@ import type { Queue, StepFacts } from './usage'
 import { began, closed, ended, modelTime, queued as timed, responded, timing, toolTime } from './timing'
 import type { Timing } from './timing'
 import { audit } from './audit'
-import { compactNow, wanted } from './compact'
+import { compactNow, stopsWarm, wanted } from './compact'
 import type { Try } from './compact'
 import { fanout, launched, queued } from './fanout'
 import type { Fanout } from './fanout'
@@ -40,8 +40,8 @@ import { chosen, holdout, levers } from './experiments'
 import type { Holdout } from './experiments'
 import { compacted, observed, rereads, stepped } from './rereads'
 import type { Rereads } from './rereads'
-import { host, report, reportLoaded, status } from './host'
-import type { Line, RouteReport, Seen } from './host'
+import { host, profile, report, reportLoaded, status } from './host'
+import type { Line, Profile, RouteReport, Seen } from './host'
 import { SYNC_MS, adopt, animate, badge, refresh, statusText } from './badge'
 import type { Gain } from './badge'
 import { band } from './band'
@@ -280,6 +280,8 @@ type State = {
   compactedFrom: number | undefined
   // Issue de la dernière compaction voulue par le service, en attente de l'étape suivante du fil.
   compactTry: Try | undefined
+  // Compaction du connecteur en cours (compact.ts, `stopsWarm`).
+  compacting: boolean
   // La consigne de réflexion joue sur la conversation, selon le service (`lean_thinking` de /v1/route).
   lean: boolean
   // Sections du prompt système passées dans le contexte du premier message (prefix.ts).
@@ -869,6 +871,7 @@ async function paused($: EngineInterface, s: State): Promise<void> {
   const generation = s.warm.generation
   const idle = (): boolean => s.warm.generation === generation
   let ping: string | undefined
+  let kind: Profile | undefined
   try {
     const to = await link($, s.options)
     if (to && !s.audited) {
@@ -879,13 +882,19 @@ async function paused($: EngineInterface, s: State): Promise<void> {
     ping = plan?.warm
     const instructions = plan?.compaction
     const model = s.warm.main?.model
+    kind = await profile($, s.seen)
     const after = to && model && instructions !== undefined && !off.has('compaction')
-      ? await wanted($, to, model, (await host($, s.seen)) !== null) : null
+      ? await wanted($, to, model, (await host($, s.seen)) !== null, kind) : null
     if (after !== null && instructions !== undefined) {
       s.compactTry = 'back'
       if ((await waited($, s.warm, after)) && idle()) {
         const before = (await $.session.usage()).context.tokens
-        s.compactTry = await compactNow($, idle, instructions)
+        s.compacting = true
+        try {
+          s.compactTry = await compactNow($, idle, instructions)
+        } finally {
+          s.compacting = false
+        }
         if (s.compactTry === 'done') {
           cooled(s)
           compacted(s.rereads)
@@ -897,7 +906,7 @@ async function paused($: EngineInterface, s: State): Promise<void> {
     // Service en panne ou session illisible : conversation entière.
   }
   // L'utilisateur est revenu pendant l'attente : son tour relancera la pause.
-  if (idle() && ping !== undefined && !s.off.has('warm')) await rest($, s.warm, s.options, s.queue, ping)
+  if (idle() && ping !== undefined && !s.off.has('warm')) await rest($, s.warm, s.options, s.queue, ping, kind)
   // Sans relance après la compaction : plus rien de prévu (warm.ts, `awake`).
   else if (idle()) await awake($, s.warm, null)
 }
@@ -909,7 +918,7 @@ export const register: Register = (on, options) => {
     options, queue: queue(options), to: null, routedModel: undefined, turn: {}, steered: new Set(), tags: NO_TAGS, plans: new Map(),
     pending: new Map(), spawning: 0, loops: new Map(), sources: new Map(), lastCall: new Map(),
     compacted: false, warm: warm(), audited: false, fanout: fanout(), trimmed: new Map(), compactedFrom: undefined,
-    compactTry: undefined, lean: false, prefix: prefix(),
+    compactTry: undefined, compacting: false, lean: false, prefix: prefix(),
     rereads: rereads(), holdout: holdout(), off: new Set(), seen: {}, line: {}, badge: badge(), workSteps: 0, workEdits: 0, sessionModel: undefined,
     cut: false, kernel: kernel(), content: plans(), timing: timing(), noticed: notice(), health: health(), outage: outage(),
   }
@@ -1303,10 +1312,9 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (e.agentId === undefined && e.trigger !== 'precompute' && !result.skip) {
       cooled(s)
-      // Compaction du moteur ou de l'utilisateur (dont celle à l'inactivité) :
-      // `$.model.fork` rejouerait la requête d'avant, relances arrêtées. La
-      // nôtre (`plugin`) précède la chaîne, qui part ensuite sur le résumé.
-      if (e.trigger === 'auto' || e.trigger === 'manual') cancel(s.warm)
+      // Compaction du moteur ou de l'utilisateur (dont celle à l'inactivité) : relances
+      // arrêtées. La nôtre précède la chaîne, qui part ensuite sur le résumé (compact.ts).
+      if (stopsWarm(e.trigger, s.compacting)) cancel(s.warm)
     }
     return result
   }).catch(($, e, next) => next(e))

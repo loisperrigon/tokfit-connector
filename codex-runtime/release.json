@@ -24,5 +24,5 @@
     "tokfit-codex/runtime/process.py": "48c20f0566c158f8c80490f4720d014429cb8b8090e29c72ff2a49fc1e0a2439",
     "tokfit-codex/runtime/relay.py": "1125c3c8763c7c600d85904e6e65fc92f6de649d6bb49389452ec23c8f91c324"
   },
-  "version": "0.7.50"
+  "version": "0.7.51"
 }

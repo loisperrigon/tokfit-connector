@@ -5,6 +5,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import { PING_TEXT as PING_PROMPT } from './plan'
 import { SESSION, URL, complete, config, end, step, user, world } from './support'
 import type { Reply } from './support'
+import type { SessionContextBreakdown } from 'claude-code'
 
 type Sent = Record<string, unknown>
 
@@ -17,6 +18,19 @@ function delays(...values: (number | null)[]): (body: Sent) => Reply {
 }
 
 describe('fork-ping', () => {
+  test('juste après une compaction, le contexte est l’estimation du moteur (aucune réponse encore)', async ($, on) => {
+    const breakdown: SessionContextBreakdown = {
+      categories: [], totalTokens: 63_800.4, maxTokens: 200_000, rawMaxTokens: 200_000, autocompactSource: 'model-default',
+      percentage: 32, gridRows: [], model: 'claude-opus-5-5', memoryFiles: [], mcpTools: [], agents: [],
+      isAutoCompactEnabled: true, autoCompactThreshold: 187_000, apiUsage: null,
+    }
+    const w = world(on, { messages: [user('x')], contextTokens: () => undefined, breakdown })
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    expect(w.warms()[0]?.body).toMatchObject({ context_tokens: 63_800 })
+  })
+
   test('fin de tour du fil principal : le service est consulté avec le contexte du fil', async ($, on) => {
     const w = world(on, { messages: [user('x')], route: SONNET })
     await step($, 0, { turnId: 't1' })

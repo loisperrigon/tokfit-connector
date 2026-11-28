@@ -14,6 +14,7 @@ import type { EngineInterface, ModelEffort, ModelUsage, PluginOptions } from 'cl
 import { EFFORTS, USAGE_TIMEOUT_MS, field, link, post } from './service'
 import { add, stepOf } from './usage'
 import type { Queue } from './usage'
+import type { Profile } from './host'
 
 // Au-delà, une réponse du service est tenue pour illisible.
 const MAX_AFTER_S = 86_400
@@ -100,14 +101,16 @@ export async function waited($: EngineInterface, w: Warm, ms: number): Promise<b
 }
 
 // Fin d'un tour du fil principal : chaîne de relances tant que le service en veut. Ne lève jamais.
-export async function rest($: EngineInterface, w: Warm, options: PluginOptions, q: Queue, prompt: string): Promise<void> {
+// `profile` : profil de session posé par l'hôte (host.ts), joint à chaque demande.
+export async function rest($: EngineInterface, w: Warm, options: PluginOptions, q: Queue, prompt: string,
+  profile?: Profile): Promise<void> {
   cancel(w)
   const generation = w.generation
   w.pings = 0
   try {
     w.restedAt = await $.clock.now()
     while (w.generation === generation) {
-      const after = await nextPing($, w, options)
+      const after = await nextPing($, w, options, profile)
       if (after === null || !(await waited($, w, after * 1000)) || w.generation !== generation) return
       const reply = await $.model.fork({ prompt, ...(await sameEffort($, w)) })
       // Rien à relancer (aucun tour fini, `/clear`) : pas de requête, pas de compteurs.
@@ -173,17 +176,33 @@ async function idleCompactTokens($: EngineInterface): Promise<number | undefined
   }
 }
 
+// Contexte que relirait la relance : celui de la dernière réponse ; juste après une compaction, aucune
+// réponse encore (le moteur ne le dit qu'à la suivante), son estimation par catégories (`breakdown`,
+// comme /context). Sans elle, 0 : aucune relance. Vu dans l'essai ACP du 28/11/2026 : 0 envoyé après
+// chaque compaction du connecteur, la pause du contexte résumé n'était jamais gardée au chaud.
+async function contextTokens($: EngineInterface): Promise<number> {
+  const tokens = (await $.session.usage()).context.tokens
+  if (tokens !== undefined) return tokens
+  try {
+    const total = (await $.session.usage({ breakdown: 'summary' })).context.breakdown?.totalTokens
+    return typeof total === 'number' && Number.isFinite(total) && total > 0 ? Math.round(total) : 0
+  } catch {
+    // Répartition illisible : comme avant, aucune relance.
+    return 0
+  }
+}
+
 // Secondes avant la prochaine relance selon le service, ou null.
-async function nextPing($: EngineInterface, w: Warm, options: PluginOptions): Promise<number | null> {
+async function nextPing($: EngineInterface, w: Warm, options: PluginOptions, profile?: Profile): Promise<number | null> {
   const to = await link($, options)
   if (!to || !w.main) return null
-  const usage = await $.session.usage()
-  const tokens = usage.context.tokens ?? 0
+  const tokens = await contextTokens($)
   const idleS = Math.max(0, Math.round(((await $.clock.now()) - w.restedAt) / 1000))
   const idleCompact = await idleCompactTokens($)
   const reply = await post($, to, '/v1/warm', {
     model: w.main.model, context_tokens: tokens, idle_s: idleS, pings: w.pings,
     ...(idleCompact === undefined ? {} : { idle_compact_tokens: idleCompact }),
+    ...(profile ? { profile } : {}),
   }, USAGE_TIMEOUT_MS)
   if (reply?.status !== 200) return null
   const after = field(reply.text, 'after_s')

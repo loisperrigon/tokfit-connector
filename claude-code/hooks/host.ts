@@ -17,8 +17,11 @@
 import type { EngineInterface } from 'claude-code'
 
 export type Host = { pane: string; bridge: string }
-// Lecture des deux variables, une fois par session (état de la session, register.ts).
-export type Seen = { host?: Promise<Host | null> }
+// Profil de session posé par l'hôte : `long`, session de longue durée (Pilote d'Alfie : un tchat par projet,
+// des semaines, réveillé par ses fils). Un fait joint à /v1/warm et /v1/compact ; le service décide.
+export type Profile = 'long'
+// Lecture des variables, une fois par session (état de la session, register.ts).
+export type Seen = { host?: Promise<Host | null>; profile?: Promise<Profile | undefined> }
 
 // État d'une décision, dans les mots du voyant de l'application.
 export type RouteReport =
@@ -33,6 +36,14 @@ export function host($: EngineInterface, seen: Seen): Promise<Host | null> {
     return pane && bridge ? { pane, bridge } : null
   })().catch(() => null)
   return seen.host
+}
+
+// Variable de l'hôte, même nom dans la copie publique (l'hôte la pose pour les deux).
+export function profile($: EngineInterface, seen: Seen): Promise<Profile | undefined> {
+  seen.profile ??= $.env.get('ECONOMISEUR_SESSION_PROFILE') // publish: keep
+    .then(value => (value === 'long' ? 'long' as const : undefined))
+    .catch(() => undefined)
+  return seen.profile
 }
 
 // Ligne d'état (dernière décision, puis le gain sur les surfaces graphiques), seulement hors de l'application hôte.

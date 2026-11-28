@@ -3,7 +3,7 @@
 // du cache partent sur la conversation résumée.
 import { describe, expect, test } from 'claude-code/testing'
 import type { EngineInterface } from 'claude-code'
-import { compactNow } from '../hooks/compact'
+import { compactNow, stopsWarm } from '../hooks/compact'
 import { COMPACT_TEXT as COMPACT_INSTRUCTIONS, TEST_PLAN } from './plan'
 import { SESSION, URL, complete, config, step, user, world } from './support'
 import type { Reply } from './support'
@@ -24,6 +24,24 @@ describe('compaction au coût', () => {
     expect(w.compacts()[0]?.url).toBe(`${URL}/v1/compact`)
     expect(w.compacts()[0]?.body).toEqual({ model: 'claude-opus-5-5', context_tokens: 42_000, session_id: SESSION, host: false })
     expect(w.compactions).toEqual([])
+  })
+
+  test('session longue posée par l’hôte : le profil part avec la demande de compaction et de relance', async ($, on) => {
+    const w = world(on, { messages: [user('x')], env: { ECONOMISEUR_SESSION_PROFILE: 'long' }, warm: () => ({ status: 200, body: { after_s: null } }) }) // publish: keep
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    expect(w.compacts()[0]?.body).toEqual({ model: 'claude-opus-5-5', context_tokens: 42_000, session_id: SESSION, host: false, profile: 'long' })
+    expect(w.warms()[0]?.body).toMatchObject({ profile: 'long' })
+  })
+
+  test('profil inconnu de l’hôte : rien n’est joint', async ($, on) => {
+    const w = world(on, { messages: [user('x')], env: { ECONOMISEUR_SESSION_PROFILE: 'pilote' } }) // publish: keep
+    await step($, 0, { turnId: 't1' })
+    await complete($, 't1')
+    await w.clock.settle()
+    expect(w.compacts()[0]?.body).not.toHaveProperty('profile')
+    expect(w.warms()[0]?.body).not.toHaveProperty('profile')
   })
 
   test('le service dit oui : compaction après 4 min d’absence, cache froid signalé au message suivant', async ($, on) => {
@@ -165,6 +183,17 @@ describe('compaction au coût', () => {
     const after = stepsOf(done.usages().at(-1)?.body ?? {})
     expect(after[0]).toMatchObject({ compact_try: 'done', compacted_from: 42_000 })
     expect(after[1]).not.toHaveProperty('compact_try')
+  })
+
+  test('compaction annoncée par le moteur : celle du connecteur ne coupe pas ses relances', () => {
+    // Essai ACP réel du 28/11/2026 : sans terminal, la commande /compact du connecteur est annoncée
+    // « manual », comme un /compact tapé ; la chaîne s'arrêtait et la pause du Pilote, compactée, finissait à froid.
+    expect(stopsWarm('manual', true)).toBe(false)
+    expect(stopsWarm('plugin', false)).toBe(false)
+    expect(stopsWarm('manual', false)).toBe(true)
+    expect(stopsWarm('auto', false)).toBe(true)
+    expect(stopsWarm('auto', true)).toBe(false)
+    expect(stopsWarm(undefined, false)).toBe(false)
   })
 
   test('issue remontée : compaction refusée par le moteur (tour en cours), dite au service', async ($, on) => {
