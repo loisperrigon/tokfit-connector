@@ -9,6 +9,9 @@ prévenu que son état est perdu.
 
 Un outil qui attend plus longtemps que le reste du délai (`shell(timeout_s=…)`…) le fait reculer, jusqu'à
 PROLONGEE_MAX depuis le début de la cellule (`kernel/cellule.py`) ; le délai affiché est alors celui atteint.
+Un client qui borne le temps d'un appel (`attente_max_s` : Claude Code passe un appel MCP en tâche de fond après
+120 s) reçoit la main avant : la cellule continue, état gardé, jusqu'à son propre délai ; l'appel suivant l'attend
+(borné de même), montre sa sortie, puis lance son propre code. Ce délai n'est vérifié qu'à cet appel suivant.
 Une cellule coupée propose l'arrière-plan (`job`). Les travaux de fond s'arrêtent avec le noyau : redémarrage,
 fin de session.
 
@@ -56,6 +59,13 @@ REDEMARRE = "[kernel restarted: state lost]"
 TOURNE_ENCORE = ("[cell still running after {} s: it ignores the interrupt (long call in C, or KeyboardInterrupt "
                  "caught); state kept, the next call waits for it up to its timeout_s, then restarts the kernel]")
 FINIE_ENFIN = "[previous cell stopped; its output:]\n"
+RENDUE = ("[cell still running after {} s (its timeout: {} s), state kept: call agir again; the next call waits for it, "
+          "shows its output, then runs its own code]")
+ATTENDUE = ("[previous cell still running after {} s (its timeout: {} s): your code was not run; call agir again to "
+            "keep waiting]")
+FINIE_APRES = "[previous cell finished after {} s; its output:]\n"
+PRECEDENTE = "[previous cell:]\n"
+NON_LANCE = "\n[your code was not run]"
 TOUJOURS_SOURD = "[previous cell still running after {} more s]"
 PLUS_LONG = "\n[longer work: run it in the background with job(command) and check on it in later calls{}]"
 ENCORE = ", or run it again with timeout_s={} ({} at most)"
@@ -211,6 +221,24 @@ def plus_long(duree_s: int) -> str:
     return PLUS_LONG.format(encore)
 
 
+def coupee_sourde(duree_s: int) -> str:
+    """Cellule qui ignore l'interruption après son délai de `duree_s` : elle continue, état gardé."""
+    return TOURNE_ENCORE.format(duree_s) + plus_long(duree_s)
+
+
+def joindre(precedente: Optional[Execution], execution: Execution) -> Execution:
+    """`execution` (sa sortie commence déjà par celle de `precedente`), avec les appels d'outils, les images et la
+    fin de tour de la cellule précédente, finie pendant cet appel."""
+    if precedente is None:
+        return execution
+    usage = dict(precedente.usage or {})
+    for nom, nombre in (execution.usage or {}).items():
+        usage[nom] = usage.get(nom, 0) + nombre
+    images = [*(precedente.images or []), *(execution.images or [])]
+    return execution._replace(usage=usage or None, images=images or None,
+                              fini=execution.fini if execution.fini is not None else precedente.fini)
+
+
 class NoyauMort(Exception):
     """Le processus du noyau a disparu pendant une cellule."""
 
@@ -238,6 +266,9 @@ class Noyau:
         # Cellule en cours de lecture : son début et son échéance, que ses outils font reculer (`kernel/cellule.py`).
         self.debut: Optional[float] = None
         self.echeance = 0.0
+        # La cellule en cours a rendu la main avant son délai (`attente_max_s`) : elle continue, l'appel suivant
+        # l'attend ; `debut` et `echeance` restent les siens.
+        self.rendue = False
         # Groupes de processus des travaux de fond du noyau (`job`), arrêtés avec lui.
         self.groupes: List[int] = []
         # Interpréteur du noyau, choisi au premier démarrage (`python_du_projet`) ; sys.executable : celui du serveur.
@@ -285,7 +316,8 @@ class Noyau:
             for fd in enfant:
                 os.close(fd)
         self.requetes, self.reponses, self.tampon = ecriture_parent, lire_en_fond(lecture_parent), b""
-        self.en_cours = self.eprouve = False
+        self.en_cours = self.eprouve = self.rendue = False
+        self.debut = None
         if not self.amorce:
             return ""
         return self.executer(self.amorce, 120).sortie
@@ -322,40 +354,68 @@ class Noyau:
             tubes.tuer_groupe(groupe)
         return TRAVAUX_ARRETES.format(len(groupes)) if groupes else ""
 
-    def executer(self, code: str, timeout_s: int, faits: Optional[Dict[str, Any]] = None) -> Execution:
+    def executer(self, code: str, timeout_s: int, faits: Optional[Dict[str, Any]] = None,
+                 attente_max_s: Optional[float] = None) -> Execution:
+        """Lance `code`, `timeout_s` au plus (ses outils le prolongent) ; l'appel rend la main au bout
+        d'`attente_max_s` s'il est donné, la cellule continuant alors jusqu'à son délai (voir le module)."""
         if self.ferme:
             return Execution(ARRETE, False)
         if self.processus is None:
             self.demarrer()
+        rendre = None if attente_max_s is None else time.monotonic() + max(attente_max_s, 0.0)
         prefixe = ""
+        precedente: Optional[Execution] = None
         try:
             if self.en_cours:
-                precedente = self.interrompre_jusqu_a(float(timeout_s))
-                if precedente is None:
-                    log.warning("cellule toujours sourde à SIGINT après %s s de plus : redémarrage", timeout_s)
-                    sortie = f"{TOUJOURS_SOURD.format(timeout_s)}\n{REDEMARRE}{self.arreter_travaux()}"
+                attente = float(timeout_s) if rendre is None else min(float(timeout_s), self.reste(rendre))
+                sourde = self.interrompre_jusqu_a(attente)
+                if sourde is None:
+                    log.warning("cellule toujours sourde à SIGINT après %s s de plus : redémarrage", round(attente))
+                    sortie = f"{TOUJOURS_SOURD.format(round(attente))}\n{REDEMARRE}{self.arreter_travaux()}"
                     return Execution(tronque(f"{sortie}\n{self.demarrer()}".rstrip("\n"), self.max_sortie), False)
                 self.en_cours = False
-                prefixe = FINIE_ENFIN + str(precedente["sortie"]).rstrip("\n") + "\n\n"
+                prefixe = FINIE_ENFIN + str(sourde["sortie"]).rstrip("\n") + "\n\n"
+            if self.rendue:
+                assert self.debut is not None
+                debut_precedente = self.debut
+                reponse = self.attendre(rendre)
+                if reponse is None and time.monotonic() < self.echeance:
+                    return Execution(ATTENDUE.format(round(time.monotonic() - debut_precedente),
+                                                     round(self.echeance - debut_precedente)), True)
+                self.rendue = False
+                if reponse is None:
+                    coupee = self.couper(debut_precedente)
+                    if coupee is None:
+                        return Execution(tronque(coupee_sourde(round(self.echeance - debut_precedente)) + NON_LANCE,
+                                                 self.max_sortie), False)
+                    prefixe = PRECEDENTE + coupee + "\n\n"
+                else:
+                    self.debut = None
+                    precedente = self.borne(reponse, self.max_sortie + marge_valide(reponse.get("marge")))
+                    prefixe = (FINIE_APRES.format(round(time.monotonic() - debut_precedente))
+                               + precedente.sortie.rstrip("\n") + "\n\n")
             debut = time.monotonic()
             self.debut, self.echeance = debut, debut + timeout_s
             try:
                 self.envoyer(code, timeout_s, faits)
-                reponse = self.lire(float(timeout_s))
-            finally:
+                reponse = self.attendre(rendre)
+            except BaseException:
                 self.debut = None
+                raise
+            if reponse is None and time.monotonic() < self.echeance:
+                self.rendue = True
+                rendue = RENDUE.format(round(time.monotonic() - debut), round(self.echeance - debut))
+                return joindre(precedente, Execution(tronque(prefixe + rendue, self.max_sortie), True))
             if reponse is not None:
+                self.debut = None
                 limite = self.max_sortie + marge_valide(reponse.get("marge"))
                 execution = self.borne(reponse, limite)
-                return execution._replace(sortie=tronque(prefixe + execution.sortie, limite))
-            duree = round(self.echeance - debut)
-            reponse = self.interrompre_jusqu_a(GRACE_S)
-            if reponse is not None:
-                return Execution(tronque(f"{prefixe}{reponse['sortie']}[interrupted after {duree} s]"
-                                         f"{plus_long(duree)}", self.max_sortie), False)
-            log.warning("cellule sourde à SIGINT après %s s : elle continue, état gardé", duree)
-            self.en_cours = True
-            return Execution(tronque(prefixe + TOURNE_ENCORE.format(duree) + plus_long(duree), self.max_sortie), False)
+                return joindre(precedente, execution._replace(sortie=tronque(prefixe + execution.sortie, limite)))
+            coupee = self.couper(debut)
+            if coupee is None:
+                return joindre(precedente, Execution(
+                    tronque(prefixe + coupee_sourde(round(self.echeance - debut)), self.max_sortie), False))
+            return joindre(precedente, Execution(tronque(prefixe + coupee, self.max_sortie), False))
         except NoyauMort:
             if self.ferme:
                 return Execution(ARRETE, False)
@@ -366,6 +426,26 @@ class Noyau:
                 self.python = sys.executable
         amorce = self.demarrer()
         return Execution(tronque(f"{sortie}\n{amorce}".rstrip("\n"), self.max_sortie), False)
+
+    @staticmethod
+    def reste(rendre: float) -> float:
+        return max(rendre - time.monotonic(), 0.0)
+
+    def attendre(self, rendre: Optional[float]) -> Optional[dict[str, object]]:
+        """La réponse de la cellule en cours, None si son échéance passe ou, avant elle, l'instant `rendre`."""
+        return self.lire(max(self.echeance - time.monotonic(), 0.0), rendre)
+
+    def couper(self, debut: float) -> Optional[str]:
+        """La cellule commencée à `debut` a passé son échéance : interrompue, sa sortie et le conseil ; None si elle
+        ignore l'interruption (elle continue, état gardé, `en_cours`)."""
+        duree = round(self.echeance - debut)
+        self.debut = None
+        reponse = self.interrompre_jusqu_a(GRACE_S)
+        if reponse is not None:
+            return f"{reponse['sortie']}[interrupted after {duree} s]{plus_long(duree)}"
+        log.warning("cellule sourde à SIGINT après %s s : elle continue, état gardé", duree)
+        self.en_cours = True
+        return None
 
     def borne(self, reponse: dict[str, object], limite: int) -> Execution:
         """Réponse du worker vérifiée, sortie coupée à `limite` (la limite plus la marge des textes lus)."""
@@ -412,11 +492,14 @@ class Noyau:
         except BrokenPipeError as erreur:
             raise NoyauMort() from erreur
 
-    def lire(self, delai_s: float) -> Optional[dict[str, object]]:
+    def lire(self, delai_s: float, rendre: Optional[float] = None) -> Optional[dict[str, object]]:
         """Une réponse, None si le délai passe ; NoyauMort si le tube se ferme. Une prolongation de la cellule en
-        cours (`kernel/cellule.py`) déplace son échéance, et ce délai avec elle ; hors cellule (interruption, cellule
-        sourde attendue), elle est ignorée. Chaque réponse dit les travaux de fond encore vivants."""
+        cours (`kernel/cellule.py`) déplace son échéance, et ce délai avec elle, sans dépasser l'instant `rendre` ;
+        hors cellule (interruption, cellule sourde attendue), elle est ignorée. Chaque réponse dit les travaux de fond
+        encore vivants."""
         fin = time.monotonic() + delai_s
+        if rendre is not None:
+            fin = min(fin, rendre)
         while True:
             reponse = self.ligne(fin)
             if reponse is None or PROLONGE not in reponse:
@@ -426,7 +509,7 @@ class Noyau:
                 # L'échéance peut baisser : après l'attente d'un outil, elle revient au délai de la cellule plus le
                 # temps excusé (`cellule.relacher`).
                 self.echeance = self.debut + min(float(duree), PROLONGEE_MAX)
-                fin = self.echeance
+                fin = self.echeance if rendre is None else min(self.echeance, rendre)
         if reponse is not None:
             groupes = reponse.get(GROUPES)
             self.groupes = [groupe for groupe in groupes if type(groupe) is int and groupe > 0] \

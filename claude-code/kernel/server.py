@@ -51,7 +51,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, MutableMapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, MutableMapping, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -81,6 +81,18 @@ TIMEOUT_DEFAUT = 120
 # demandait sinon 600 s par précaution, ou voyait sa commande coupée avant son propre délai.
 TIMEOUT_TEXTE = (f"Timeout in seconds ({TIMEOUT_DEFAUT} by default, {TIMEOUT_MAX} at most); a helper that waits longer "
                  f"(its own timeout_s: shell, verify…) extends it, up to {PROLONGEE_MAX} s in all.")
+ATTENTE_TEXTE = (" This client waits {} s at most per call: a longer cell keeps running in the kernel, and the next call "
+                 "waits for it and shows its output.")
+# Claude Code passe en tâche de fond un appel MCP qui dure plus de 120 s (session interactive) : l'agent perd la main,
+# reçoit le résultat plus tard et relançait des sondages, parfois deux à la fois (constat du 28/11/2026, Claude Code
+# 2.1.332). `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` règle ce seuil, 0 le coupe ; `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`
+# le coupe aussi ; sous `claude -p` (`CLAUDE_CODE_ENTRYPOINT` en `sdk-…`), il ne vaut qu'avec
+# `CLAUDE_AUTO_BACKGROUND_TASKS`. Un appel d'`agir` rend donc la main MARGE_CLIENT_S avant (moitié du seuil au plus) :
+# la cellule continue dans le noyau, l'appel suivant l'attend (`kernel/kernel.py`).
+FOND_CLAUDE_S = 120.0
+MARGE_CLIENT_S = 10.0
+OCCUPE = ("[another call to this kernel is still running (the client moved it to the background?): your code was not "
+          "run; call agir again]")
 ARRET_S = 2.0
 # Attente maximale de la réponse à `initialize` pour le lien et le paquet (cas ordinaire : service joignable,
 # clé déjà là, quelques centaines de ms, et le premier `tools/list` rend déjà l'outil) ; au-delà, le serveur répond
@@ -124,6 +136,30 @@ def entier(env: Dict[str, str], nom: str, defaut: int) -> int:
         log.warning("%s illisible (%r) : %s par défaut", nom, brut, defaut)
         return defaut
     return valeur if valeur > 0 else defaut
+
+
+def vrai(valeur: Optional[str]) -> bool:
+    return (valeur or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def attente_du_client(env: Mapping[str, str]) -> Optional[float]:
+    """Secondes qu'un appel peut tenir avant que le client ne le passe en tâche de fond ; None : pas de borne."""
+    if env.get("CLAUDECODE") != "1" or vrai(env.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")):
+        return None
+    if env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk-") and not vrai(env.get("CLAUDE_AUTO_BACKGROUND_TASKS")):
+        return None
+    seuil = FOND_CLAUDE_S
+    brut = env.get("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS", "").strip()
+    if brut:
+        try:
+            millisecondes = float(brut)
+        except ValueError:
+            log.warning("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS illisible (%r) : %s s", brut, FOND_CLAUDE_S)
+        else:
+            if millisecondes <= 0:
+                return None
+            seuil = millisecondes / 1000
+    return max(seuil - MARGE_CLIENT_S, seuil / 2)
 
 
 def code_amorce(paquet: Paquet) -> str:
@@ -176,10 +212,12 @@ class Compteur:
         self.envoyer(delai_s)
 
 
-def schema_outil(paquet: Paquet, native_tools: bool, codex: bool = False) -> Dict[str, Any]:
+def schema_outil(paquet: Paquet, native_tools: bool, codex: bool = False,
+                 attente_s: Optional[float] = None) -> Dict[str, Any]:
+    delai = TIMEOUT_TEXTE + (ATTENTE_TEXTE.format(int(attente_s)) if attente_s is not None else "")
     properties: Dict[str, Any] = {
         "code": {"type": "string", "description": "Python code; the value of the last expression is shown."},
-        "timeout_s": {"type": "integer", "description": TIMEOUT_TEXTE, "minimum": 1, "maximum": TIMEOUT_MAX},
+        "timeout_s": {"type": "integer", "description": delai, "minimum": 1, "maximum": TIMEOUT_MAX},
     }
     if native_tools:
         # Older packs have the same persistent Python API but only a Claude-specific guide.
@@ -271,6 +309,7 @@ class Serveur:
         self.antigravity = antigravity
         self.codex_client = codex
         self.native_tools = antigravity or codex
+        self.attente_claude = attente_du_client(env)
         owner, root = env.get(OWNER, ""), env.get(PLUGINS)
         self.native_readiness = (Readiness(root, int(owner))
                                  if antigravity and root and owner.isdecimal() and len(owner) < 12 else None)
@@ -366,12 +405,18 @@ class Serveur:
         log.warning("clé refusée par le service : la clé suivante prend le relais")
         return True
 
+    @property
+    def attente_s(self) -> Optional[float]:
+        """Borne d'un appel chez le client : celle de Claude Code, jamais pour Codex ni Antigravity (lancés depuis une
+        session Claude Code, ils en héritent les variables)."""
+        return None if self.native_tools else self.attente_claude
+
     def outils(self) -> List[Dict[str, Any]]:
         """Les outils proposés maintenant : `agir` avec le paquet (sur un système où le noyau tourne, POSIX ou
         Windows), `compte` avec le lien (paquet reçu ou non)."""
         with self.etat:
             paquet = self.paquet
-        outils = [schema_outil(paquet, self.native_tools, self.codex_client)] if paquet is not None and NOYAU_POSSIBLE else []
+        outils = [schema_outil(paquet, self.native_tools, self.codex_client, self.attente_s)] if paquet is not None and NOYAU_POSSIBLE else []
         if self.lien() is not None:
             outils.append(schema_compte())
         return outils
@@ -414,9 +459,10 @@ class Serveur:
             poste.dernier = time.monotonic()
 
     def liberer_en_trop(self, garde: str) -> None:
-        """Au-delà du plafond, arrête les noyaux des sous-agents inactifs, le plus ancien d'abord (verrou tenu)."""
+        """Au-delà du plafond, arrête les noyaux des sous-agents inactifs, le plus ancien d'abord (verrou tenu) ; une
+        cellule qui a rendu la main et tourne encore (`Noyau.rendue`) n'est pas inactive."""
         libres = sorted((poste.dernier, agent) for agent, poste in self.postes.items()
-                        if agent not in (garde, PRINCIPAL) and poste.appels == 0)
+                        if agent not in (garde, PRINCIPAL) and poste.appels == 0 and not poste.noyau.rendue)
         while len(self.postes) > self.noyaux_max and libres:
             _, agent = libres.pop(0)
             self.postes.pop(agent).noyau.arreter()
@@ -440,16 +486,24 @@ class Serveur:
         code = arguments.get("code")
         if not isinstance(code, str):
             return self.texte(ident, "missing `code` argument (text)", erreur=True)
+        arrivee = time.monotonic()
         delai = arguments.get("timeout_s", TIMEOUT_DEFAUT)
         delai = min(max(delai, 1), TIMEOUT_MAX) if isinstance(delai, int) and not isinstance(delai, bool) else TIMEOUT_DEFAUT
         poste, libere = self.prendre(agent_de(arguments), dossier_de(arguments, self.cwd))
         try:
-            with poste.verrou:
+            # Le temps passé à attendre un autre appel du même agent compte dans celui que le client laisse.
+            borne = self.attente_s
+            if not poste.verrou.acquire(timeout=-1 if borne is None else borne):
+                return self.texte(ident, OCCUPE, erreur=False)
+            try:
                 prefixe = LIBERE if libere else ""
                 if not poste.demarre:
                     poste.demarre = True
                     prefixe += poste.noyau.demarrer()
-                execution = poste.noyau.executer(code, delai, faits_de(arguments))
+                attente = None if borne is None else borne - (time.monotonic() - arrivee)
+                execution = poste.noyau.executer(code, delai, faits_de(arguments), attente)
+            finally:
+                poste.verrou.release()
         except OSError:
             self.antigravity_ready(False)
             raise
